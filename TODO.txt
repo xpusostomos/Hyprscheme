@@ -1,0 +1,113 @@
+Hyprscheme TODO — missing Scheme API, compiled from the wiki conversion
+(Sept 2026). Every entry was hit while writing the Scheme wiki; page
+references point into Hyprscheme.wiki. Suggested hl- names are proposals.
+
+== 1. CONFIG API (the big one — most wiki pages blocked on it) ==
+hl-config — set config options from Scheme: nested form and flat
+  ("path.option" = value) form; runtime changes from hyprctl scheme.
+  Needed by: config-options, animations, dwindle/master/scrolling-layout,
+  performance, tearing, xwayland, permissions (enforce_permissions), device
+  binds (drag_threshold), custom-layouts (layout selection!).
+  Companion read side: hl-config-get ("general:gaps_in" etc.) — needed for
+  option-aware binds (see code-snippets "smart gaps", "toggle animations").
+hl-monitor — monitor rules: mode (incl. modeline strings), scale,
+  position, transform, reserved area, colors (cm/sdr_eotf/bitdepth/icc/
+  sdrbrightness/sdrsaturation), mirror, vrr, disabled, HEADLESS outputs.
+  Needed by: monitors + 4 sub-pages, performance, virtual-gpu, xwayland.
+hl-animation / hl-curve — animation + bezier/spring curve
+  declarations. Needed by: animations page.
+hl-permission — permission rules (binary/type/mode regexes).
+  Needed by: permissions page.
+
+== 2. DISPATCHER SURFACE (the general "do things" layer) ==
+Scheme has no dispatch concept; the whole hl.dsp.* catalog is missing.
+High-value first (everyday tiling):
+  - hl-focus-workspace (focus workspace by name/number) — *key* for binds;
+    currently impossible (window-rules, device-binds-mouse, code-snippets)
+  - hl-focus-direction / hl-focus-monitor / hl-focus-last / hl-focus-urgent
+  - hl-window-move-direction (directional window move)
+  - hl-window-cycle-next / cycle-prev, swap (next/prev/direction/target)
+  - hl-window-resize / hl-window-move (by px, relative), hl-window-center
+  - hl-window-fullscreen with explicit action/mode (extend existing toggles)
+  - hl-window-float with explicit set/unset (extend existing toggle)
+  - hl-layout-msg (SEND a layout message — needed by every builtin layout
+    page: dwindle/master/scrolling binds, custom-layouts "wider/narrower")
+  - hl-window-pin, hl-window-tag/clear-tags, hl-window-set-prop
+  - hl-window-pseudo, hl-window-toggle-swallow, hl-window-alter-zorder
+  - hl-window-kill, hl-window-signal, hl-window-fullscreen-state
+  - group API: hl-group-toggle/next/prev/active/move-window/lock (+ lock
+    active), into/out-of-group moves, deny-from-group
+  - workspace API: rename, move-to-monitor, change-id, swap-monitors,
+    toggle-special
+  - cursor: hl-cursor-move, hl-cursor-move-to-corner
+  - misc: hl-exit, hl-reload-config, hl-dpms, hl-pass, hl-send-shortcut,
+    hl-send-key-state, hl-event (socket2), hl-global (D-Bus shortcuts),
+    hl-force-idle, hl-force-renderer-reload, hl-release-input-capture
+  - interactive drag/resize for mouse binds: hl-drag / hl-resize
+    (bind-gestures, device-binds-mouse/touchpad)
+
+== 3. RULES API ==
+  - hl-window-rule / hl-workspace-rule / hl-layer-rule (named + anonymous,
+    match/effect model) — rules, window-rules, workspace-rules, layer-rules
+  - rule handles: set-enabled / enabled? on named rules
+  - layout_opts (per-workspace layout options), on_created_empty exec
+  - scrolling_width window rule (scrolling-layout)
+
+== 4. EVENTS ==
+Only 4 exist (window open/close, workspace-active, submap). Missing:
+  - hyprland.start / hyprland.shutdown — CRITICAL for run-once autostart
+    (top-level forms re-run on every reload today) and session cleanup
+    (systemd, virtual-gpu autostart)
+  - window.title / window.class / window.active / window.urgent /
+    window.fullscreen / window.pin / window.move_to_workspace /
+    window.minimize / window.destroy / window.open_early / window.kill /
+    window.bell / window.update_rules
+  - monitor.added/removed/focused/layout_changed
+  - workspace.created/removed/move_to_monitor/special_active
+  - config.reloaded (expose to user code), config.unload, config.props_refreshed
+  - layer.opened/closed, screenshare.state, input.keyboard.key (low)
+
+== 5. QUERIES / SELECTORS ==
+  - Window selector system (upstream window selectors as strings: class:foo,
+    title:bar, pid:N, address:...) — underlies many dispatcher calls
+  - hl-active-workspace, hl-workspace-info (object w/ properties),
+    hl-active-special-workspace, hl-last-window, hl-last-workspace,
+    hl-urgent-window, hl-workspace-windows (by selector)
+  - Monitor OBJECTS (position, scale, mode, focused, active workspace) —
+    scheme only returns names today; hl-monitor-at, hl-monitor-at-cursor,
+    hl-active-monitor
+  - hl-layers, hl-version, hl-is-key-down, hl-loaded-plugins
+  - hl-window-fullscreen-handler (which handler a window uses)
+
+== 6. BINDS / SUBMAPS ==
+  - 'submap-universal bind option (bind active in every submap)
+  - auto-chain submap: optional follow-up arg to hl-submap (next submap or
+    reset after a dispatch)
+  - exclusive per-device binds ('device-inclusive #f polarity)
+  - gestures: hl-gesture API + live gesture callbacks (whole page gap)
+
+== 7. TIMERS ==
+  - timer handles with enable/disable + enabled? (pausable named timers;
+    the state-flag workaround works but is clunky)
+
+== 8. NOTIFICATIONS ==
+  - hl-notify (text/timeout/icon/color/font-size); hyprctl notify via
+    hl-exec is the workaround documented in the wiki
+
+== 9. EXEC ==
+  - exec-with-rules (spawn with window-rule effects, e.g. float a spawned
+    game window) — dispatchers, window-rules, code-snippets
+  - hl-exec-raw (no sh -c)
+
+== 10. TOOLING ==
+  - Watchdog for scheme callbacks (infinite loop in a bind/layout freezes
+    the compositor — upstream Lua has per-callback timeouts) — core wiki page
+  - Interactive REPL (hyprctl repl equivalent; hyprctl scheme is one-shot)
+  - Editor integration notes: a scheme stub/skeleton for completion parity
+    with upstream's Lua stubs (naming-conventions mentions plain editors)
+
+== 11. VERIFY ==
+  - hl-window-move-to-workspace with special workspaces ("special:magic")
+  - mouse binds without the 'mouse flag (does the "mouse:272" key prefix
+    imply the flag natively, or must 'mouse #t always be passed?)
+  - hl-exec argument splitting (does it sh -c or execvp-split?)

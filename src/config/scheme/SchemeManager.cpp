@@ -25,6 +25,8 @@
 #include <src/state/workspace/Resolver.hpp>
 #include <src/workspace/HLWorkspace.hpp>
 #include <src/config/shared/actions/ConfigActions.hpp>
+#include <src/helpers/math/Direction.hpp>
+#include <src/input/Keys.hpp>
 #include <src/config/ConfigValue.hpp>
 #include <src/ipc/s1/S1.hpp>
 
@@ -298,6 +300,83 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-window-pinned (foreign-procedure "hl-scheme-window-pinned" (int) int))
 (define c-hl-window-initial-class (foreign-procedure "hl-scheme-window-initial-class" (int) scheme-object))
 (define c-hl-window-initial-title (foreign-procedure "hl-scheme-window-initial-title" (int) scheme-object))
+
+;; ---- actions: the dispatcher surface (window id -1 = active window) --------
+(define c-hl-focus-workspace (foreign-procedure "hl-scheme-focus-workspace" (string) int))
+(define c-hl-focus-direction (foreign-procedure "hl-scheme-focus-direction" (string) int))
+(define c-hl-focus-monitor (foreign-procedure "hl-scheme-focus-monitor" (string) int))
+(define c-hl-focus-last (foreign-procedure "hl-scheme-focus-last" () int))
+(define c-hl-focus-urgent (foreign-procedure "hl-scheme-focus-urgent" () int))
+(define c-hl-window-move-direction (foreign-procedure "hl-scheme-window-move-direction" (int string) int))
+(define c-hl-window-swap-direction (foreign-procedure "hl-scheme-window-swap-direction" (int string) int))
+(define c-hl-window-swap-next (foreign-procedure "hl-scheme-window-swap-next" (int int) int))
+(define c-hl-window-swap-with (foreign-procedure "hl-scheme-window-swap-with" (int int) int))
+(define c-hl-window-float-act (foreign-procedure "hl-scheme-window-float-act" (int int) int))
+(define c-hl-window-cycle (foreign-procedure "hl-scheme-window-cycle" (int int int) int))
+(define c-hl-window-center (foreign-procedure "hl-scheme-window-center" (int) int))
+(define c-hl-window-resize-px (foreign-procedure "hl-scheme-window-resize-px" (int double double int) int))
+(define c-hl-window-move-px (foreign-procedure "hl-scheme-window-move-px" (int double double int) int))
+(define c-hl-window-pin-act (foreign-procedure "hl-scheme-window-pin-act" (int int) int))
+(define c-hl-window-pseudo (foreign-procedure "hl-scheme-window-pseudo" (int int) int))
+(define c-hl-window-kill (foreign-procedure "hl-scheme-window-kill" (int) int))
+(define c-hl-window-signal (foreign-procedure "hl-scheme-window-signal" (int int) int))
+(define c-hl-window-zorder (foreign-procedure "hl-scheme-window-zorder" (int string) int))
+(define c-hl-window-set-prop (foreign-procedure "hl-scheme-window-set-prop" (int string string) int))
+(define c-hl-window-tag (foreign-procedure "hl-scheme-window-tag" (int string) int))
+(define c-hl-window-clear-tags (foreign-procedure "hl-scheme-window-clear-tags" (int) int))
+(define c-hl-toggle-swallow (foreign-procedure "hl-scheme-toggle-swallow" () int))
+(define c-hl-group-toggle (foreign-procedure "hl-scheme-group-toggle" (int) int))
+(define c-hl-group-cycle (foreign-procedure "hl-scheme-group-cycle" (int int) int))
+(define c-hl-group-index (foreign-procedure "hl-scheme-group-index" (int int) int))
+(define c-hl-group-move-window (foreign-procedure "hl-scheme-group-move-window" (int int) int))
+(define c-hl-group-lock (foreign-procedure "hl-scheme-group-lock" (int) int))
+(define c-hl-group-lock-active (foreign-procedure "hl-scheme-group-lock-active" (int) int))
+(define c-hl-window-into-group (foreign-procedure "hl-scheme-window-into-group" (int string) int))
+(define c-hl-window-out-of-group (foreign-procedure "hl-scheme-window-out-of-group" (int string) int))
+(define c-hl-window-into-or-create-group (foreign-procedure "hl-scheme-window-into-or-create-group" (int string) int))
+(define c-hl-window-deny-from-group (foreign-procedure "hl-scheme-window-deny-from-group" (int int) int))
+(define c-hl-workspace-rename (foreign-procedure "hl-scheme-workspace-rename" (string string) int))
+(define c-hl-workspace-move-monitor (foreign-procedure "hl-scheme-workspace-move-monitor" (string string) int))
+(define c-hl-workspace-toggle-special (foreign-procedure "hl-scheme-workspace-toggle-special" (string) int))
+(define c-hl-workspace-swap-monitors (foreign-procedure "hl-scheme-workspace-swap-monitors" (string string) int))
+(define c-hl-cursor-move (foreign-procedure "hl-scheme-cursor-move" (double double) int))
+(define c-hl-cursor-corner (foreign-procedure "hl-scheme-cursor-corner" (int int) int))
+(define c-hl-exit (foreign-procedure "hl-scheme-exit" () int))
+(define c-hl-reload-config (foreign-procedure "hl-scheme-reload-config" () int))
+(define c-hl-force-renderer-reload (foreign-procedure "hl-scheme-force-renderer-reload" () int))
+(define c-hl-dpms (foreign-procedure "hl-scheme-dpms" (int string) int))
+(define c-hl-force-idle (foreign-procedure "hl-scheme-force-idle" (double) int))
+(define c-hl-global (foreign-procedure "hl-scheme-global" (string) int))
+(define c-hl-event (foreign-procedure "hl-scheme-event" (string) int))
+(define c-hl-pass (foreign-procedure "hl-scheme-pass" (int) int))
+(define c-hl-send-shortcut (foreign-procedure "hl-scheme-send-shortcut" (int int int) int))
+(define c-hl-send-key-state (foreign-procedure "hl-scheme-send-key-state" (int int int int) int))
+(define c-hl-mouse (foreign-procedure "hl-scheme-mouse" (string) int))
+(define c-hl-release-input-capture (foreign-procedure "hl-scheme-release-input-capture" () int))
+(define c-hl-window-fullscreen-state (foreign-procedure "hl-scheme-window-fullscreen-state" (int int int int) int))
+(define c-hl-layout-message (foreign-procedure "hl-scheme-layout-message" (string) int))
+
+;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
+;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
+(define (hl--wid w)
+  (if w (hl-window-id w) -1))
+
+(define (hl--togact a)
+  (case a
+    ((toggle) 0)
+    ((on enable) 1)
+    ((off disable) 2)
+    ((#f) 0)
+    (else (if (number? a) a 0))))
+
+(define (hl--dir d)
+  (if (symbol? d) (symbol->string d) d))
+
+;; names/tags/props accept symbols or strings (numbers become strings)
+(define (hl--str s)
+  (cond ((symbol? s) (symbol->string s))
+        ((number? s) (number->string s))
+        (else s)))
 (define c-hl-window-x11 (foreign-procedure "hl-scheme-window-x11" (int) int))
 
 (define (hl--register id thunk)
@@ -438,18 +517,209 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-focus w)
   (= 0 (c-hl-window-focus (hl-window-id w))))
 
-(define (hl-window-float w)
-  (= 0 (c-hl-window-float (hl-window-id w))))
+;; act: 'toggle (default), 'on, 'off
+(define (hl-window-float w . opt)
+  (= 0 (c-hl-window-float-act (hl--wid w) (hl--togact (if (null? opt) 'toggle (car opt))))))
 
 (define (hl-window-move-to-workspace w name)
-  (= 0 (c-hl-window-move-to-workspace (hl-window-id w) name)))
+  (= 0 (c-hl-window-move-to-workspace (hl--wid w) (hl--str name))))
+
+;; ---- actions: navigation and geometry --------------------------------------
+;; directions: "l"/"r"/"u"/"d" or 'left/'right/'up/'down. Window args accept
+;; a handle or #f (= active window). Action results: #t on success, #f on
+;; rejection (message in the compositor log).
+
+(define (hl-focus-workspace name)
+  (= 0 (c-hl-focus-workspace (hl--str name))))
+
+(define (hl-focus-direction dir)
+  (= 0 (c-hl-focus-direction (hl--dir dir))))
+
+(define (hl-focus-monitor name)
+  (= 0 (c-hl-focus-monitor (hl--str name))))
+
+(define (hl-focus-last)
+  (= 0 (c-hl-focus-last)))
+
+(define (hl-focus-urgent)
+  (= 0 (c-hl-focus-urgent)))
+
+(define (hl-window-move-dir w dir)
+  (= 0 (c-hl-window-move-direction (hl--wid w) (hl--dir dir))))
+
+(define (hl-window-swap-dir w dir)
+  (= 0 (c-hl-window-swap-direction (hl--wid w) (hl--dir dir))))
+
+;; prev: 'prev or #t swaps backwards
+(define (hl-window-swap-next w . opt)
+  (= 0 (c-hl-window-swap-next (hl--wid w) (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 (if (car opt) 1 0))))))
+
+(define (hl-window-swap-with w other)
+  (= 0 (c-hl-window-swap-with (hl--wid w) (hl-window-id other))))
+
+;; opts: 'prev, 'tiled, 'floating (combinable symbols)
+(define (hl-window-cycle . opt)
+  (let loop ((rest opt) (next 1) (filter 0))
+    (cond ((null? rest)
+           (= 0 (c-hl-window-cycle -1 next filter)))
+          ((eq? (car rest) 'prev) (loop (cdr rest) 0 filter))
+          ((eq? (car rest) 'tiled) (loop (cdr rest) next 1))
+          ((eq? (car rest) 'floating) (loop (cdr rest) next 2))
+          (else (loop (cdr rest) next filter)))))
+
+(define (hl-window-center w)
+  (= 0 (c-hl-window-center (hl--wid w))))
+
+;; absolute by default; 'relative (or 'rel) makes the deltas relative
+(define (hl-window-resize w width height . opt)
+  (= 0 (c-hl-window-resize-px (hl--wid w) (exact->inexact width) (exact->inexact height)
+         (if (null? opt) 0 (if (memq (car opt) '(relative rel)) 1 0)))))
+
+(define (hl-window-move-px w x y . opt)
+  (= 0 (c-hl-window-move-px (hl--wid w) (exact->inexact x) (exact->inexact y)
+         (if (null? opt) 0 (if (memq (car opt) '(relative rel)) 1 0)))))
+
+(define (hl-window-pin w . opt)
+  (= 0 (c-hl-window-pin-act (hl--wid w) (hl--togact (if (null? opt) 'toggle (car opt))))))
+
+(define (hl-window-pseudo w . opt)
+  (= 0 (c-hl-window-pseudo (hl--wid w) (hl--togact (if (null? opt) 'toggle (car opt))))))
+
+(define (hl-window-kill w)
+  (= 0 (c-hl-window-kill (hl--wid w))))
+
+(define (hl-window-signal w sig)
+  (= 0 (c-hl-window-signal (hl--wid w) sig)))
+
+;; mode: "up" | "down" | "top" | "bottom" (alterZOrder mode string)
+(define (hl-window-zorder w mode)
+  (= 0 (c-hl-window-zorder (hl--wid w) (hl--str mode))))
+
+(define (hl-window-set-prop w prop val)
+  (= 0 (c-hl-window-set-prop (hl--wid w) (hl--str prop) (hl--str val))))
+
+(define (hl-window-tag w tag)
+  (= 0 (c-hl-window-tag (hl--wid w) (hl--str tag))))
+
+(define (hl-window-clear-tags w)
+  (= 0 (c-hl-window-clear-tags (hl--wid w))))
+
+(define (hl-window-toggle-swallow)
+  (= 0 (c-hl-toggle-swallow)))
+
+;; ---- actions: groups --------------------------------------------------------
+
+(define (hl-group-toggle w)
+  (= 0 (c-hl-group-toggle (hl--wid w))))
+
+(define (hl-group-cycle w . opt)
+  (= 0 (c-hl-group-cycle (hl--wid w) (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 0)))))
+
+(define (hl-group-index w index)
+  (= 0 (c-hl-group-index (hl--wid w) index)))
+
+(define (hl-group-move-window w . opt)
+  (= 0 (c-hl-group-move-window (hl--wid w) (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 0)))))
+
+;; act: 'toggle/'on/'off
+(define (hl-group-lock act)
+  (= 0 (c-hl-group-lock (hl--togact act))))
+
+(define (hl-group-lock-active act)
+  (= 0 (c-hl-group-lock-active (hl--togact act))))
+
+(define (hl-window-into-group w dir)
+  (= 0 (c-hl-window-into-group (hl--wid w) (hl--dir dir))))
+
+(define (hl-window-out-of-group w dir)
+  (= 0 (c-hl-window-out-of-group (hl--wid w) (hl--dir dir))))
+
+(define (hl-window-into-or-create-group w dir)
+  (= 0 (c-hl-window-into-or-create-group (hl--wid w) (hl--dir dir))))
+
+(define (hl-window-deny-from-group w . opt)
+  (= 0 (c-hl-window-deny-from-group (hl--wid w)
+         (hl--togact (if (null? opt) 'toggle (car opt))))))
+
+;; ---- actions: workspaces and monitors ---------------------------------------
+
+(define (hl-workspace-rename old-name new-name)
+  (= 0 (c-hl-workspace-rename (hl--str old-name) (hl--str new-name))))
+
+(define (hl-workspace-move-to-monitor ws mon)
+  (= 0 (c-hl-workspace-move-monitor (hl--str ws) (hl--str mon))))
+
+(define (hl-workspace-toggle-special name)
+  (= 0 (c-hl-workspace-toggle-special (hl--str name))))
+
+(define (hl-workspace-swap-monitors mon1 mon2)
+  (= 0 (c-hl-workspace-swap-monitors (hl--str mon1) (hl--str mon2))))
+
+;; ---- actions: cursor and misc -----------------------------------------------
+
+(define (hl-cursor-move x y)
+  (= 0 (c-hl-cursor-move (exact->inexact x) (exact->inexact y))))
+
+(define (hl-cursor-corner w corner)
+  (= 0 (c-hl-cursor-corner (hl--wid w) corner)))
+
+;; DANGER: quits Hyprland
+(define (hl-exit)
+  (= 0 (c-hl-exit)))
+
+(define (hl-reload-config)
+  (= 0 (c-hl-reload-config)))
+
+(define (hl-force-renderer-reload)
+  (= 0 (c-hl-force-renderer-reload)))
+
+;; act: 'toggle/'on/'off; mon: #f (all) or a monitor name
+(define (hl-dpms act . mon)
+  (= 0 (c-hl-dpms (hl--togact act) (if (null? mon) "" (hl--str (car mon))))))
+
+(define (hl-force-idle seconds)
+  (= 0 (c-hl-force-idle (exact->inexact seconds))))
+
+(define (hl-global action)
+  (= 0 (c-hl-global (hl--str action))))
+
+(define (hl-event data)
+  (= 0 (c-hl-event (hl--str data))))
+
+(define (hl-pass w)
+  (= 0 (c-hl-pass (hl--wid w))))
+
+;; mods: mask int (SHIFT 1 CAPS 2 CTRL 4 ALT 8 MOD2 16 MOD3 32 META 64 MOD5 128)
+;; key: xkb keycode
+(define (hl-send-shortcut mods key . w)
+  (= 0 (c-hl-send-shortcut mods key (if (null? w) -1 (hl--wid (car w))))))
+
+(define (hl-send-key-state mods key state . w)
+  (= 0 (c-hl-send-key-state mods key state (if (null? w) -1 (hl--wid (car w))))))
+
+;; interactive drag/resize for mouse binds: (hl-mouse "drag") / (hl-mouse "resize")
+(define (hl-mouse action)
+  (= 0 (c-hl-mouse (hl--str action))))
+
+(define (hl-release-input-capture)
+  (= 0 (c-hl-release-input-capture)))
+
+;; send a message to the active workspace's layout (see custom-layouts)
+(define (hl-layout-msg msg)
+  (= 0 (c-hl-layout-message (hl--str msg))))
 
 ;; toggles; modes mirror Fullscreen::eFullscreenMode (1 maximized, 2 fullscreen)
-(define (hl-window-fullscreen w)
-  (= 0 (c-hl-window-fullscreen-toggle (hl-window-id w) 2)))
+;; optional second arg = mode (default 2); (hl-window-fullscreen w 1) maximizes
+(define (hl-window-fullscreen w . opt)
+  (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) (if (null? opt) 2 (car opt)))))
 
 (define (hl-window-maximize w)
-  (= 0 (c-hl-window-fullscreen-toggle (hl-window-id w) 1)))
+  (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) 1)))
+
+;; explicit state: (internal-mode client-mode layout-aware?) — modes 0/1/2
+(define (hl-window-fullscreen-state w internal client . layout-aware)
+  (= 0 (c-hl-window-fullscreen-state (hl--wid w) internal client
+         (if (null? layout-aware) 0 (if (car layout-aware) 1 0)))))
 
 ;; 0 = none, 1 = maximized, 2 = fullscreen, -1 = stale
 (define (hl-window-fullscreen-mode w)
@@ -986,6 +1256,411 @@ namespace Config::Scheme {
         return (window && (window->m_state & Desktop::View::WINDOW_STATE_PINNED)) ? 1 : 0;
     }
 
+    // ---- actions: the dispatcher surface --------------------------------------
+    // Each handler wraps one Config::Actions call — the same layer the Lua
+    // hl.dsp.* dispatchers use. Window args take a scheme handle id, or -1
+    // for the active window.
+
+    static std::optional<PHLWINDOW> actionWindow(int id) {
+        if (id >= 0)
+            return windowFromId(id);
+        return Desktop::focusState()->window();
+    }
+
+    static int actionResult(const char* name, Config::Actions::ActionResult result) {
+        if (result)
+            return 0;
+        LOG(Log::ERR, "[scheme] {} failed: {}", name, result.error().message);
+        return -2;
+    }
+
+    static Math::eDirection actionDir(const char* s) {
+        return Math::fromChar(s && *s ? s[0] : 'x');
+    }
+
+    static PHLMONITOR monitorFromName(const char* name) {
+        if (!name || !*name)
+            return nullptr;
+        for (const auto& m : State::monitorState()->monitors())
+            if (m->m_name == name)
+                return m;
+        return nullptr;
+    }
+
+    static PHLWORKSPACE workspaceFromName(const char* name) {
+        if (!name || !*name)
+            return nullptr;
+        return State::Workspace::state()->query().input(std::string(name)).run();
+    }
+
+    static int hlSchemeFocusWorkspace(const char* ws) {
+        if (!g_up)
+            return -1;
+        return actionResult("focus-workspace", Config::Actions::changeWorkspace(std::string(ws ? ws : "")));
+    }
+
+    static int hlSchemeFocusDirection(const char* dir) {
+        if (!g_up)
+            return -1;
+        return actionResult("focus-direction", Config::Actions::moveFocus(actionDir(dir)));
+    }
+
+    static int hlSchemeFocusMonitor(const char* name) {
+        if (!g_up)
+            return -1;
+        const auto mon = monitorFromName(name);
+        if (!mon) {
+            LOG(Log::ERR, "[scheme] focus-monitor: no monitor named {}", name ? name : "");
+            return -1;
+        }
+        return actionResult("focus-monitor", Config::Actions::focusMonitor(mon));
+    }
+
+    static int hlSchemeFocusLast() {
+        if (!g_up)
+            return -1;
+        return actionResult("focus-last", Config::Actions::focusCurrentOrLast());
+    }
+
+    static int hlSchemeFocusUrgent() {
+        if (!g_up)
+            return -1;
+        return actionResult("focus-urgent", Config::Actions::focusUrgentOrLast());
+    }
+
+    static int hlSchemeWindowMoveDirection(int id, const char* dir) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-move-direction", Config::Actions::moveInDirection(actionDir(dir), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowSwapDirection(int id, const char* dir) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-swap-direction", Config::Actions::swapInDirection(actionDir(dir), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowSwapNext(int id, int prev) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-swap-next", Config::Actions::swapNext(prev == 0, actionWindow(id)));
+    }
+
+    static int hlSchemeWindowSwapWith(int id, int otherId) {
+        if (!g_up)
+            return -1;
+        const auto other = windowFromId(otherId);
+        if (!other)
+            return -1;
+        return actionResult("window-swap-with", Config::Actions::swapWith(other, actionWindow(id)));
+    }
+
+    // filter: 0 = all, 1 = tiled only, 2 = floating only
+    static int hlSchemeWindowCycle(int id, int next, int filter) {
+        if (!g_up)
+            return -1;
+        std::optional<bool> tiled, floating;
+        if (filter == 1)
+            tiled = true;
+        else if (filter == 2)
+            floating = true;
+        return actionResult("window-cycle", Config::Actions::cycleNext(next != 0, tiled, floating, actionWindow(id)));
+    }
+
+    static int hlSchemeWindowCenter(int id) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-center", Config::Actions::center(actionWindow(id)));
+    }
+
+    static int hlSchemeWindowResizePx(int id, double w, double h, int relative) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-resize", Config::Actions::resize(Vector2D{w, h}, relative != 0, actionWindow(id)));
+    }
+
+    static int hlSchemeWindowMovePx(int id, double x, double y, int relative) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-move", Config::Actions::move(Vector2D{x, y}, relative != 0, actionWindow(id)));
+    }
+
+    // act: 0 = toggle, 1 = on, 2 = off
+    static int hlSchemeWindowFloatAct(int id, int act) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-float", Config::Actions::floatWindow(sc<Config::Actions::eTogglableAction>(act), actionWindow(id)));
+    }
+
+    // act: 0 = toggle, 1 = on, 2 = off
+    static int hlSchemeWindowPinAct(int id, int act) {        if (!g_up)
+            return -1;
+        return actionResult("window-pin", Config::Actions::pinWindow(sc<Config::Actions::eTogglableAction>(act), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowPseudo(int id, int act) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-pseudo", Config::Actions::pseudoWindow(sc<Config::Actions::eTogglableAction>(act), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowKill(int id) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-kill", Config::Actions::killWindow(actionWindow(id)));
+    }
+
+    static int hlSchemeWindowSignal(int id, int sig) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-signal", Config::Actions::signalWindow(sig, actionWindow(id)));
+    }
+
+    static int hlSchemeWindowZOrder(int id, const char* mode) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-zorder", Config::Actions::alterZOrder(std::string(mode ? mode : ""), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowSetProp(int id, const char* prop, const char* val) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-set-prop", Config::Actions::setProp(std::string(prop ? prop : ""), std::string(val ? val : ""), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowTag(int id, const char* tag) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-tag", Config::Actions::tag(std::string(tag ? tag : ""), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowClearTags(int id) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-clear-tags", Config::Actions::clearTags(actionWindow(id)));
+    }
+
+    static int hlSchemeToggleSwallow() {
+        if (!g_up)
+            return -1;
+        return actionResult("toggle-swallow", Config::Actions::toggleSwallow());
+    }
+
+    static int hlSchemeGroupToggle(int id) {
+        if (!g_up)
+            return -1;
+        return actionResult("group-toggle", Config::Actions::toggleGroup(actionWindow(id)));
+    }
+
+    static int hlSchemeGroupCycle(int id, int prev) {
+        if (!g_up)
+            return -1;
+        return actionResult("group-cycle", Config::Actions::changeGroupActive(prev == 0, actionWindow(id)));
+    }
+
+    static int hlSchemeGroupIndex(int id, int index) {
+        if (!g_up)
+            return -1;
+        return actionResult("group-index", Config::Actions::setGroupActive(index, actionWindow(id)));
+    }
+
+    static int hlSchemeGroupMoveWindow(int id, int prev) {
+        if (!g_up)
+            return -1;
+        return actionResult("group-move-window", Config::Actions::moveGroupWindow(prev == 0));
+    }
+
+    static int hlSchemeGroupLock(int act) {
+        if (!g_up)
+            return -1;
+        return actionResult("group-lock", Config::Actions::lockGroups(sc<Config::Actions::eTogglableAction>(act)));
+    }
+
+    static int hlSchemeGroupLockActive(int act) {
+        if (!g_up)
+            return -1;
+        return actionResult("group-lock-active", Config::Actions::lockActiveGroup(sc<Config::Actions::eTogglableAction>(act)));
+    }
+
+    static int hlSchemeWindowIntoGroup(int id, const char* dir) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-into-group", Config::Actions::moveIntoGroup(actionDir(dir), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowOutOfGroup(int id, const char* dir) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-out-of-group", Config::Actions::moveOutOfGroup(actionDir(dir), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowIntoOrCreateGroup(int id, const char* dir) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-into-or-create-group", Config::Actions::moveIntoOrCreateGroup(actionDir(dir), actionWindow(id)));
+    }
+
+    static int hlSchemeWindowDenyFromGroup(int id, int act) {
+        if (!g_up)
+            return -1;
+        return actionResult("window-deny-from-group", Config::Actions::denyWindowFromGroup(sc<Config::Actions::eTogglableAction>(act)));
+    }
+
+    static int hlSchemeWorkspaceRename(const char* oldName, const char* newName) {
+        if (!g_up)
+            return -1;
+        const auto ws = workspaceFromName(oldName);
+        if (!ws) {
+            LOG(Log::ERR, "[scheme] workspace-rename: no workspace named {}", oldName ? oldName : "");
+            return -1;
+        }
+        return actionResult("workspace-rename", Config::Actions::renameWorkspace(ws, std::string(newName ? newName : "")));
+    }
+
+    static int hlSchemeWorkspaceMoveMonitor(const char* wsName, const char* monName) {
+        if (!g_up)
+            return -1;
+        const auto ws  = workspaceFromName(wsName);
+        const auto mon = monitorFromName(monName);
+        if (!ws || !mon) {
+            LOG(Log::ERR, "[scheme] workspace-move-to-monitor: no workspace named {} or monitor named {}", wsName ? wsName : "", monName ? monName : "");
+            return -1;
+        }
+        return actionResult("workspace-move-to-monitor", Config::Actions::moveToMonitor(ws, mon));
+    }
+
+    static int hlSchemeWorkspaceToggleSpecial(const char* wsName) {
+        if (!g_up)
+            return -1;
+        const auto ws = workspaceFromName(wsName);
+        if (!ws) {
+            LOG(Log::ERR, "[scheme] workspace-toggle-special: no workspace named {}", wsName ? wsName : "");
+            return -1;
+        }
+        return actionResult("workspace-toggle-special", Config::Actions::toggleSpecial(ws));
+    }
+
+    static int hlSchemeWorkspaceSwapMonitors(const char* mon1, const char* mon2) {
+        if (!g_up)
+            return -1;
+        const auto a = monitorFromName(mon1);
+        const auto b = monitorFromName(mon2);
+        if (!a || !b) {
+            LOG(Log::ERR, "[scheme] workspace-swap-monitors: no monitor named {} or {}", mon1 ? mon1 : "", mon2 ? mon2 : "");
+            return -1;
+        }
+        return actionResult("workspace-swap-monitors", Config::Actions::swapActiveWorkspaces(a, b));
+    }
+
+    static int hlSchemeCursorMove(double x, double y) {
+        if (!g_up)
+            return -1;
+        return actionResult("cursor-move", Config::Actions::moveCursor(Vector2D{x, y}));
+    }
+
+    static int hlSchemeCursorCorner(int id, int corner) {
+        if (!g_up)
+            return -1;
+        return actionResult("cursor-move-to-corner", Config::Actions::moveCursorToCorner(corner, actionWindow(id)));
+    }
+
+    static int hlSchemeExit() {
+        if (!g_up)
+            return -1;
+        return actionResult("exit", Config::Actions::exit());
+    }
+
+    static int hlSchemeReloadConfig() {
+        if (!g_up)
+            return -1;
+        return actionResult("reload-config", Config::Actions::reloadConfig());
+    }
+
+    static int hlSchemeForceRendererReload() {
+        if (!g_up)
+            return -1;
+        return actionResult("force-renderer-reload", Config::Actions::forceRendererReload());
+    }
+
+    static int hlSchemeDpms(int act, const char* monName) {
+        if (!g_up)
+            return -1;
+        std::optional<PHLMONITOR> mon;
+        if (monName && *monName) {
+            mon = monitorFromName(monName);
+            if (!mon) {
+                LOG(Log::ERR, "[scheme] dpms: no monitor named {}", monName);
+                return -1;
+            }
+        }
+        return actionResult("dpms", Config::Actions::dpms(sc<Config::Actions::eTogglableAction>(act), mon));
+    }
+
+    static int hlSchemeForceIdle(double seconds) {
+        if (!g_up)
+            return -1;
+        return actionResult("force-idle", Config::Actions::forceIdle(sc<float>(seconds)));
+    }
+
+    static int hlSchemeGlobal(const char* action) {
+        if (!g_up)
+            return -1;
+        return actionResult("global", Config::Actions::global(std::string(action ? action : "")));
+    }
+
+    static int hlSchemeEvent(const char* data) {
+        if (!g_up)
+            return -1;
+        return actionResult("event", Config::Actions::event(std::string(data ? data : "")));
+    }
+
+    static int hlSchemePass(int id) {
+        if (!g_up)
+            return -1;
+        return actionResult("pass", Config::Actions::pass(actionWindow(id)));
+    }
+
+    static int hlSchemeSendShortcut(int mask, int key, int id) {
+        if (!g_up)
+            return -1;
+        return actionResult("send-shortcut", Config::Actions::pass(Input::ModifierMask(sc<Input::eKeyboardModifiers>(mask)), sc<uint32_t>(key), actionWindow(id)));
+    }
+
+    static int hlSchemeSendKeyState(int mask, int key, int state, int id) {
+        if (!g_up)
+            return -1;
+        return actionResult("send-key-state", Config::Actions::sendKeyState(Input::ModifierMask(sc<Input::eKeyboardModifiers>(mask)), sc<uint32_t>(key), sc<uint32_t>(state), actionWindow(id)));
+    }
+
+    static int hlSchemeMouse(const char* action) {
+        if (!g_up)
+            return -1;
+        return actionResult("mouse", Config::Actions::mouse(std::string(action ? action : "")));
+    }
+
+    static int hlSchemeReleaseInputCapture() {
+        if (!g_up)
+            return -1;
+        return actionResult("release-input-capture", Config::Actions::releaseInputCapture());
+    }
+
+    // explicit fullscreen: internal and client modes, layout-aware flag
+    static int hlSchemeWindowFullscreenState(int id, int internalMode, int clientMode, int layoutAware) {
+        if (!g_up)
+            return -1;
+        const auto w = actionWindow(id);
+        if (id >= 0 && !w)
+            return -1;
+        return actionResult("window-fullscreen-state",
+            Config::Actions::fullscreenWindow(sc<Fullscreen::eFullscreenMode>(internalMode), sc<Fullscreen::eFullscreenMode>(clientMode), layoutAware != 0, w));
+    }
+
+    static int hlSchemeLayoutMessage(const char* msg) {
+        if (!g_up)
+            return -1;
+        return actionResult("layout-msg", Config::Actions::layoutMessage(std::string(msg ? msg : "")));
+    }
+
     static ptr hlSchemeWindowInitialClass(int id) {
         if (!g_up)
             return Sfalse;
@@ -1282,6 +1957,59 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-workspace-active-listen", (void*)hlSchemeWorkspaceActiveListen);
         Sregister_symbol("hl-scheme-window-fullscreen-toggle", (void*)hlSchemeWindowFullscreenToggle);
         Sregister_symbol("hl-scheme-window-fullscreen-mode", (void*)hlSchemeWindowFullscreenMode);
+        Sregister_symbol("hl-scheme-focus-workspace", (void*)hlSchemeFocusWorkspace);
+        Sregister_symbol("hl-scheme-window-float-act", (void*)hlSchemeWindowFloatAct);
+        Sregister_symbol("hl-scheme-focus-direction", (void*)hlSchemeFocusDirection);
+        Sregister_symbol("hl-scheme-focus-monitor", (void*)hlSchemeFocusMonitor);
+        Sregister_symbol("hl-scheme-focus-last", (void*)hlSchemeFocusLast);
+        Sregister_symbol("hl-scheme-focus-urgent", (void*)hlSchemeFocusUrgent);
+        Sregister_symbol("hl-scheme-window-move-direction", (void*)hlSchemeWindowMoveDirection);
+        Sregister_symbol("hl-scheme-window-swap-direction", (void*)hlSchemeWindowSwapDirection);
+        Sregister_symbol("hl-scheme-window-swap-next", (void*)hlSchemeWindowSwapNext);
+        Sregister_symbol("hl-scheme-window-swap-with", (void*)hlSchemeWindowSwapWith);
+        Sregister_symbol("hl-scheme-window-cycle", (void*)hlSchemeWindowCycle);
+        Sregister_symbol("hl-scheme-window-center", (void*)hlSchemeWindowCenter);
+        Sregister_symbol("hl-scheme-window-resize-px", (void*)hlSchemeWindowResizePx);
+        Sregister_symbol("hl-scheme-window-move-px", (void*)hlSchemeWindowMovePx);
+        Sregister_symbol("hl-scheme-window-pin-act", (void*)hlSchemeWindowPinAct);
+        Sregister_symbol("hl-scheme-window-pseudo", (void*)hlSchemeWindowPseudo);
+        Sregister_symbol("hl-scheme-window-kill", (void*)hlSchemeWindowKill);
+        Sregister_symbol("hl-scheme-window-signal", (void*)hlSchemeWindowSignal);
+        Sregister_symbol("hl-scheme-window-zorder", (void*)hlSchemeWindowZOrder);
+        Sregister_symbol("hl-scheme-window-set-prop", (void*)hlSchemeWindowSetProp);
+        Sregister_symbol("hl-scheme-window-tag", (void*)hlSchemeWindowTag);
+        Sregister_symbol("hl-scheme-window-clear-tags", (void*)hlSchemeWindowClearTags);
+        Sregister_symbol("hl-scheme-toggle-swallow", (void*)hlSchemeToggleSwallow);
+        Sregister_symbol("hl-scheme-group-toggle", (void*)hlSchemeGroupToggle);
+        Sregister_symbol("hl-scheme-group-cycle", (void*)hlSchemeGroupCycle);
+        Sregister_symbol("hl-scheme-group-index", (void*)hlSchemeGroupIndex);
+        Sregister_symbol("hl-scheme-group-move-window", (void*)hlSchemeGroupMoveWindow);
+        Sregister_symbol("hl-scheme-group-lock", (void*)hlSchemeGroupLock);
+        Sregister_symbol("hl-scheme-group-lock-active", (void*)hlSchemeGroupLockActive);
+        Sregister_symbol("hl-scheme-window-into-group", (void*)hlSchemeWindowIntoGroup);
+        Sregister_symbol("hl-scheme-window-out-of-group", (void*)hlSchemeWindowOutOfGroup);
+        Sregister_symbol("hl-scheme-window-into-or-create-group", (void*)hlSchemeWindowIntoOrCreateGroup);
+        Sregister_symbol("hl-scheme-window-deny-from-group", (void*)hlSchemeWindowDenyFromGroup);
+        Sregister_symbol("hl-scheme-workspace-rename", (void*)hlSchemeWorkspaceRename);
+        Sregister_symbol("hl-scheme-workspace-move-monitor", (void*)hlSchemeWorkspaceMoveMonitor);
+        Sregister_symbol("hl-scheme-workspace-toggle-special", (void*)hlSchemeWorkspaceToggleSpecial);
+        Sregister_symbol("hl-scheme-workspace-swap-monitors", (void*)hlSchemeWorkspaceSwapMonitors);
+        Sregister_symbol("hl-scheme-cursor-move", (void*)hlSchemeCursorMove);
+        Sregister_symbol("hl-scheme-cursor-corner", (void*)hlSchemeCursorCorner);
+        Sregister_symbol("hl-scheme-exit", (void*)hlSchemeExit);
+        Sregister_symbol("hl-scheme-reload-config", (void*)hlSchemeReloadConfig);
+        Sregister_symbol("hl-scheme-force-renderer-reload", (void*)hlSchemeForceRendererReload);
+        Sregister_symbol("hl-scheme-dpms", (void*)hlSchemeDpms);
+        Sregister_symbol("hl-scheme-force-idle", (void*)hlSchemeForceIdle);
+        Sregister_symbol("hl-scheme-global", (void*)hlSchemeGlobal);
+        Sregister_symbol("hl-scheme-event", (void*)hlSchemeEvent);
+        Sregister_symbol("hl-scheme-pass", (void*)hlSchemePass);
+        Sregister_symbol("hl-scheme-send-shortcut", (void*)hlSchemeSendShortcut);
+        Sregister_symbol("hl-scheme-send-key-state", (void*)hlSchemeSendKeyState);
+        Sregister_symbol("hl-scheme-mouse", (void*)hlSchemeMouse);
+        Sregister_symbol("hl-scheme-release-input-capture", (void*)hlSchemeReleaseInputCapture);
+        Sregister_symbol("hl-scheme-window-fullscreen-state", (void*)hlSchemeWindowFullscreenState);
+        Sregister_symbol("hl-scheme-layout-message", (void*)hlSchemeLayoutMessage);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
         Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
