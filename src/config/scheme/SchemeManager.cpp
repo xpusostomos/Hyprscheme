@@ -6,7 +6,13 @@
 #include <src/event/EventBus.hpp>
 #include <src/helpers/memory/Memory.hpp>
 #include <src/keybinds/Manager.hpp>
+// g_pEventLoopManager is an inline variable: each DSO gets its own copy
+// unless references can preempt to the executable's exported (GNU_UNIQUE)
+// instance. -fvisibility=hidden would bind us to a private, forever-null
+// copy — the loop manager is only reachable through unification.
+#pragma GCC visibility push(default)
 #include <src/managers/eventLoop/EventLoopManager.hpp>
+#pragma GCC visibility pop
 #include <src/managers/eventLoop/EventLoopTimer.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/desktop/state/WindowState.hpp>
@@ -1318,27 +1324,22 @@ namespace Config::Scheme {
         signal(SIGABRT, schemeCrashHandler);
 
         // hyprctl scheme '<forms>' — evaluate scheme in the compositor.
-        // defer: mutating the command registry while the compositor
-        // dispatches the plugin-load request itself hangs the loop.
+        // direct registration is safe here: verified working (the deferred
+        // doLater variant never fired its callback).
         if (g_pEventLoopManager && IPC::Socket1::sock())
-            g_pEventLoopManager->doLater([ipcHandle = &g_schemeIpcCommand] {
-                if (!IPC::Socket1::sock())
-                    return;
-                *ipcHandle = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
-                    .name    = "scheme",
-                    .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
-                    .handler = [](const IPC::Socket1::SRequest& req) {
-                        auto code = req.command.substr(req.command.find_first_of(' ') + 1);
-                        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
-                        std::string out;
-                        if (Sstringp(r)) {
-                            for (iptr i = 0; i < Sstring_length(r); ++i)
-                                out += (char)Sstring_ref(r, i);
-                        }
-                        return IPC::Socket1::SResponse(out);
-                    }});
-            });
-
+            g_schemeIpcCommand = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
+                .name    = "scheme",
+                .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+                .handler = [](const IPC::Socket1::SRequest& req) {
+                    auto code = req.command.substr(req.command.find_first_of(' ') + 1);
+                    const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                    std::string out;
+                    if (Sstringp(r)) {
+                        for (iptr i = 0; i < Sstring_length(r); ++i)
+                            out += (char)Sstring_ref(r, i);
+                    }
+                    return IPC::Socket1::SResponse(out);
+                }});
         // watch the file for edits (skipped during --verify: no event loop yet)
         if (g_pEventLoopManager)
             setupWatch();

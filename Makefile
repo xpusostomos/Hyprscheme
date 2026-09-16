@@ -1,23 +1,35 @@
 # Hyprscheme — Chez Scheme scripting for Hyprland, as a plugin.
 #
-#   make build-chez    build a PIC Chez kernel locally (recommended)
-#   make               build the plugin .so
+#   make               build Chez (PIC, in place) and Hyprland (in place) as
+#                      needed, then the plugin — everything where it lives
 #   make install       install plugin + boot files locally
-#   make clean
+#   make install-compositor  also install the compositor as 'hyprland-scheme'
+#   make clean         remove the plugin build products (not chez/hyprland)
 #
-# Selectable inputs:
-#   CHEZ_OUT       where a PIC Chez build already lives (skips build-chez)
-#   HYPRLAND_SRC   Hyprland source tree to compile the plugin against
-#                  (must match the running compositor's version)
-#   PREFIX         install destination (default ~/.local)
+# The two upstream trees, built IN PLACE:
+#   CHEZ_DIR      Chez Scheme checkout (default ../ChezScheme). Built with
+#                 CFLAGS=-fPIC (or the upstream --pic flag when present);
+#                 the plugin consumes its workarea objects + boot files
+#                 directly — no copies, no staging.
+#   HYPRLAND_SRC  Hyprland checkout (default ../Hyprland); built in place in
+#                 <tree>/build. The plugin compiles against those headers
+#                 and links with the compositor built from the SAME tree —
+#                 plugin and compositor must always move together.
+#   PREFIX        install destination (default ~/.local)
 
-HYPRLAND_SRC ?= $(CURDIR)/build/hyprland-src
+CHEZ_DIR ?= $(CURDIR)/../ChezScheme
+HYPRLAND_SRC ?= $(CURDIR)/../Hyprland
 PREFIX ?= $(HOME)/.local
-CHEZ_OUT ?= $(CURDIR)/build/chez
+HYPR_COMMIT ?= c26dbf93
+
+# Chez workarea + boot dir (in the Chez tree, where `make` leaves them)
+CHEZ_WORK ?= $(CHEZ_DIR)/ta6le
+CHEZ_BOOT ?= $(CHEZ_WORK)/boot/ta6le
+CHEZ_KERNEL = $(CHEZ_BOOT)/libkernel.a
 
 CXXFLAGS += -std=c++2b -g -O2 -fPIC -fvisibility=hidden
 INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
-           -I$(CHEZ_OUT) -Isrc/config/scheme \
+           -I$(CHEZ_BOOT) -Isrc/config/scheme \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
 LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz
 
@@ -27,15 +39,41 @@ TARGET = scheme-plugin.so
 
 all: $(TARGET)
 
-# auto-build PIC Chez if not present yet
-$(CHEZ_OUT)/petite.boot:
-	./build-chez.sh
+# ---- Chez (in place) -------------------------------------------------------
+# The workarea's libkernel.a + boot files are the plugin's inputs. chez's own
+# make handles incremental rebuilds; we just depend on its outputs.
 
-$(OBJ) $(TARGET): | $(CHEZ_OUT)/petite.boot
-build-chez: $(CHEZ_OUT)/petite.boot
+$(CHEZ_KERNEL):
+	$(MAKE) -C $(CHEZ_DIR) kernel
 
-$(TARGET): $(OBJ)
-	$(CXX) -shared -fPIC -o $@ $^ $(CHEZ_OUT)/libchez-pic.a $(LIBS)
+$(CHEZ_BOOT)/petite.boot $(CHEZ_BOOT)/scheme.boot: $(CHEZ_KERNEL)
+	$(MAKE) -C $(CHEZ_DIR)
+
+.PHONY: chez
+chez:
+	$(MAKE) -C $(CHEZ_DIR)
+
+# ---- Hyprland (in place) ---------------------------------------------------
+
+$(HYPRLAND_SRC)/build/Hyprland:
+	$(MAKE) hyprland
+
+.PHONY: hyprland
+hyprland:
+	@if [ ! -d "$(HYPRLAND_SRC)" ]; then \
+	    echo "cloning Hyprland at commit $(HYPR_COMMIT)..."; \
+	    git clone https://github.com/hyprwm/Hyprland "$(HYPRLAND_SRC)"; \
+	    git -C "$(HYPRLAND_SRC)" checkout -q $(HYPR_COMMIT); \
+	    git -C "$(HYPRLAND_SRC)" submodule update --init; \
+	fi
+	cmake -B $(HYPRLAND_SRC)/build -S $(HYPRLAND_SRC) -DCMAKE_BUILD_TYPE=Release
+	cmake --build $(HYPRLAND_SRC)/build -j$$(nproc)
+
+# ---- the plugin ------------------------------------------------------------
+
+$(TARGET): $(OBJ) $(CHEZ_KERNEL) | $(CHEZ_BOOT)/petite.boot
+	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(CHEZ_KERNEL) \
+	    $(CHEZ_WORK)/lz4/lib/liblz4.a $(LIBS)
 
 src/plugin-main.o: plugin-main.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
@@ -43,35 +81,21 @@ src/plugin-main.o: plugin-main.cpp
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
+# ---- install ---------------------------------------------------------------
+
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-	install -m 644 $(CHEZ_OUT)/petite.boot $(CHEZ_OUT)/scheme.boot $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 $(CHEZ_BOOT)/petite.boot $(CHEZ_BOOT)/scheme.boot $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	@echo ""
-	@echo "Plugin installed:"
-	@echo "    $(DESTDIR)$(PREFIX)/lib/hyprscheme/scheme-plugin.so"
-	@echo "Load it from a compositor built from the same Hyprland tree:"
+	@echo "Plugin installed: $(DESTDIR)$(PREFIX)/lib/hyprscheme/scheme-plugin.so"
+	@echo "Load into a compositor built from $(HYPRLAND_SRC):"
 	@echo "    hyprctl plugin load $(DESTDIR)$(PREFIX)/lib/hyprscheme/scheme-plugin.so"
-	@echo "or build+install a matching compositor: make install-compositor"
+	@echo "or install a matching compositor: make install-compositor"
 
-# builds the pinned Hyprland tree (HYPRLAND_SRC) and installs its binary as
-# 'hyprland-scheme' next to the plugin, so plugin+compositor move together.
-# First run takes a while (full compositor build).
-HYPR_COMMIT ?= c26dbf93
-
-install-compositor: $(TARGET)
-	@test -n "$(HYPRLAND_SRC)" || { echo "HYPRLAND_SRC not set"; exit 1; }
-	@if [ ! -d "$(HYPRLAND_SRC)" ]; then \
-	    echo "cloning Hyprland at commit $(HYPR_COMMIT)..."; \
-	    git clone https://github.com/hyprwm/Hyprland "$(HYPRLAND_SRC)"; \
-	    git -C "$(HYPRLAND_SRC)" checkout -q $(HYPR_COMMIT); \
-	    git -C "$(HYPRLAND_SRC)" submodule update --init; \
-	fi
-	if [ ! -x "$(HYPRLAND_SRC)/build/Hyprland" ]; then \
-	    echo "building the compositor in $(HYPRLAND_SRC)/build (this takes a while)..."; \
-	    PKG_CONFIG_PATH="$$PKG_CONFIG_PATH" cmake -B "$(HYPRLAND_SRC)/build" -S "$(HYPRLAND_SRC)" -DCMAKE_BUILD_TYPE=Release; \
-	    cmake --build "$(HYPRLAND_SRC)/build" -j$$(nproc); \
-	fi
+# installs the in-place-built compositor binary as 'hyprland-scheme' next to
+# the plugin, so plugin+compositor move together
+install-compositor: $(TARGET) $(HYPRLAND_SRC)/build/Hyprland
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(HYPRLAND_SRC)/build/Hyprland $(DESTDIR)$(PREFIX)/bin/hyprland-scheme
 	@if [ -f "$(HYPRLAND_SRC)/systemd/hyprland-uwsm.desktop" ]; then \
@@ -81,13 +105,15 @@ install-compositor: $(TARGET)
 	        -e '/^TryExec=/d' \
 	        $(HYPRLAND_SRC)/systemd/hyprland-uwsm.desktop \
 	        > $(DESTDIR)$(PREFIX)/share/wayland-sessions/hyprland-scheme.desktop; \
-	    echo "Session entry installed (display managers will offer Hyprland (Scheme))."; \
+	    echo "Session entry installed."; \
 	fi
 	@echo ""
 	@echo "hyprland-scheme installed at: $(DESTDIR)$(PREFIX)/bin/hyprland-scheme"
-	@echo "Its config loads the plugin from: $(DESTDIR)$(PREFIX)/lib/hyprscheme/scheme-plugin.so"
 
 clean:
 	rm -f $(OBJ) $(TARGET)
 
-.PHONY: all build-chez install clean
+distclean: clean
+	rm -rf build
+
+.PHONY: all chez hyprland install install-compositor clean distclean
