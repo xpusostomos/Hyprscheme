@@ -1,0 +1,66 @@
+# Maintainer: Chris Bitmead <chris@bitmead.com>
+#
+# Hyprscheme: Chez Scheme scripting for Hyprland.
+#
+# This package ships a Hyprland build from a pinned upstream commit
+# together with the scheme plugin compiled against it, because the
+# plugin resolves Hyprland's own symbols at load time and therefore
+# must match the running compositor's build exactly.
+#
+# It installs as an alternative compositor (hyprland-scheme) so it can
+# coexist with the system Hyprland; launch it via the provided desktop
+# entry or a nested session.
+
+pkgname=hyprscheme
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Chez Scheme scripting for Hyprland (compositor + plugin)"
+arch=(x86_64)
+url="https://github.com/xpusostomos/Hyprscheme"
+license=(BSD)
+depends=(glibc ncurses lz4 zlib libinput wayland xorg-xwayland)
+makedepends=(git cmake gcc pkg-config meson)
+optdepends=('foot: terminal used by the example config')
+provides=(hyprland)
+conflicts=(hyprland)
+source=("hyprscheme::git+https://github.com/xpusostomos/Hyprscheme"
+        "hyprland-src::git+https://github.com/hyprwm/Hyprland#commit=c26dbf93"
+        "chez-src::git+https://github.com/cisco/ChezScheme#tag=v10.3.0")
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+options=(!strip)
+
+prepare() {
+  cd Hyprscheme
+  # submodules for the vendored trees
+  git -C "$srcdir/hyprland-src" submodule update --init
+}
+
+build() {
+  cd Hyprscheme
+
+  # 1. PIC Chez kernel
+  CHEZ_SOURCE="$srcdir/chez-src" \
+  CHEZ_OUT="$srcdir/chez-out" \
+  ./build-chez.sh
+
+  # 2. stock Hyprland (no scheme in-tree) from the pinned commit
+  cmake -B build-hl -S "$srcdir/hyprland-src" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build-hl -j"$(nproc)"
+
+  # 3. the plugin, against the same tree's headers
+  make HYPRLAND_SRC="$srcdir/hyprland-src" CHEZ_OUT="$srcdir/chez-out"
+}
+
+package() {
+  install -Dm755 build-hl/build/Hyprland "$pkgdir/usr/bin/hyprland-scheme"
+  install -Dm644 scheme-plugin.so "$pkgdir/usr/lib/hyprscheme/scheme-plugin.so"
+  install -Dm644 chez-out/petite.boot chez-out/scheme.boot \
+    -t "$pkgdir/usr/lib/hyprscheme/"
+
+  install -Dm644 examples/hyprland.scm \
+    "$pkgdir/usr/share/doc/hyprscheme/examples/hyprland.scm"
+  install -Dm644 README.md \
+    "$pkgdir/usr/share/doc/hyprscheme/README.md"
+}
