@@ -1318,21 +1318,26 @@ namespace Config::Scheme {
         signal(SIGABRT, schemeCrashHandler);
 
         // hyprctl scheme '<forms>' — evaluate scheme in the compositor.
-        // plugins load after socket init: register directly.
+        // defer: mutating the command registry while the compositor
+        // dispatches the plugin-load request itself hangs the loop.
         if (g_pEventLoopManager && IPC::Socket1::sock())
-            g_schemeIpcCommand = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
-                .name    = "scheme",
-                .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
-                .handler = [](const IPC::Socket1::SRequest& req) {
-                    auto code = req.command.substr(req.command.find_first_of(' ') + 1);
-                    const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
-                    std::string out;
-                    if (Sstringp(r)) {
-                        for (iptr i = 0; i < Sstring_length(r); ++i)
-                            out += (char)Sstring_ref(r, i);
-                    }
-                    return IPC::Socket1::SResponse(out);
-                }});
+            g_pEventLoopManager->doLater([ipcHandle = &g_schemeIpcCommand] {
+                if (!IPC::Socket1::sock())
+                    return;
+                *ipcHandle = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
+                    .name    = "scheme",
+                    .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+                    .handler = [](const IPC::Socket1::SRequest& req) {
+                        auto code = req.command.substr(req.command.find_first_of(' ') + 1);
+                        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                        std::string out;
+                        if (Sstringp(r)) {
+                            for (iptr i = 0; i < Sstring_length(r); ++i)
+                                out += (char)Sstring_ref(r, i);
+                        }
+                        return IPC::Socket1::SResponse(out);
+                    }});
+            });
 
         // watch the file for edits (skipped during --verify: no event loop yet)
         if (g_pEventLoopManager)

@@ -15,7 +15,7 @@ HYPRLAND_SRC ?= /tmp/hl-clean
 PREFIX ?= $(HOME)/.local
 CHEZ_OUT ?= $(CURDIR)/build/chez
 
-CXXFLAGS += -std=c++2b -g -O2
+CXXFLAGS += -std=c++2b -g -O2 -fPIC -fvisibility=hidden
 INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            -I$(CHEZ_OUT) -Isrc/config/scheme \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
@@ -27,11 +27,15 @@ TARGET = scheme-plugin.so
 
 all: $(TARGET)
 
-build-chez:
+# auto-build PIC Chez if not present yet
+$(CHEZ_OUT)/petite.boot:
 	./build-chez.sh
 
+$(OBJ) $(TARGET): | $(CHEZ_OUT)/petite.boot
+build-chez: $(CHEZ_OUT)/petite.boot
+
 $(TARGET): $(OBJ)
-	$(CXX) -shared -fPIC -o $@ $^ /home/chris/GITE/ChezScheme/ta6le/lz4/lib/lz4.o $(LIBS)
+	$(CXX) -shared -fPIC -o $@ $^ $(CHEZ_OUT)/libchez-pic.a $(LIBS)
 
 src/plugin-main.o: plugin-main.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@

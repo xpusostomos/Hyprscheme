@@ -38,9 +38,16 @@ fi
 make -j"$(nproc)"
 
 mkdir -p "$CHEZ_OUT"
-cp c/*.o "$CHEZ_OUT/"
+# workarea layout differs across versions (c/ vs ta6le/c/); find the artifacts
+for f in $(find . -path "*ta6le/c/*.o" -o -path "./c/*.o" 2>/dev/null | grep -v "main.o" | sort -u); do
+    cp "$f" "$CHEZ_OUT/"
+done
 rm -f "$CHEZ_OUT/main.o"
-cp boot/ta6le/petite.boot boot/ta6le/scheme.boot boot/ta6le/scheme.h "$CHEZ_OUT/"
+for f in $(find . -name "petite.boot" -o -name "scheme.boot" -o -name "scheme.h" 2>/dev/null | grep -vE "pb/|bin/" | sort -u); do
+    cp "$f" "$CHEZ_OUT/"
+done
+LZ4O=$(find . -name "lz4.o" 2>/dev/null | head -1)
+[ -n "$LZ4O" ] && cp "$LZ4O" "$CHEZ_OUT/lz4.o"
 
 # single-file artifact: the same objects as one static archive
 ar rcs "$CHEZ_OUT/libchez-pic.a" "$CHEZ_OUT"/*.o
