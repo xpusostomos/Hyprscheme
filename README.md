@@ -114,3 +114,26 @@ custom layouts are Scheme functions returning geometry, events deliver
 window handles as Scheme records. Crash reporting survives the Chez
 runtime's own signal handling via a re-installed handler that calls
 Hyprland's exported crash reporter.
+
+## Session integration
+
+The package installs the compositor as `/usr/bin/hyprland-scheme` plus a
+`hyprland-scheme.desktop` session entry under
+`/usr/share/wayland-sessions/`. How you reach it depends on how you log in:
+
+- **Display manager (SDDM/LightDM):** pick "Hyprland (Scheme)" from the
+  session menu at login.
+- **uwsm:** `uwsm start -e hyprland-scheme` from a TTY, or add a uwsm
+  desktop entry pointing at the same command.
+- **Nested (testing):** run `hyprland-scheme` from a terminal inside your
+  existing session — it opens as a window like any other.
+- **From an existing Hyprland session:** you can also bind it to a key,
+  e.g. `(hl-bind "SUPER" "H" (lambda () (hl-exec "hyprland-scheme")))`.
+
+For an omarchy-style setup where your main compositor should *be* the
+scheme-enabled one: point `hyprland.desktop` (or your uwsm session) at
+`/usr/bin/hyprland-scheme` instead of `/usr/bin/Hyprland`, and copy the
+`plugin = /usr/lib/hyprscheme/scheme-plugin.so` line into your config.
+Because the plugin is compiled against a pinned Hyprland commit, keep
+using the packaged compositor (don't mix with system updates of
+hyprland) — the plugin and the compositor must move together.

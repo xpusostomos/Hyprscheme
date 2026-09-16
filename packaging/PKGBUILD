@@ -18,11 +18,12 @@ pkgdesc="Chez Scheme scripting for Hyprland (compositor + plugin)"
 arch=(x86_64)
 url="https://github.com/xpusostomos/Hyprscheme"
 license=(BSD)
-depends=(glibc ncurses lz4 zlib libinput wayland xorg-xwayland)
+depends=(glibc ncurses lz4 zlib libinput wayland xorg-xwayland
+         hyprlang hyprutils hyprcursor hyprgraphics aquamarine
+         polkit-gnome xdg-desktop-portal-hyprland)
 makedepends=(git cmake gcc pkg-config meson)
-optdepends=('foot: terminal used by the example config')
-provides=(hyprland)
-conflicts=(hyprland)
+optdepends=('uwsm: session launcher for the desktop entry'
+            'foot: terminal used by the example config')
 source=("hyprscheme::git+https://github.com/xpusostomos/Hyprscheme"
         "hyprland-src::git+https://github.com/hyprwm/Hyprland#commit=c26dbf93"
         "chez-src::git+https://github.com/cisco/ChezScheme#tag=v10.3.0")
@@ -54,11 +55,24 @@ build() {
 }
 
 package() {
+  # the compositor, under its own name so it coexists with the system hyprland
   install -Dm755 build-hl/build/Hyprland "$pkgdir/usr/bin/hyprland-scheme"
+
+  # the plugin + matching Chez boot files
   install -Dm644 scheme-plugin.so "$pkgdir/usr/lib/hyprscheme/scheme-plugin.so"
   install -Dm644 chez-out/petite.boot chez-out/scheme.boot \
     -t "$pkgdir/usr/lib/hyprscheme/"
 
+  # session entry for display-manager logins (SDDM/LightDM pick these up);
+  # uwsm users launch via `uwsm start -e hyprland-scheme` instead
+  if [ -f build-hl/systemd/hyprland-uwsm.desktop ]; then
+    sed -e 's|Name=Hyprland (uwsm-managed)|Name=Hyprland (Scheme)|' \
+        -e 's|-D Hyprland hyprland.desktop|-D Hyprland hyprscheme.desktop|' \
+        build-hl/systemd/hyprland-uwsm.desktop \
+        > "$pkgdir/usr/share/wayland-sessions/hyprland-scheme.desktop"
+  fi
+
+  # docs
   install -Dm644 examples/hyprland.scm \
     "$pkgdir/usr/share/doc/hyprscheme/examples/hyprland.scm"
   install -Dm644 README.md \
