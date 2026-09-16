@@ -74,14 +74,15 @@ worktree of the upstream commit you're on works well.
 make install    # PREFIX defaults to ~/.local
 ```
 
-Then add to your Hyprland config:
+Then add to your `hyprland.lua` (the Lua config — the old
+`plugin = path` hyprlang directive does not exist there):
 
-```
-plugin = ~/.local/lib/hyprscheme/scheme-plugin.so
+```lua
+hl.plugin.load("/home/chris/.local/lib/hyprscheme/scheme-plugin.so")
 ```
 
-and reload. Plugin directives must come before the config lines that
-depend on it.
+and reload. The plugin loads once, during config processing, before
+the rest of the config runs.
 
 ## Usage
 
