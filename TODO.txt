@@ -7,14 +7,11 @@ IMPLEMENTED 2026-09-17 (commit 99ef2e9): hl-config / hl-config-get — set
 and get config options from scheme with full propagation (scratch lua
 state over the config manager's own typed parsers; numbers, strings,
 bools, arrays, alists; typed error messages). Remaining in this section:
-hl-monitor — monitor rules: mode (incl. modeline strings), scale,
-  position, transform, reserved area, colors (cm/sdr_eotf/bitdepth/icc/
-  sdrbrightness/sdrsaturation), mirror, vrr, disabled, HEADLESS outputs.
-  Needed by: monitors + 4 sub-pages, performance, virtual-gpu, xwayland.
-hl-animation / hl-curve — animation + bezier/spring curve
-  declarations. Needed by: animations page.
-hl-permission — permission rules (binary/type/mode regexes).
-  Needed by: permissions page.
+IMPLEMENTED 2026-09-17 (commit 100b8b8): hl-monitor (22 fields, live
+verified: transform/scale apply, reserved commits — nested-display
+caveat is layer-driven), hl-curve (bezier+spring), hl-animation
+(nodes with curve/style validation), hl-permission (startup-only, like
+upstream). Section 1 COMPLETE.
 
 == 2. DISPATCHER SURFACE (the general "do things" layer) ==
 IMPLEMENTED 2026-09-17 (commit cd9abc7): the core surface now exists as
