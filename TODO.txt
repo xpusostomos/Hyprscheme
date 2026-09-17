@@ -80,16 +80,23 @@ fullscreen, move-to-workspace, active, minimize (w state). Remaining:
   - layer.opened/closed, screenshare.state, input.keyboard.key (low)
 
 == 5. QUERIES / SELECTORS ==
-  - Window selector system (upstream window selectors as strings: class:foo,
-    title:bar, pid:N, address:...) — underlies many dispatcher calls
-  - hl-active-workspace, hl-workspace-info (object w/ properties),
-    hl-active-special-workspace, hl-last-window, hl-last-workspace,
-    hl-urgent-window, hl-workspace-windows (by selector)
-  - Monitor OBJECTS (position, scale, mode, focused, active workspace) —
-    scheme only returns names today; hl-monitor-at, hl-monitor-at-cursor,
-    hl-active-monitor
-  - hl-layers, hl-version, hl-is-key-down, hl-loaded-plugins
-  - hl-window-fullscreen-handler (which handler a window uses)
+IMPLEMENTED 2026-09-17 (commit 7077cb3): hl-window-from (selector syntax
+implemented in the plugin — anchored regex class:/title:/initialclass:/
+initialtitle:, pid:/address:/tag: equality, floating/tiled/active — the
+upstream CViewQuery chain returned the first window regardless when
+called from the plugin, root cause unfound, workaround documented),
+hl-urgent-window, hl-last-window, hl-active-workspace,
+hl-active-special-workspace, hl-last-workspace, hl-active-monitor,
+hl-monitor-from, hl-monitor-at, hl-monitor-at-cursor, hl-workspace-info
+(live layout name!), hl-workspace-windows, hl-layers, hl-is-key-down,
+hl-loaded-plugins, hl-version. This closes pass/send-shortcut targeting
+(bind-globals). Remaining:
+  - window LISTS by selector (hl-windows-from) — only single-window
+    selectors today; iterate client-side with hl-window-from variants
+  - monitor OBJECTS with full property sets (position/scale/mode are in
+    hl-workspace-info-style alists only for workspaces; monitors return
+    names — extend hl-monitor-from to an info alist if wanted)
+  - hl-window-fullscreen-handler accessor
 
 == 6. BINDS / SUBMAPS ==
   - 'submap-universal bind option (bind active in every submap)
