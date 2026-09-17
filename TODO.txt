@@ -1,126 +1,67 @@
-Hyprscheme TODO — missing Scheme API, compiled from the wiki conversion
-(Sept 2026). Every entry was hit while writing the Scheme wiki; page
-references point into Hyprscheme.wiki. Suggested hl- names are proposals.
+Hyprscheme TODO — genuinely outstanding items
+(consolidated 2026-09-17 after the tail sweep). The large API chunks
+are all implemented and verified — config, actions/dispatchers, events,
+rules, queries, notifications, timer handles, exec variants, gestures,
+watchdog (see git log and the wiki's per-page state). What follows is
+what is still missing or unverified. Suggested hl- names are proposals.
 
-== 1. CONFIG API ==
-IMPLEMENTED 2026-09-17 (commit 99ef2e9): hl-config / hl-config-get — set
-and get config options from scheme with full propagation (scratch lua
-state over the config manager's own typed parsers; numbers, strings,
-bools, arrays, alists; typed error messages). Remaining in this section:
-IMPLEMENTED 2026-09-17 (commit 100b8b8): hl-monitor (22 fields, live
-verified: transform/scale apply, reserved commits — nested-display
-caveat is layer-driven), hl-curve (bezier+spring), hl-animation
-(nodes with curve/style validation), hl-permission (startup-only, like
-upstream). Section 1 COMPLETE.
+== BINDS ==
+auto_consuming flag + the return-{ok=false} protocol — passing the
+  keypress to the window when the action didn't succeed ('transparent
+  / 'non-consuming cover related pass-through; this one needs a result
+  channel from the bind callback). Suggested: 'auto-consuming option.
+Unbind by key — remove all binds registered on a key (upstream
+  hl.unbind("key")). Suggested: (hl-unbind-key "SUPER" "L").
 
-== 2. DISPATCHER SURFACE (the general "do things" layer) ==
-IMPLEMENTED 2026-09-17 (commit cd9abc7): the core surface now exists as
-direct hl- functions — focus (workspace/monitor/direction/last/urgent),
-window move/swap/cycle/resize/center (px + direction), pin/pseudo/kill/
-signal/zorder/set-prop/tag/clear-tags, float/fullscreen with explicit
-action+mode, fullscreen-state, group API (toggle/cycle/index/move/lock),
-workspace rename/toggle-special/move-to-monitor/swap-monitors, cursor
-move/corner, dpms, pass, send-shortcut, send-key-state, event, global,
-force-idle, renderer-reload, release-input-capture, mouse drag/resize,
-layout-msg send. All verified live. Remaining from this section:
-  - move a window directly to another MONITOR (moveToMonitor takes a
-    workspace; no window-to-monitor action)
-  - workspace change_id
-  - submap setSubmap via CA::setSubmap (scheme has enter/exit already)
-  (window-selector targeting, exec_raw, exec-with-rules and the
-  fullscreen-handler accessor: DONE in the queries/tail chunks)
-Originally-remaining list (for reference):
-  - hl-focus-workspace (focus workspace by name/number) — *key* for binds;
-    currently impossible (window-rules, device-binds-mouse, code-snippets)
-  - hl-focus-direction / hl-focus-monitor / hl-focus-last / hl-focus-urgent
-  - hl-window-move-direction (directional window move)
-  - hl-window-cycle-next / cycle-prev, swap (next/prev/direction/target)
-  - hl-window-resize / hl-window-move (by px, relative), hl-window-center
-  - hl-window-fullscreen with explicit action/mode (extend existing toggles)
-  - hl-window-float with explicit set/unset (extend existing toggle)
-  - hl-layout-msg (SEND a layout message — needed by every builtin layout
-    page: dwindle/master/scrolling binds, custom-layouts "wider/narrower")
-  - hl-window-pin, hl-window-tag/clear-tags, hl-window-set-prop
-  - hl-window-pseudo, hl-window-toggle-swallow, hl-window-alter-zorder
-  - hl-window-kill, hl-window-signal, hl-window-fullscreen-state
-  - group API: hl-group-toggle/next/prev/active/move-window/lock (+ lock
-    active), into/out-of-group moves, deny-from-group
-  - workspace API: rename, move-to-monitor, change-id, swap-monitors,
-    toggle-special
-  - cursor: hl-cursor-move, hl-cursor-move-to-corner
-  - misc: hl-exit, hl-reload-config, hl-dpms, hl-pass, hl-send-shortcut,
-    hl-send-key-state, hl-event (socket2), hl-global (D-Bus shortcuts),
-    hl-force-idle, hl-force-renderer-reload, hl-release-input-capture
-  - interactive drag/resize for mouse binds: hl-drag / hl-resize
-    (bind-gestures, device-binds-mouse/touchpad)
+== ACTIONS / DISPATCHERS (small leftovers) ==
+Move a window directly to another MONITOR — CA::moveToMonitor takes a
+  workspace; there is no window-to-monitor action.
+Workspace change_id — CA::changeWorkspaceID.
+Submap setSubmap — CA::setSubmap exists; scheme already has enter/exit;
+  decide whether a scheme-facing switch-by-name is wanted.
+Per-effect rule handles — rule effects are raw-string based today;
+  per-effect get/set may be wanted (mirrors upstream's set_prop).
 
-== 3. RULES API ==
-IMPLEMENTED 2026-09-17 (commit 37f936e): hl-window-rule / hl-layer-rule
-(match/effect model over the rule engine, named-rule reuse, enable/
-disable handles, anchored-regex matches) and hl-workspace-rule (all 15
-fields + layout_opts over the workspace rule manager). Verified live:
-float/workspace/opacity effects, disable, reload re-registration,
-hyprctl workspacerules visibility, typed errors. Remaining:
-  - rule handles upstream-style (set_prop on effects, per-effect values)
-    — effects are raw-string based; per-effect get/set may be wanted
-  - exec-rule integration (hl.exec-with-rules rides on markAsExecRule)
+== EVENTS (the remaining bus events) ==
+window.open_early / window.destroy / window.kill / window.bell /
+  window.update_rules
+monitor.added / removed / focused / layout_changed
+workspace.special_active / created / removed / move_to_monitor
+config.unload / config.props_refreshed
+layer.opened / closed; screenshare.state; input.keyboard.key (low)
+(hl-on-window-title/class/urgent/pin/fullscreen/move-to-workspace/
+active/minimize and the lifecycle events EXIST — only these remain.)
 
-== 4. EVENTS ==
-IMPLEMENTED 2026-09-17 (commit f5c73ee): lifecycle — hl-on-start (fires on
-the first render frame; requires config-time plugin load), hl-on-shutdown,
-hl-on-config-reloaded (fires on the reload AFTER registration — register in
-the config file) — plus window events: title, class, urgent, pin,
-fullscreen, move-to-workspace, active, minimize (w state). Remaining:
-  - window.open_early / window.destroy / window.kill / window.bell /
-    window.update_rules
-  - monitor.added/removed/focused/layout_changed
-  - workspace.special_active/created/removed/move_to_monitor
-  - config.unload, config.props_refreshed
-  - layer.opened/closed, screenshare.state, input.keyboard.key (low)
+== DEVICES ==
+Per-device CONFIG API (hl-device NAME OPTS) — sensitivity, enabled,
+  keybinds, tags, tablet output binding. Per-device BINDS exist.
 
-== 5. QUERIES / SELECTORS ==
-IMPLEMENTED 2026-09-17 (commit 7077cb3): hl-window-from (selector syntax
-implemented in the plugin — anchored regex class:/title:/initialclass:/
-initialtitle:, pid:/address:/tag: equality, floating/tiled/active — the
-upstream CViewQuery chain returned the first window regardless when
-called from the plugin, root cause unfound, workaround documented),
-hl-urgent-window, hl-last-window, hl-active-workspace,
-hl-active-special-workspace, hl-last-workspace, hl-active-monitor,
-hl-monitor-from, hl-monitor-at, hl-monitor-at-cursor, hl-workspace-info
-(live layout name!), hl-workspace-windows, hl-layers, hl-is-key-down,
-hl-loaded-plugins, hl-version. This closes pass/send-shortcut targeting
-(bind-globals). Remaining:
-  - (done 2026-09-17, commit b81c8dc) hl-windows-from, hl-monitor-info
-    alist, hl-window-fullscreen-handler — section 5 fully complete
+== GESTURES ==
+Live gesture payloads beyond (dx dy scale) — rotation, pinch events,
+  cancel state. The simple and live forms work.
 
-== 6-9. BINDS / SUBMAPS, TIMERS, NOTIFICATIONS, EXEC ==
-IMPLEMENTED 2026-09-17 (commit 3285bb8, the tail sweep):
-  - hl-notify (icon/color/font-size; built-in overlay)
-  - timer handles: hl-timer-set-enabled / enabled? / set-timeout over the
-    hl-after/hl-repeat ids (pause/resume/retune live)
-  - hl-exec-raw (no shell), hl-exec-with-rules ("[float] cmd" syntax)
-  - bind flags: 'submap-universal, 'dont-inhibit, 'allow-input-capture;
-    device-scoped binds default INCLUSIVE like upstream (old default was
-    exclusive — polarity bug fixed)
-  - gestures: hl-gesture (simple, fires on end) + hl-gesture-live
-    (begin/update/end; update gets (dx dy scale)); cleared on reload
-  - submap auto-chain ALREADY existed (hl-submap's 3rd arg = the reset-
-    target submap name) — the wiki agent had misread it as a thunk
-  - VERIFIED: special workspaces end-to-end; mouse binds without 'mouse
-    (the mouse: prefix implies it); hl-exec = /bin/sh -c (quotes work)
-Remaining in these sections:
-  - auto_consuming bind flag + the return-{ok=false} protocol
-  - live gesture event payloads beyond (dx dy scale) (rotation, pinch)
+== EXEC ==
+Programmatic exec-with-rules carrying a rule OBJECT (the
+  spawnWithRules rule parameter) — the "[rules] cmd" string form is
+  already exposed via hl-exec-with-rules.
 
-== 10. TOOLING ==
-  - Watchdog for scheme callbacks (infinite loop in a bind/layout freezes
-    the compositor — upstream Lua has per-callback timeouts) — core wiki page
-  - Interactive REPL (hyprctl repl equivalent; hyprctl scheme is one-shot)
-  - Editor integration notes: a scheme stub/skeleton for completion parity
-    with upstream's Lua stubs (naming-conventions mentions plain editors)
+== TOOLING ==
+Interactive REPL (hyprctl repl equivalent; hyprctl scheme is one-shot).
+Editor completion stub (a scheme skeleton with all hl- signatures,
+parity with upstream's Lua stubs).
+README refresh — the config/rules/queries/gestures/watchdog chunks
+  postdate the original README.
 
-== 11. VERIFY ==
-  - hl-window-move-to-workspace with special workspaces ("special:magic")
-  - mouse binds without the 'mouse flag (does the "mouse:272" key prefix
-    imply the flag natively, or must 'mouse #t always be passed?)
-  - hl-exec argument splitting (does it sh -c or execvp-split?)
+== WATCHDOG NOTES (no action — documented limits) ==
+Recovery is out of scope by design (a Chez call cannot be killed
+safely); the detector logs only. The notification overlay aborts when
+poked from a side thread (verified, signal 6) — keep the watchdog
+log-only, or schedule notifications from the MAIN loop if ever wanted.
+
+== VERIFY (all resolved in the tail sweep — kept as a record) ==
+hl-exec runs through /bin/sh -c (execl in spawnRawProc) — quotes,
+pipes and redirects work.
+Mouse binds: the "mouse:" key prefix implies the flag natively;
+'mouse #t is optional.
+Special-workspace targeting ("special:NAME") verified end-to-end
+(move + toggle + query).
