@@ -40,6 +40,14 @@
 #include <src/config/shared/animation/AnimationTree.hpp>
 #include <src/animation/AnimationManager.hpp>
 #include <src/managers/permissions/DynamicPermissionManager.hpp>
+#include <src/desktop/rule/Engine.hpp>
+#include <src/desktop/rule/Rule.hpp>
+#include <src/desktop/rule/windowRule/WindowRule.hpp>
+#include <src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp>
+#include <src/desktop/rule/layerRule/LayerRule.hpp>
+#include <src/desktop/rule/layerRule/LayerRuleEffectContainer.hpp>
+#include <src/config/shared/workspace/WorkspaceRule.hpp>
+#include <src/config/shared/workspace/WorkspaceRuleManager.hpp>
 #include <src/config/ConfigValue.hpp>
 #include <src/ipc/s1/S1.hpp>
 
@@ -406,6 +414,22 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-curve-add (foreign-procedure "hl-curve-add" (string int double double double double) int))
 (define c-hl-animation-set (foreign-procedure "hl-animation-set" (string int double string string) int))
 (define c-hl-permission-add (foreign-procedure "hl-permission-add" (string string string) int))
+(define c-hl-window-rule-begin (foreign-procedure "hl-window-rule-begin" (string int) int))
+(define c-hl-layer-rule-begin (foreign-procedure "hl-layer-rule-begin" (string int) int))
+(define c-hl-rule-match (foreign-procedure "hl-rule-match" (string string) int))
+(define c-hl-window-rule-effect (foreign-procedure "hl-window-rule-effect" (string string) int))
+(define c-hl-layer-rule-effect (foreign-procedure "hl-layer-rule-effect" (string string) int))
+(define c-hl-window-rule-commit (foreign-procedure "hl-window-rule-commit" () double))
+(define c-hl-layer-rule-commit (foreign-procedure "hl-layer-rule-commit" () double))
+(define c-hl-rule-set-enabled (foreign-procedure "hl-rule-set-enabled" (double int) int))
+(define c-hl-rule-enabled (foreign-procedure "hl-rule-enabled" (double) int))
+(define c-hl-workspace-rule-begin (foreign-procedure "hl-workspace-rule-begin" (string int) int))
+(define c-hl-workspace-rule-str (foreign-procedure "hl-workspace-rule-str" (string string) int))
+(define c-hl-workspace-rule-num (foreign-procedure "hl-workspace-rule-num" (string double) int))
+(define c-hl-workspace-rule-bool (foreign-procedure "hl-workspace-rule-bool" (string int) int))
+(define c-hl-workspace-rule-gap (foreign-procedure "hl-workspace-rule-gap" (string) int))
+(define c-hl-workspace-rule-layout-opt (foreign-procedure "hl-workspace-rule-layout-opt" (string string) int))
+(define c-hl-workspace-rule-commit (foreign-procedure "hl-workspace-rule-commit" () int))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -799,6 +823,140 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (not s)
         #f
         (hl--unmarshal (hl--split-lines s)))))
+
+;; ---- rules -------------------------------------------------------------------
+;; window/layer rules: an alist with 'match (an alist of property → value),
+;; optional 'name and 'enabled, and every other key being an EFFECT (its
+;; config string form). Returns a rule handle for hl-rule-set-enabled /
+;; hl-rule-enabled?. Anonymous rules (name #f) are re-created on each
+;; config reload; named rules are reused across calls.
+;;   (hl-window-rule "term" '((match . ((class . "foot"))) (float . #t)
+;;                            (opacity . "0.8") (workspace . "3")))
+;;   (hl-window-rule #f '((match . ((class . "(?i)games"))) (monitor . "DP-1")))
+;; match properties: class title initial_class initial_title floating tag
+;;   xwayland fullscreen pinned focus group modal on_workspace content
+;;   namespace exec_token exec_pid ...
+;; effects: float tile fullscreen maximize fullscreen_state move size center
+;;   pseudo monitor workspace no_initial_focus pin group suppress_event
+;;   content no_close_for scrolling_width rounding opacity border_color
+;;   idle_inhibit animation tag min_size max_size ... (the window-rule page
+;;   has the full list with value forms)
+(define-record-type hl-rule (fields id))
+
+(define (hl--rule-spec-value v)
+  (cond ((string? v) v)
+        ((boolean? v) (if v "true" "false"))
+        ((number? v) (number->string v))
+        (else #f)))
+
+(define (hl--window-rule-mk spec begin-fn effect-fn commit-fn what)
+  (let ((name (hl--aopt spec 'name #f))
+        (enabled (hl--aopt spec 'enabled #t)))
+    (if (not (= 0 (begin-fn (if name (hl--str name) "") (if enabled 1 0))))
+        (errorf what "~a" (c-hl-config-last-error))
+        (let loop ((rest spec))
+          (cond ((null? rest)
+                 (let ((id (commit-fn)))
+                   (if (< id 0)
+                       (errorf what "~a" (c-hl-config-last-error))
+                       (make-hl-rule id))))
+                ((pair? (car rest))
+                 (let* ((kv (car rest))
+                        (k  (hl--str (car kv)))
+                        (v  (cdr kv)))
+                   (cond ((equal? k "match")
+                          (let mloop ((m v))
+                            (cond ((null? m) (loop (cdr rest)))
+                                  ((pair? (car m))
+                                   (let* ((mk (hl--str (caar m)))
+                                          (sv (hl--rule-spec-value (cdr (car m)))))
+                                     (if (not sv)
+                                         (errorf what "bad match value for ~a" mk)
+                                         (if (= 0 (c-hl-rule-match mk sv))
+                                             (mloop (cdr m))
+                                             (errorf what "~a" (c-hl-config-last-error))))))
+                                  (else (errorf what "match must be an alist")))))
+                         ((member k (list "name" "enabled"))
+                          (loop (cdr rest)))
+                         (else
+                          (let ((sv (hl--rule-spec-value v)))
+                            (if (not sv)
+                                (errorf what "bad effect value for ~a" k)
+                                (if (= 0 (effect-fn k sv))
+                                    (loop (cdr rest))
+                                    (errorf what "~a" (c-hl-config-last-error)))))))))
+                (else (errorf what "spec must be an alist")))))))
+
+(define (hl-window-rule name spec)
+  (let ((spec2 (if name (let ((kv (assq 'name spec)))
+                          (if kv spec (cons (cons 'name name) spec)))
+                  spec)))
+    (hl--window-rule-mk spec2 c-hl-window-rule-begin c-hl-window-rule-effect c-hl-window-rule-commit 'hl-window-rule)))
+
+(define (hl-layer-rule name spec)
+  (let ((spec2 (if name (let ((kv (assq 'name spec)))
+                          (if kv spec (cons (cons 'name name) spec)))
+                  spec)))
+    (hl--window-rule-mk spec2 c-hl-layer-rule-begin c-hl-layer-rule-effect c-hl-layer-rule-commit 'hl-layer-rule)))
+
+(define (hl-rule-set-enabled rule enabled)
+  (if (= 0 (c-hl-rule-set-enabled (exact->inexact (hl-rule-id rule)) (if enabled 1 0)))
+      #t
+      (errorf 'hl-rule-set-enabled "unknown rule")))
+
+(define (hl-rule-enabled? rule)
+  (= 1 (c-hl-rule-enabled (exact->inexact (hl-rule-id rule)))))
+
+;; workspace rules: (hl-workspace-rule "3" '((monitor . "DP-1") (layout . "master")))
+;; fields: monitor default persistent gaps_in gaps_out float_gaps border_size
+;;   no_border no_rounding decorate no_shadow on_created_empty default_name
+;;   layout animation layout_opts
+(define (hl-workspace-rule ws spec)
+  (let ((enabled (hl--aopt spec 'enabled #t)))
+    (if (not (= 0 (c-hl-workspace-rule-begin (hl--str ws) (if enabled 1 0))))
+        (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))
+        (let loop ((rest spec))
+          (cond ((null? rest)
+                 (if (= 0 (c-hl-workspace-rule-commit))
+                     #t
+                     (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                ((pair? (car rest))
+                 (let* ((kv (car rest))
+                        (k  (hl--str (car kv)))
+                        (v  (cdr kv)))
+                   (cond ((member k (list "workspace" "enabled"))
+                          (loop (cdr rest)))
+                         ((equal? k "layout_opts")
+                          (let oloop ((o v))
+                            (cond ((null? o) (loop (cdr rest)))
+                                  ((pair? (car o))
+                                   (let ((sv (hl--rule-spec-value (cdr (car o)))))
+                                     (if (not sv)
+                                         (errorf 'hl-workspace-rule "bad layout_opts value")
+                                         (if (= 0 (c-hl-workspace-rule-layout-opt (hl--str (caar o)) sv))
+                                             (oloop (cdr o))
+                                             (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))))
+                                  (else (errorf 'hl-workspace-rule "layout_opts must be an alist")))))
+                         ((string? v)
+                          (if (= 0 (c-hl-workspace-rule-str k v))
+                              (loop (cdr rest))
+                              (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                         ((number? v)
+                          (if (= 0 (c-hl-workspace-rule-num k (exact->inexact v)))
+                              (loop (cdr rest))
+                              (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                         ((boolean? v)
+                          (if (= 0 (c-hl-workspace-rule-bool k (if v 1 0)))
+                              (loop (cdr rest))
+                              (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                         ((pair? v)
+                          (c-hl-config-begin)
+                          (hl--push-val v)
+                          (if (= 0 (c-hl-workspace-rule-gap k))
+                              (loop (cdr rest))
+                              (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                         (else (errorf 'hl-workspace-rule "unsupported value for ~a" k)))))
+                (else (errorf 'hl-workspace-rule "spec must be an alist")))))))
 
 ;; ---- monitors, curves, animations, permissions ------------------------------
 
@@ -2358,6 +2516,281 @@ namespace Config::Scheme {
         return 0;
     }
 
+    // ---- rules: window, layer, workspace ---------------------------------------
+    // mirrors the lua hl.window_rule / hl.layer_rule / hl.workspace_rule.
+    // Named rules are reused across calls; anonymous rules are unregistered
+    // when the config reloads (the reload itself clears the whole engine).
+
+    static std::unordered_map<std::string, SP<Desktop::Rule::CWindowRule>> g_windowRules;
+    static std::unordered_map<std::string, SP<Desktop::Rule::CLayerRule>>  g_layerRules;
+    static std::vector<SP<Desktop::Rule::CWindowRule>>                     g_anonWindowRules;
+    static std::vector<SP<Desktop::Rule::CLayerRule>>                      g_anonLayerRules;
+    static SP<Desktop::Rule::CWindowRule>                                  g_curWindowRule;
+    static SP<Desktop::Rule::CLayerRule>                                   g_curLayerRule;
+    static std::optional<Config::CWorkspaceRule>                           g_curWorkspaceRule;
+    static std::unordered_map<int, SP<Desktop::Rule::IRule>>               g_ruleHandles;
+    static int                                                             g_nextRuleId = 1;
+
+    // called from reloadScheme: the config reload cleared the engine's rules
+    static void clearSchemeRules() {
+        for (const auto& r : g_anonWindowRules)
+            Desktop::Rule::ruleEngine()->unregisterRule(SP<Desktop::Rule::IRule>(r));
+        for (const auto& r : g_anonLayerRules)
+            Desktop::Rule::ruleEngine()->unregisterRule(SP<Desktop::Rule::IRule>(r));
+        g_windowRules.clear();
+        g_layerRules.clear();
+        g_anonWindowRules.clear();
+        g_anonLayerRules.clear();
+        g_curWindowRule.reset();
+        g_curLayerRule.reset();
+        g_curWorkspaceRule.reset();
+        g_ruleHandles.clear();
+    }
+
+    static int hlWindowRuleBegin(const char* name, int enabled) {
+        if (!g_up)
+            return -1;
+        const std::string              n = name ? name : "";
+        SP<Desktop::Rule::CWindowRule> rule;
+        const auto                     it = g_windowRules.find(n);
+        if (!n.empty() && it != g_windowRules.end())
+            rule = it->second;
+        else {
+            rule = makeShared<Desktop::Rule::CWindowRule>(n);
+            if (!n.empty())
+                g_windowRules.emplace(n, rule);
+            else
+                g_anonWindowRules.emplace_back(rule);
+            Desktop::Rule::ruleEngine()->registerRule(SP<Desktop::Rule::IRule>(rule));
+        }
+        rule->setEnabled(enabled != 0);
+        g_curWindowRule = rule;
+        return 0;
+    }
+
+    static int hlLayerRuleBegin(const char* name, int enabled) {
+        if (!g_up)
+            return -1;
+        const std::string              n = name ? name : "";
+        SP<Desktop::Rule::CLayerRule>  rule;
+        const auto                     it = g_layerRules.find(n);
+        if (!n.empty() && it != g_layerRules.end())
+            rule = it->second;
+        else {
+            rule = makeShared<Desktop::Rule::CLayerRule>(n);
+            if (!n.empty())
+                g_layerRules.emplace(n, rule);
+            else
+                g_anonLayerRules.emplace_back(rule);
+            Desktop::Rule::ruleEngine()->registerRule(SP<Desktop::Rule::IRule>(rule));
+        }
+        rule->setEnabled(enabled != 0);
+        g_curLayerRule = rule;
+        return 0;
+    }
+
+    static int hlRuleMatch(const char* prop, const char* value) {
+        if (!g_up)
+            return -1;
+        const auto p = Desktop::Rule::matchPropFromString(prop ? prop : "");
+        if (!p) {
+            g_configError = std::string("unknown match property '") + (prop ? prop : "") + "'";
+            return -1;
+        }
+        if (g_curWindowRule) {
+            g_curWindowRule->registerMatch(*p, value ? value : "");
+            return 0;
+        }
+        if (g_curLayerRule) {
+            g_curLayerRule->registerMatch(*p, value ? value : "");
+            return 0;
+        }
+        return -1;
+    }
+
+    static int hlWindowRuleEffect(const char* effect, const char* value) {
+        if (!g_up || !g_curWindowRule)
+            return -1;
+        const auto e = Desktop::Rule::windowEffects()->get(std::string_view(effect ? effect : ""));
+        if (!e) {
+            g_configError = std::string("unknown effect '") + (effect ? effect : "") + "'";
+            return -1;
+        }
+        const auto res = g_curWindowRule->addEffect(*e, value ? value : "");
+        if (!res) {
+            g_configError = res.error();
+            return -2;
+        }
+        return 0;
+    }
+
+    static int hlLayerRuleEffect(const char* effect, const char* value) {
+        if (!g_up || !g_curLayerRule)
+            return -1;
+        const auto e = Desktop::Rule::layerEffects()->get(std::string_view(effect ? effect : ""));
+        if (!e) {
+            g_configError = std::string("unknown layer effect '") + (effect ? effect : "") + "'";
+            return -1;
+        }
+        const auto res = g_curLayerRule->addEffect(*e, value ? value : "");
+        if (!res) {
+            g_configError = res.error();
+            return -2;
+        }
+        return 0;
+    }
+
+    static double hlWindowRuleCommit() {
+        if (!g_up || !g_curWindowRule)
+            return -1;
+        const int id = g_nextRuleId++;
+        g_ruleHandles.emplace(id, g_curWindowRule);
+        Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_WINDOW_STATES);
+        g_curWindowRule.reset();
+        return id;
+    }
+
+    static double hlLayerRuleCommit() {
+        if (!g_up || !g_curLayerRule)
+            return -1;
+        const int id = g_nextRuleId++;
+        g_ruleHandles.emplace(id, g_curLayerRule);
+        Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_RULES);
+        g_curLayerRule.reset();
+        return id;
+    }
+
+    static int hlRuleSetEnabled(double id, int enabled) {
+        if (!g_up)
+            return -1;
+        const auto it = g_ruleHandles.find(sc<int>(id));
+        if (it == g_ruleHandles.end())
+            return -1;
+        it->second->setEnabled(enabled != 0);
+        return 0;
+    }
+
+    static int hlRuleEnabled(double id) {
+        const auto it = g_ruleHandles.find(sc<int>(id));
+        return (it != g_ruleHandles.end() && it->second->isEnabled()) ? 1 : 0;
+    }
+
+    // ---- workspace rules -------------------------------------------------------
+
+    static int hlWorkspaceRuleBegin(const char* ws, int enabled) {
+        if (!g_up)
+            return -1;
+        if (!ws || !*ws) {
+            g_configError = "hl-workspace-rule: workspace selector required";
+            return -1;
+        }
+        g_curWorkspaceRule = Config::CWorkspaceRule{};
+        g_curWorkspaceRule->m_workspaceString = ws;
+        g_curWorkspaceRule->setEnabled(enabled != 0);
+        return 0;
+    }
+
+    static int hlWorkspaceRuleStr(const char* field, const char* v) {
+        if (!g_up || !g_curWorkspaceRule)
+            return -1;
+        const std::string f = field ? field : "";
+        auto&             r = *g_curWorkspaceRule;
+        if (f == "monitor")
+            r.m_monitor = v ? v : "";
+        else if (f == "on_created_empty")
+            r.m_onCreatedEmptyRunCmd = v ? v : "";
+        else if (f == "default_name")
+            r.m_defaultName = v ? v : "";
+        else if (f == "layout")
+            r.m_layout = v ? v : "";
+        else if (f == "animation")
+            r.m_animationStyle = v ? v : "";
+        else {
+            g_configError = "unknown workspace-rule field '" + f + "'";
+            return -1;
+        }
+        return 0;
+    }
+
+    static int hlWorkspaceRuleNum(const char* field, double v) {
+        if (!g_up || !g_curWorkspaceRule)
+            return -1;
+        const std::string f = field ? field : "";
+        if (f == "border_size")
+            g_curWorkspaceRule->m_borderSize = sc<int64_t>(v);
+        else {
+            g_configError = "unknown workspace-rule numeric field '" + f + "'";
+            return -1;
+        }
+        return 0;
+    }
+
+    static int hlWorkspaceRuleBool(const char* field, int v) {
+        if (!g_up || !g_curWorkspaceRule)
+            return -1;
+        const std::string f = field ? field : "";
+        auto&             r = *g_curWorkspaceRule;
+        if (f == "default")
+            r.m_isDefault = (v != 0);
+        else if (f == "persistent")
+            r.m_isPersistent = (v != 0);
+        else if (f == "no_border")
+            r.m_noBorder = (v != 0);
+        else if (f == "no_rounding")
+            r.m_noRounding = (v != 0);
+        else if (f == "decorate")
+            r.m_decorate = (v != 0);
+        else if (f == "no_shadow")
+            r.m_noShadow = (v != 0);
+        else {
+            g_configError = "unknown workspace-rule bool field '" + f + "'";
+            return -1;
+        }
+        return 0;
+    }
+
+    static int hlWorkspaceRuleGap(const char* field) {
+        if (!g_up || !g_curWorkspaceRule)
+            return -1;
+        const std::string f = field ? field : "";
+        Config::Lua::CLuaConfigCssGap gap(0);
+        const auto                    err = gap.parse(configScratch());
+        lua_settop(configScratch(), 0);
+        if (err.errorCode != Config::Lua::PARSE_ERROR_OK) {
+            g_configError = err.message.empty() ? "invalid gaps" : err.message;
+            return -2;
+        }
+        const auto& g = *sc<const Config::CCssGapData*>(gap.data());
+        auto&       r = *g_curWorkspaceRule;
+        if (f == "gaps_in")
+            r.m_gapsIn = g;
+        else if (f == "gaps_out")
+            r.m_gapsOut = g;
+        else if (f == "float_gaps")
+            r.m_floatGaps = g;
+        else {
+            g_configError = "unknown workspace-rule gap field '" + f + "'";
+            return -1;
+        }
+        return 0;
+    }
+
+    static int hlWorkspaceRuleLayoutOpt(const char* k, const char* v) {
+        if (!g_up || !g_curWorkspaceRule)
+            return -1;
+        g_curWorkspaceRule->m_layoutopts[k ? k : ""] = v ? v : "";
+        return 0;
+    }
+
+    static int hlWorkspaceRuleCommit() {
+        if (!g_up || !g_curWorkspaceRule)
+            return -1;
+        Config::workspaceRuleMgr()->replaceOrAdd(std::move(*g_curWorkspaceRule));
+        g_curWorkspaceRule.reset();
+        Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_MONITOR_STATES | Config::Supplementary::REFRESH_WINDOW_STATES);
+        return 0;
+    }
+
     static ptr hlSchemeWindowInitialClass(int id) {
         if (!g_up)
             return Sfalse;
@@ -2522,6 +2955,10 @@ namespace Config::Scheme {
     static void reloadScheme() {
         if (!g_up || g_configPath.empty())
             return;
+
+        // the config reload cleared the rule engine; drop our rule state so
+        // the fresh config run re-registers everything
+        clearSchemeRules();
 
         // lua config reloads clear every bind in the registry; drop our stale handles.
         for (const auto& [id, b] : g_binds) {
@@ -2786,6 +3223,22 @@ namespace Config::Scheme {
         Sregister_symbol("hl-curve-add", (void*)hlCurveAdd);
         Sregister_symbol("hl-animation-set", (void*)hlAnimationSet);
         Sregister_symbol("hl-permission-add", (void*)hlPermissionAdd);
+        Sregister_symbol("hl-window-rule-begin", (void*)hlWindowRuleBegin);
+        Sregister_symbol("hl-layer-rule-begin", (void*)hlLayerRuleBegin);
+        Sregister_symbol("hl-rule-match", (void*)hlRuleMatch);
+        Sregister_symbol("hl-window-rule-effect", (void*)hlWindowRuleEffect);
+        Sregister_symbol("hl-layer-rule-effect", (void*)hlLayerRuleEffect);
+        Sregister_symbol("hl-window-rule-commit", (void*)hlWindowRuleCommit);
+        Sregister_symbol("hl-layer-rule-commit", (void*)hlLayerRuleCommit);
+        Sregister_symbol("hl-rule-set-enabled", (void*)hlRuleSetEnabled);
+        Sregister_symbol("hl-rule-enabled", (void*)hlRuleEnabled);
+        Sregister_symbol("hl-workspace-rule-begin", (void*)hlWorkspaceRuleBegin);
+        Sregister_symbol("hl-workspace-rule-str", (void*)hlWorkspaceRuleStr);
+        Sregister_symbol("hl-workspace-rule-num", (void*)hlWorkspaceRuleNum);
+        Sregister_symbol("hl-workspace-rule-bool", (void*)hlWorkspaceRuleBool);
+        Sregister_symbol("hl-workspace-rule-gap", (void*)hlWorkspaceRuleGap);
+        Sregister_symbol("hl-workspace-rule-layout-opt", (void*)hlWorkspaceRuleLayoutOpt);
+        Sregister_symbol("hl-workspace-rule-commit", (void*)hlWorkspaceRuleCommit);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
         Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
