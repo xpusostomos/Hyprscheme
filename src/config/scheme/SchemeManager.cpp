@@ -658,13 +658,19 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         (hl--register id thunk))))
 
 ;; hl-bind dispatches on the first argument:
-;;   (hl-bind MODS KEY THUNK . OPTS)           — two strings
-;;   (hl-bind (cons MODS KEY) THUNK . OPTS)    — a pair (from kbd or hl-kbd)
+;;   (hl-bind '("CTRL" "ALT" "a") THUNK . OPTS)  — a list of key tokens (from kbd/hl-kbd)
+;;   (hl-bind MODS KEY THUNK . OPTS)             — two strings
 (define (hl-bind . args)
-  (if (pair? (car args))
-      ;; pair form: (cons mods key) thunk . opts
-      (let ((binding (car args)) (rest (cdr args)))
-        (apply hl--bind-impl (car binding) (cdr binding) rest))
+  (if (and (pair? (car args)) (string? (car (car args))) (> (length (car args)) 1))
+      ;; list form: (kbd/hl-kbd result) thunk . opts
+      (let* ((tokens (car args)) (rest (cdr args))
+             (n (length tokens)))
+        (apply hl--bind-impl
+               (hl--string-join (let butlast ((l tokens) (k (- n 1)) (acc '()))
+                                  (if (= k 0) (reverse acc) (butlast (cdr l) (- k 1) (cons (car l) acc))))
+                                " ")
+               (car (reverse tokens))
+               rest))
       ;; two-string form: mods key thunk . opts
       (apply hl--bind-impl args)))
 
@@ -700,34 +706,22 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
             name))))
 
 (define (kbd spec)
-  ;; parse an emacs key specification string → (mods . key) pair
-  ;; e.g. "C-M-a" → ("CTRL ALT" . "a"), "<f1>" → ("" . "F1")
-  (let loop ((str spec) (mods '()))
+  ;; parse an emacs key specification string → a LIST of key tokens
+  ;; e.g. "C-M-a" → ("CTRL" "ALT" "a"), "<f1>" → ("F1")
+  (let loop ((str spec) (acc '()))
     (let ((dash (hl--string-index str #\-)))
       (if (and dash (> dash 0))
           (let ((prefix (substring str 0 dash)))
             (if (assoc prefix hl--emacs-mods)
-                ;; it's a modifier prefix, consume and recurse
                 (loop (substring str (+ dash 1) (string-length str))
-                      (cons (cdr (assoc prefix hl--emacs-mods)) mods))
-                ;; not a modifier — the whole remaining string is the key
-                (cons (hl--string-join (reverse mods) " ")
-                      (hl--emacs-key str))))
-          ;; no more modifier dashes — the remaining string is the key
-          (cons (hl--string-join (reverse mods) " ")
-                (hl--emacs-key str))))))
+                      (cons (cdr (assoc prefix hl--emacs-mods)) acc))
+                (reverse (cons (hl--emacs-key str) acc))))
+          (reverse (cons (hl--emacs-key str) acc))))))
 
 (define (hl-kbd spec)
-  ;; parse a lua/hyprland key specification string → (mods . key) pair
-  ;; e.g. "SUPER+SHIFT+Q" or "SUPER + SHIFT + Q" → ("SUPER SHIFT" . "Q")
-  (let* ((parts (map hl--trim (hl--split-string spec #\+)))
-         (n (length parts)))
-    (if (= n 1)
-        (cons "" (car parts))
-        (let loop ((rest parts) (mods '()))
-          (if (= (length rest) 1)
-              (cons (hl--string-join (reverse mods) " ") (car rest))
-              (loop (cdr rest) (cons (car rest) mods)))))))
+  ;; parse a lua/hyprland key specification string → a LIST of key tokens
+  ;; e.g. "SUPER+SHIFT+Q" → ("SUPER" "SHIFT" "Q")
+  (map hl--trim (hl--split-string spec #\+)))
 
 (define (hl-exec cmd)
   (c-hl-exec cmd))
