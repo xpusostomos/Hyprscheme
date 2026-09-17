@@ -56,11 +56,15 @@ Originally-remaining list (for reference):
     (bind-gestures, device-binds-mouse/touchpad)
 
 == 3. RULES API ==
-  - hl-window-rule / hl-workspace-rule / hl-layer-rule (named + anonymous,
-    match/effect model) — rules, window-rules, workspace-rules, layer-rules
-  - rule handles: set-enabled / enabled? on named rules
-  - layout_opts (per-workspace layout options), on_created_empty exec
-  - scrolling_width window rule (scrolling-layout)
+IMPLEMENTED 2026-09-17 (commit 37f936e): hl-window-rule / hl-layer-rule
+(match/effect model over the rule engine, named-rule reuse, enable/
+disable handles, anchored-regex matches) and hl-workspace-rule (all 15
+fields + layout_opts over the workspace rule manager). Verified live:
+float/workspace/opacity effects, disable, reload re-registration,
+hyprctl workspacerules visibility, typed errors. Remaining:
+  - rule handles upstream-style (set_prop on effects, per-effect values)
+    — effects are raw-string based; per-effect get/set may be wanted
+  - exec-rule integration (hl.exec-with-rules rides on markAsExecRule)
 
 == 4. EVENTS ==
 IMPLEMENTED 2026-09-17 (commit f5c73ee): lifecycle — hl-on-start (fires on
