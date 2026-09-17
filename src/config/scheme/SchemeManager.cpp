@@ -30,6 +30,16 @@
 #include <src/config/ConfigManager.hpp>
 #include <src/config/lua/ConfigManager.hpp>
 #include <src/config/lua/types/LuaConfigValue.hpp>
+#include <src/config/lua/types/LuaConfigBool.hpp>
+#include <src/config/lua/types/LuaConfigCssGap.hpp>
+#include <src/config/lua/types/LuaConfigFloat.hpp>
+#include <src/config/lua/types/LuaConfigInt.hpp>
+#include <src/config/lua/types/LuaConfigString.hpp>
+#include <src/config/shared/monitor/Parser.hpp>
+#include <src/config/shared/monitor/MonitorRuleManager.hpp>
+#include <src/config/shared/animation/AnimationTree.hpp>
+#include <src/animation/AnimationManager.hpp>
+#include <src/managers/permissions/DynamicPermissionManager.hpp>
 #include <src/config/ConfigValue.hpp>
 #include <src/ipc/s1/S1.hpp>
 
@@ -376,6 +386,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-layout-message (foreign-procedure "hl-scheme-layout-message" (string) int))
 ;; ---- config: set/get config options ----------------------------------------
 (define c-hl-config-begin (foreign-procedure "hl-config-begin" () int))
+(define c-hl-config-push-int (foreign-procedure "hl-config-push-int" (double) int))
 (define c-hl-config-push-num (foreign-procedure "hl-config-push-num" (double) int))
 (define c-hl-config-push-bool (foreign-procedure "hl-config-push-bool" (int) int))
 (define c-hl-config-push-str (foreign-procedure "hl-config-push-str" (string) int))
@@ -386,6 +397,15 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-config-set (foreign-procedure "hl-config-set" (string) int))
 (define c-hl-config-last-error (foreign-procedure "hl-config-last-error" () scheme-object))
 (define c-hl-config-get (foreign-procedure "hl-config-get" (string) scheme-object))
+(define c-hl-monitor-begin (foreign-procedure "hl-monitor-begin" (string) int))
+(define c-hl-monitor-field-str (foreign-procedure "hl-monitor-field-str" (string string) int))
+(define c-hl-monitor-field-num (foreign-procedure "hl-monitor-field-num" (string double) int))
+(define c-hl-monitor-field-gap (foreign-procedure "hl-monitor-field-gap" (string) int))
+(define c-hl-monitor-field-bool (foreign-procedure "hl-monitor-field-bool" (string int) int))
+(define c-hl-monitor-commit (foreign-procedure "hl-monitor-commit" () int))
+(define c-hl-curve-add (foreign-procedure "hl-curve-add" (string int double double double double) int))
+(define c-hl-animation-set (foreign-procedure "hl-animation-set" (string int double string string) int))
+(define c-hl-permission-add (foreign-procedure "hl-permission-add" (string string string) int))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -779,6 +799,85 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (not s)
         #f
         (hl--unmarshal (hl--split-lines s)))))
+
+;; ---- monitors, curves, animations, permissions ------------------------------
+
+;; (hl-monitor "DP-1" '((mode . "preferred") (scale . "1.6") (position . "0x0")
+;;                      (transform . 0) (bitdepth . 10) (vrr . 1)
+;;                      (reserved . '((top . 60)))))
+;; string fields: mode position scale mirror cm icc sdr_eotf
+;; numeric fields: transform bitdepth vrr supports_wide_color supports_hdr
+;;   sdrbrightness sdrsaturation sdr_min_luminance sdr_max_luminance
+;;   min_luminance max_luminance max_avg_luminance
+;; gap fields (alist): reserved / reserved_area ; bool: disabled
+(define (hl--aopt alist key default)
+  (let ((kv (assq key alist)))
+    (if kv (cdr kv) default)))
+
+(define (hl-monitor output fields)
+  (if (not (= 0 (c-hl-monitor-begin (hl--str output))))
+      (errorf 'hl-monitor "~a" (c-hl-config-last-error))
+      (let loop ((rest fields))
+        (cond ((null? rest)
+               (if (= 0 (c-hl-monitor-commit))
+                   #t
+                   (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+              ((pair? (car rest))
+               (let* ((kv (car rest))
+                      (f  (hl--str (car kv)))
+                      (v  (cdr kv)))
+                 (cond ((string? v)
+                        (if (= 0 (c-hl-monitor-field-str f v))
+                            (loop (cdr rest))
+                            (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+                       ((number? v)
+                        (if (= 0 (c-hl-monitor-field-num f (exact->inexact v)))
+                            (loop (cdr rest))
+                            (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+                       ((boolean? v)
+                        (if (= 0 (c-hl-monitor-field-bool f (if v 1 0)))
+                            (loop (cdr rest))
+                            (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+                       ((pair? v)
+                        (c-hl-config-begin)
+                        (hl--push-val v)
+                        (if (= 0 (c-hl-monitor-field-gap f))
+                            (loop (cdr rest))
+                            (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+                       (else (errorf 'hl-monitor "unsupported value for ~a" f)))))
+              (else (errorf 'hl-monitor "fields must be alist pairs"))))))
+
+;; (hl-curve "mycurve" 'bezier 0.25 0.1 0.25 1.0)
+;; (hl-curve "myspring" 'spring 250 25 1)
+(define (hl-curve name type . vals)
+  (let* ((t  (if (eq? type 'spring) 1 0))
+         (vs (append (map exact->inexact vals) (list 0 0 0 0))))
+    (if (= 0 (c-hl-curve-add (hl--str name) t
+                             (list-ref vs 0) (list-ref vs 1) (list-ref vs 2) (list-ref vs 3)))
+        #t
+        (errorf 'hl-curve "~a" (c-hl-config-last-error)))))
+
+;; (hl-animation "windowsIn" '((enabled . #t) (speed . 8) (curve . "mycurve") (style . "popin 80%")))
+;; speed defaults to 8; declare curves with hl-curve first (or use builtins
+;; like "default"); styles are the animation style strings (popin, slide, ...)
+(define (hl-animation leaf alist)
+  (let* ((enabled (hl--aopt alist 'enabled #t))
+         (speed   (hl--aopt alist 'speed 8))
+         (curve   (hl--aopt alist 'curve ""))
+         (style   (hl--aopt alist 'style "")))
+    (if (= 0 (c-hl-animation-set (hl--str leaf) (if enabled 1 0)
+                                 (exact->inexact speed) (hl--str curve) (hl--str style)))
+        #t
+        (errorf 'hl-animation "~a" (c-hl-config-last-error)))))
+
+;; (hl-permission "/usr/bin/grim" 'screencopy 'allow)
+;; only takes effect at first launch — permission rules require a
+;; compositor restart (same as the lua config)
+(define (hl-permission binary type mode)
+  (if (= 0 (c-hl-permission-add binary (hl--str type) (hl--str mode)))
+      #t
+      (errorf 'hl-permission "~a" (c-hl-config-last-error))))
+
 
 ;; decode "b|n|s|t" + payload lines into a scheme value
 (define (hl--unmarshal lines)
@@ -1867,6 +1966,13 @@ namespace Config::Scheme {
         return 0;
     }
 
+    static int hlConfigPushInt(double v) {
+        if (!g_up)
+            return -1;
+        lua_pushinteger(configScratch(), sc<long long>(v));
+        return 0;
+    }
+
     static int hlConfigPushBool(int v) {
         if (!g_up)
             return -1;
@@ -1982,6 +2088,274 @@ namespace Config::Scheme {
         }
         lua_settop(L, 0);
         return Sstring_utf8(out.c_str(), out.size());
+    }
+
+    // ---- monitor rules ---------------------------------------------------------
+    // mirrors the lua hl.monitor: fields parse into a CMonitorRuleParser seeded
+    // from the existing rule, then commit to the rule manager and refresh.
+    static UP<Config::CMonitorRuleParser> g_monitorParser;
+
+    static int hlMonitorBegin(const char* output) {
+        if (!g_up)
+            return -1;
+        if (!output || !*output) {
+            g_configError = "hl-monitor: output name required";
+            return -1;
+        }
+        g_monitorParser      = makeUnique<Config::CMonitorRuleParser>(std::string(output));
+        const auto& all      = Config::monitorRuleMgr()->all();
+        const auto  existing = std::ranges::find_if(all, [&output](const auto& rule) { return rule.m_name == output; });
+        if (existing != all.end())
+            g_monitorParser->rule() = *existing;
+        return 0;
+    }
+
+    static int hlMonitorFieldStr(const char* field, const char* value) {
+        if (!g_up || !g_monitorParser)
+            return -1;
+        const std::string f = field ? field : "";
+        const std::string v = value ? value : "";
+        auto&             p = *g_monitorParser;
+        bool              ok;
+        if (f == "mode")
+            ok = p.parseMode(v);
+        else if (f == "position")
+            ok = p.parsePosition(v);
+        else if (f == "scale")
+            ok = p.parseScale(v);
+        else if (f == "mirror") {
+            p.setMirror(v);
+            ok = true;
+        } else if (f == "cm")
+            ok = p.parseCM(v);
+        else if (f == "icc")
+            ok = p.parseICC(v);
+        else if (f == "sdr_eotf") {
+            p.rule().m_sdrEotf = NTransferFunction::fromString(v);
+            ok                 = true;
+        } else {
+            g_configError = "hl-monitor: unknown string field '" + f + "'";
+            return -1;
+        }
+        if (!ok)
+            g_configError = p.getError() ? *p.getError() : "invalid value for '" + f + "'";
+        return ok ? 0 : -1;
+    }
+
+    static int hlMonitorFieldNum(const char* field, double v) {
+        if (!g_up || !g_monitorParser)
+            return -1;
+        const std::string f = field ? field : "";
+        auto&             p = *g_monitorParser;
+
+        // typed validation with the same ranges the lua config uses
+        std::unique_ptr<Config::Lua::ILuaConfigValue> val;
+        if (f == "transform")
+            val.reset(new Config::Lua::CLuaConfigInt(0, std::optional<Config::INTEGER>(0), std::optional<Config::INTEGER>(7)));
+        else if (f == "bitdepth")
+            val.reset(new Config::Lua::CLuaConfigInt(8));
+        else if (f == "vrr")
+            val.reset(new Config::Lua::CLuaConfigInt(-1, std::optional<Config::INTEGER>(-1), std::optional<Config::INTEGER>(3)));
+        else if (f == "supports_wide_color" || f == "supports_hdr")
+            val.reset(new Config::Lua::CLuaConfigInt(0, std::optional<Config::INTEGER>(-1), std::optional<Config::INTEGER>(1)));
+        else if (f == "sdr_max_luminance")
+            val.reset(new Config::Lua::CLuaConfigInt(80));
+        else if (f == "max_luminance" || f == "max_avg_luminance")
+            val.reset(new Config::Lua::CLuaConfigInt(-1));
+        else if (f == "sdrbrightness")
+            val.reset(new Config::Lua::CLuaConfigFloat(1.F));
+        else if (f == "sdrsaturation")
+            val.reset(new Config::Lua::CLuaConfigFloat(1.F));
+        else if (f == "sdr_min_luminance")
+            val.reset(new Config::Lua::CLuaConfigFloat(0.2F));
+        else if (f == "min_luminance")
+            val.reset(new Config::Lua::CLuaConfigFloat(-1.F));
+        else {
+            g_configError = "hl-monitor: unknown numeric field '" + f + "'";
+            return -1;
+        }
+
+        lua_State*      L = configScratch();
+        lua_settop(L, 0);
+        const bool isFloat = (f == "sdrbrightness" || f == "sdrsaturation" || f == "sdr_min_luminance" || f == "min_luminance");
+        if (isFloat)
+            lua_pushnumber(L, v);
+        else
+            lua_pushinteger(L, sc<long long>(v));
+        const auto err = val->parse(L);
+        lua_settop(L, 0);
+        if (err.errorCode != Config::Lua::PARSE_ERROR_OK) {
+            g_configError = err.message.empty() ? "invalid value" : err.message;
+            return -2;
+        }
+
+        auto& rule = p.rule();
+        if (f == "transform")
+            rule.m_transform = sc<wl_output_transform>(sc<int>(v));
+        else if (f == "bitdepth")
+            rule.m_enable10bit = sc<int>(v) == 10;
+        else if (f == "vrr")
+            rule.m_vrr = sc<int>(v) < 0 ? std::nullopt : std::optional(sc<int>(v));
+        else if (f == "supports_wide_color")
+            rule.m_supportsWideColor = sc<int>(v);
+        else if (f == "supports_hdr")
+            rule.m_supportsHDR = sc<int>(v);
+        else if (f == "sdr_max_luminance")
+            rule.m_sdrMaxLuminance = sc<int>(v);
+        else if (f == "max_luminance")
+            rule.m_maxLuminance = sc<int>(v);
+        else if (f == "max_avg_luminance")
+            rule.m_maxAvgLuminance = sc<int>(v);
+        else if (f == "sdrbrightness")
+            rule.m_sdrBrightness = sc<float>(v);
+        else if (f == "sdrsaturation")
+            rule.m_sdrSaturation = sc<float>(v);
+        else if (f == "sdr_min_luminance")
+            rule.m_sdrMinLuminance = sc<float>(v);
+        else if (f == "min_luminance")
+            rule.m_minLuminance = sc<float>(v);
+        return 0;
+    }
+
+    // gap fields (reserved / reserved_area): the value is pushed onto the
+    // scratch stack by the config push helpers
+    static int hlMonitorFieldGap(const char* field) {
+        if (!g_up || !g_monitorParser)
+            return -1;
+        const std::string f = field ? field : "";
+        if (f != "reserved" && f != "reserved_area") {
+            g_configError = "hl-monitor: unknown gap field '" + f + "'";
+            return -1;
+        }
+        Config::Lua::CLuaConfigCssGap gap(0);
+        const auto                    err = gap.parse(configScratch());
+        lua_settop(configScratch(), 0);
+        if (err.errorCode != Config::Lua::PARSE_ERROR_OK) {
+            g_configError = err.message.empty() ? "invalid reserved area" : err.message;
+            return -2;
+        }
+        const auto& g = *sc<const Config::CCssGapData*>(gap.data());
+        if (!g_monitorParser->setReserved(Desktop::CReservedArea(g.m_top, g.m_right, g.m_bottom, g.m_left))) {
+            g_configError = "invalid reserved area";
+            return -2;
+        }
+        return 0;
+    }
+
+    static int hlMonitorFieldBool(const char* field, int v) {
+        if (!g_up || !g_monitorParser)
+            return -1;
+        const std::string f = field ? field : "";
+        if (f != "disabled") {
+            g_configError = "hl-monitor: unknown bool field '" + f + "'";
+            return -1;
+        }
+        g_monitorParser->rule().m_disabled = (v != 0);
+        return 0;
+    }
+
+    static int hlMonitorCommit() {
+        if (!g_up || !g_monitorParser)
+            return -1;
+        Config::monitorRuleMgr()->add(std::move(g_monitorParser->rule()));
+        g_monitorParser.reset();
+        Supplementary::refresher()->scheduleRefresh(Supplementary::REFRESH_MONITOR_STATES);
+        return 0;
+    }
+
+    // ---- curves and animations -------------------------------------------------
+
+    static int hlCurveAdd(const char* name, int type, double a, double b, double c, double d) {
+        if (!g_up)
+            return -1;
+        if (!name || !*name) {
+            g_configError = "hl-curve: name required";
+            return -1;
+        }
+        if (type == 0)
+            Animation::mgr()->addBezierWithName(name, Vector2D{a, b}, Vector2D{c, d});
+        else if (type == 1) {
+            if (a <= 0.5F || b <= 0.5F || c <= 0.5F) {
+                g_configError = "hl-curve: spring params must be >= 0.5";
+                return -1;
+            }
+            Hyprutils::Animation::SSpringCurve curve;
+            curve.stiffness = sc<float>(a);
+            curve.damping   = sc<float>(b);
+            curve.mass      = sc<float>(c);
+            Animation::mgr()->addSpringWithName(name, curve);
+        } else {
+            g_configError = "hl-curve: unknown type";
+            return -1;
+        }
+        return 0;
+    }
+
+    static int hlAnimationSet(const char* leaf, int enabled, double speed, const char* curve, const char* style) {
+        if (!g_up)
+            return -1;
+        if (!leaf || !*leaf) {
+            g_configError = "hl-animation: leaf required";
+            return -1;
+        }
+        const std::string cv = curve ? curve : "";
+        const std::string sv = style ? style : "";
+        if (!cv.empty() && !Animation::mgr()->bezierExists(cv) && !Animation::mgr()->springExists(cv)) {
+            g_configError = "hl-animation: curve '" + cv + "' is not defined (declare it with hl-curve)";
+            return -1;
+        }
+        if (!sv.empty()) {
+            const auto err = Animation::mgr()->styleValidInConfigVar(leaf, sv);
+            if (!err.empty()) {
+                g_configError = err;
+                return -1;
+            }
+        }
+        Config::animationTree()->setConfigForNode(leaf, enabled != 0, sc<float>(speed), cv, sv);
+        return 0;
+    }
+
+    // ---- permissions -----------------------------------------------------------
+    // mirrors the lua hl.permission; only takes effect at first launch, like
+    // upstream — permission rules require a compositor restart.
+    static int hlPermissionAdd(const char* binary, const char* typeStr, const char* modeStr) {
+        if (!g_up)
+            return -1;
+        auto* mgr = sc<Lua::CConfigManager*>(Config::mgr().get());
+        if (!mgr || !mgr->isFirstLaunch()) {
+            g_configError = "hl-permission: permission rules only take effect at startup; set them in your config and restart";
+            return -1;
+        }
+        if (!g_pDynamicPermissionManager) {
+            g_configError = "hl-permission: permission manager unavailable";
+            return -1;
+        }
+        const std::string           t = typeStr ? typeStr : "";
+        const std::string           m = modeStr ? modeStr : "";
+        eDynamicPermissionType      type = PERMISSION_TYPE_UNKNOWN;
+        eDynamicPermissionAllowMode mode = PERMISSION_RULE_ALLOW_MODE_UNKNOWN;
+        if (t == "screencopy")
+            type = PERMISSION_TYPE_SCREENCOPY;
+        else if (t == "cursorpos")
+            type = PERMISSION_TYPE_CURSOR_POS;
+        else if (t == "plugin")
+            type = PERMISSION_TYPE_PLUGIN;
+        else if (t == "keyboard" || t == "keeb")
+            type = PERMISSION_TYPE_KEYBOARD;
+        else if (t == "input-capture")
+            type = PERMISSION_TYPE_INPUT_CAPTURE;
+        if (m == "ask")
+            mode = PERMISSION_RULE_ALLOW_MODE_ASK;
+        else if (m == "allow")
+            mode = PERMISSION_RULE_ALLOW_MODE_ALLOW;
+        else if (m == "deny")
+            mode = PERMISSION_RULE_ALLOW_MODE_DENY;
+        if (type == PERMISSION_TYPE_UNKNOWN || mode == PERMISSION_RULE_ALLOW_MODE_UNKNOWN) {
+            g_configError = "hl-permission: unknown type '" + t + "' or mode '" + m + "'";
+            return -1;
+        }
+        g_pDynamicPermissionManager->addConfigPermissionRule(binary ? binary : "", type, mode);
+        return 0;
     }
 
     static ptr hlSchemeWindowInitialClass(int id) {
@@ -2392,6 +2766,7 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-window-fullscreen-state", (void*)hlSchemeWindowFullscreenState);
         Sregister_symbol("hl-scheme-layout-message", (void*)hlSchemeLayoutMessage);
         Sregister_symbol("hl-config-begin", (void*)hlConfigBegin);
+        Sregister_symbol("hl-config-push-int", (void*)hlConfigPushInt);
         Sregister_symbol("hl-config-push-num", (void*)hlConfigPushNum);
         Sregister_symbol("hl-config-push-bool", (void*)hlConfigPushBool);
         Sregister_symbol("hl-config-push-str", (void*)hlConfigPushStr);
@@ -2402,6 +2777,15 @@ namespace Config::Scheme {
         Sregister_symbol("hl-config-set", (void*)hlConfigSet);
         Sregister_symbol("hl-config-last-error", (void*)hlConfigLastError);
         Sregister_symbol("hl-config-get", (void*)hlConfigGet);
+        Sregister_symbol("hl-monitor-begin", (void*)hlMonitorBegin);
+        Sregister_symbol("hl-monitor-field-str", (void*)hlMonitorFieldStr);
+        Sregister_symbol("hl-monitor-field-num", (void*)hlMonitorFieldNum);
+        Sregister_symbol("hl-monitor-field-gap", (void*)hlMonitorFieldGap);
+        Sregister_symbol("hl-monitor-field-bool", (void*)hlMonitorFieldBool);
+        Sregister_symbol("hl-monitor-commit", (void*)hlMonitorCommit);
+        Sregister_symbol("hl-curve-add", (void*)hlCurveAdd);
+        Sregister_symbol("hl-animation-set", (void*)hlAnimationSet);
+        Sregister_symbol("hl-permission-add", (void*)hlPermissionAdd);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
         Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
