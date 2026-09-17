@@ -461,6 +461,9 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-is-key-down (foreign-procedure "hl-is-key-down" (string) int))
 (define c-hl-loaded-plugins (foreign-procedure "hl-loaded-plugins" () scheme-object))
 (define c-hl-version (foreign-procedure "hl-version" () scheme-object))
+(define c-hl-windows-from (foreign-procedure "hl-windows-from" (string) scheme-object))
+(define c-hl-monitor-info (foreign-procedure "hl-monitor-info" (string) scheme-object))
+(define c-hl-window-fullscreen-handler (foreign-procedure "hl-window-fullscreen-handler" (int) scheme-object))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -1070,6 +1073,25 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 (define (hl-version)
   (c-hl-version))
+
+;; ALL windows matching a selector: (hl-windows-from "class:^foot$")
+(define (hl-windows-from sel)
+  (let ((s (c-hl-windows-from (hl--str sel))))
+    (if (not s)
+        '()
+        (map make-hl-window (map string->number (hl--split-lines s))))))
+
+;; => alist: (name description position-x position-y width height scale
+;;            transform focused active-workspace vrr-active bitdepth-10bit)
+(define (hl-monitor-info sel)
+  (let ((s (c-hl-monitor-info (hl--str sel))))
+    (if (not s)
+        #f
+        (hl--pairs-from-lines (hl--split-lines s)))))
+
+;; which fullscreen handler a window uses (string)
+(define (hl-window-fullscreen-handler w)
+  (c-hl-window-fullscreen-handler (hl--wid w)))
 
 ;; ---- monitors, curves, animations, permissions ------------------------------
 
@@ -3168,6 +3190,60 @@ namespace Config::Scheme {
         return Sstring_utf8(HYPRLAND_VERSION, strlen(HYPRLAND_VERSION));
     }
 
+    // windows matching a selector: newline-joined handle ids (like hl-windows)
+    static ptr hlWindowsFrom(const char* sel) {
+        if (!g_up)
+            return Sfalse;
+        const std::string selector = sel ? sel : "";
+        std::string       joined;
+        for (const auto& w : Desktop::windowState()->windows()) {
+            if (!windowMatchesSelector(w, selector))
+                continue;
+            const int id = g_nextWindowId++;
+            g_windows.emplace(id, PHLWINDOWREF(w));
+            if (!joined.empty())
+                joined += '\n';
+            joined += std::to_string(id);
+        }
+        if (joined.empty())
+            return Sfalse;
+        return Sstring_utf8(joined.c_str(), joined.size());
+    }
+
+    // monitor info as k/v line pairs (hl--pairs-from-lines scheme-side)
+    static ptr hlMonitorInfo(const char* sel) {
+        if (!g_up)
+            return Sfalse;
+        const auto mon = State::monitorState()->query().configString(sel ? sel : "").run();
+        if (!mon)
+            return Sfalse;
+        std::string out;
+        const auto  add = [&out](const std::string& k, const std::string& v) { out += k + "\n" + v + "\n"; };
+        add("name", mon->m_name);
+        add("description", mon->m_description);
+        add("position-x", std::to_string((int)mon->m_position.x));
+        add("position-y", std::to_string((int)mon->m_position.y));
+        add("width", std::to_string((int)mon->m_size.x));
+        add("height", std::to_string((int)mon->m_size.y));
+        add("scale", std::to_string(mon->m_scale));
+        add("transform", std::to_string(sc<int>(mon->m_transform)));
+        add("focused", (Desktop::focusState()->monitor() == mon) ? "1" : "0");
+        add("active-workspace", mon->m_activeWorkspace ? mon->m_activeWorkspace->displayName() : "");
+        add("vrr-active", mon->m_vrrActive ? "1" : "0");
+        add("bitdepth-10bit", mon->m_enabled10bit ? "1" : "0");
+        return Sstring_utf8(out.c_str(), out.size());
+    }
+
+    static ptr hlWindowFullscreenHandler(int id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        const auto name = Fullscreen::controller()->getFullscreenHandlerNameAsString(window);
+        return Sstring_utf8(name.c_str(), name.size());
+    }
+
     static ptr hlSchemeWindowInitialClass(int id) {
         if (!g_up)
             return Sfalse;
@@ -3632,6 +3708,9 @@ namespace Config::Scheme {
         Sregister_symbol("hl-is-key-down", (void*)hlIsKeyDown);
         Sregister_symbol("hl-loaded-plugins", (void*)hlLoadedPlugins);
         Sregister_symbol("hl-version", (void*)hlVersion);
+        Sregister_symbol("hl-windows-from", (void*)hlWindowsFrom);
+        Sregister_symbol("hl-monitor-info", (void*)hlMonitorInfo);
+        Sregister_symbol("hl-window-fullscreen-handler", (void*)hlWindowFullscreenHandler);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
         Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
