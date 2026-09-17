@@ -306,6 +306,34 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
        (loop (+ i 1) (+ i 1) (cons (substring s start i) acc)))
       (else (loop (+ i 1) start acc)))))
 
+(define (hl--split-string str char)
+  (let loop ((i 0) (start 0) (acc '()))
+    (cond
+      ((>= i (string-length str))
+       (reverse (cons (substring str start i) acc)))
+      ((char=? (string-ref str i) char)
+       (loop (+ i 1) (+ i 1) (cons (substring str start i) acc)))
+      (else (loop (+ i 1) start acc)))))
+
+(define (hl--string-index str char)
+  (let loop ((i 0))
+    (cond ((>= i (string-length str)) #f)
+          ((char=? (string-ref str i) char) i)
+          (else (loop (+ i 1))))))
+
+(define (hl--string-join lst sep)
+  (if (null? lst) ""
+      (let loop ((acc (car lst)) (rest (cdr lst)))
+        (if (null? rest) acc
+            (loop (string-append acc sep (car rest)) (cdr rest))))))
+
+(define (hl--trim str)
+  (define n (string-length str))
+  (let loop ((s 0) (e n))
+    (cond ((and (< s e) (char-whitespace? (string-ref str s))) (loop (+ s 1) e))
+          ((and (< s e) (char-whitespace? (string-ref str (- e 1)))) (loop s (- e 1)))
+          (else (substring str s e)))))
+
 ;; layout event dispatch. a layout provider is an alist of callbacks:
 ;;   ((recalculate . fn) (resize . fn) (window-open . fn) (window-close . fn))
 ;; recalculate/resize fn: (count W H windows [dx dy corner]) -> ((x y w h) ...)
@@ -612,7 +640,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
            8192
            0))))
 
-(define (hl-bind mods key thunk . opts)
+(define (hl--bind-impl mods key thunk . opts)
   (let* ((alist (hl--pairs opts))
          (id (c-hl-bind mods key
                          (+ (hl--bind-flags alist)
@@ -628,6 +656,78 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (< id 0)
         (errorf 'hl-bind "bind ~a ~a rejected, see compositor log" mods key)
         (hl--register id thunk))))
+
+;; hl-bind dispatches on the first argument:
+;;   (hl-bind MODS KEY THUNK . OPTS)           — two strings
+;;   (hl-bind (cons MODS KEY) THUNK . OPTS)    — a pair (from kbd or hl-kbd)
+(define (hl-bind . args)
+  (if (pair? (car args))
+      ;; pair form: (cons mods key) thunk . opts
+      (let ((binding (car args)) (rest (cdr args)))
+        (apply hl--bind-impl (car binding) (cdr binding) rest))
+      ;; two-string form: mods key thunk . opts
+      (apply hl--bind-impl args)))
+
+;; ---- key specification helpers -----------------------------------------------
+;; (kbd "C-M-a")      — emacs syntax → (mods . key) pair for hl-bind
+;; (hl-kbd "SUPER+SHIFT+Q") — lua/hyprland syntax → (mods . key) pair
+
+(define hl--emacs-mods
+  '(("C" . "CTRL") ("M" . "ALT") ("S" . "SHIFT")
+    ("s" . "SUPER") ("A" . "ALT") ("H" . "MOD3")))
+
+(define hl--emacs-keys
+  '(("RET" . "Return") ("SPC" . "space") ("ESC" . "Escape")
+    ("TAB" . "Tab") ("DEL" . "Delete") ("LFD" . "Return")))
+
+(define (hl--emacs-key name)
+  ;; translate an emacs key name to the xkb/hyprland name
+  (let ((mapped (assoc name hl--emacs-keys)))
+    (if mapped
+        (cdr mapped)
+        (if (and (> (string-length name) 2)
+                 (char=? (string-ref name 0) #\<)
+                 (char=? (string-ref name (- (string-length name) 1)) #\>))
+            ;; strip < and >, replace - with _ (e.g. <kp-1> → KP_1)
+            (let* ((inner (substring name 1 (- (string-length name) 1)))
+                   (n (string-length inner)))
+              (let build ((i 0) (acc '()))
+                (if (= i n)
+                    (list->string (reverse acc))
+                    (let ((c (string-ref inner i)))
+                      (build (+ i 1)
+                             (cons (if (char=? c #\-) #\_ c) acc))))))
+            name))))
+
+(define (kbd spec)
+  ;; parse an emacs key specification string → (mods . key) pair
+  ;; e.g. "C-M-a" → ("CTRL ALT" . "a"), "<f1>" → ("" . "F1")
+  (let loop ((str spec) (mods '()))
+    (let ((dash (hl--string-index str #\-)))
+      (if (and dash (> dash 0))
+          (let ((prefix (substring str 0 dash)))
+            (if (assoc prefix hl--emacs-mods)
+                ;; it's a modifier prefix, consume and recurse
+                (loop (substring str (+ dash 1) (string-length str))
+                      (cons (cdr (assoc prefix hl--emacs-mods)) mods))
+                ;; not a modifier — the whole remaining string is the key
+                (cons (hl--string-join (reverse mods) " ")
+                      (hl--emacs-key str))))
+          ;; no more modifier dashes — the remaining string is the key
+          (cons (hl--string-join (reverse mods) " ")
+                (hl--emacs-key str))))))
+
+(define (hl-kbd spec)
+  ;; parse a lua/hyprland key specification string → (mods . key) pair
+  ;; e.g. "SUPER+SHIFT+Q" or "SUPER + SHIFT + Q" → ("SUPER SHIFT" . "Q")
+  (let* ((parts (map hl--trim (hl--split-string spec #\+)))
+         (n (length parts)))
+    (if (= n 1)
+        (cons "" (car parts))
+        (let loop ((rest parts) (mods '()))
+          (if (= (length rest) 1)
+              (cons (hl--string-join (reverse mods) " ") (car rest))
+              (loop (cdr rest) (cons (car rest) mods)))))))
 
 (define (hl-exec cmd)
   (c-hl-exec cmd))

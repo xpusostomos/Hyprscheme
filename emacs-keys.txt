@@ -1,0 +1,25 @@
+(* Top-level key definition representation *)
+key-definition     ::= string-literal | vector-literal
+
+(* 1. Human-Readable String Syntax (e.g., "C-x C-f", "M-RET", "<f1> f") *)
+string-literal     ::= '"' , [ key-sequence ] , '"'
+key-sequence       ::= key , { " " , key }
+key                ::= [ modifier-prefix ] , basic-key
+modifier-prefix    ::= prefix-modifier , { "-" , prefix-modifier }
+prefix-modifier    ::= "C" | "M" | "s" | "S" | "A" | "H"
+basic-key          ::= functional-key | ascii-char | unicode-char | special-key
+
+functional-key     ::= "<" , ( function-name | mouse-event ) , ">"
+function-name      ::= letter , { letter | digit | "-" }
+mouse-event        ::= ( "mouse" | "wheel" | "drag" | "down" ) , "-" , digit , { letter }
+ascii-char         ::= ? Any printable ASCII character except whitespace ?
+unicode-char       ::= ? Character representation or escape sequence ?
+special-key        ::= RET | SPC | TAB | DEL | LFD | ESC | NUL
+
+(* 2. Internal Vector Syntax (e.g., [?\C-x ?\C-f] or [f1]) *)
+vector-literal     ::= "[" , { vector-element } , "]"
+vector-element     ::= symbol | character-code | integer
+
+symbol             ::= ? Emacs Lisp symbol (e.g., 'f1, 'down-mouse-1) ?
+character-code     ::= ? Emacs Lisp character literal (e.g., ?\C-a, ?a) ?
+integer            ::= ? Raw character code integer value ?
