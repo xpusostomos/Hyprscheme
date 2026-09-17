@@ -69,17 +69,16 @@ Originally-remaining list (for reference):
   - scrolling_width window rule (scrolling-layout)
 
 == 4. EVENTS ==
-Only 4 exist (window open/close, workspace-active, submap). Missing:
-  - hyprland.start / hyprland.shutdown — CRITICAL for run-once autostart
-    (top-level forms re-run on every reload today) and session cleanup
-    (systemd, virtual-gpu autostart)
-  - window.title / window.class / window.active / window.urgent /
-    window.fullscreen / window.pin / window.move_to_workspace /
-    window.minimize / window.destroy / window.open_early / window.kill /
-    window.bell / window.update_rules
+IMPLEMENTED 2026-09-17 (commit f5c73ee): lifecycle — hl-on-start (fires on
+the first render frame; requires config-time plugin load), hl-on-shutdown,
+hl-on-config-reloaded (fires on the reload AFTER registration — register in
+the config file) — plus window events: title, class, urgent, pin,
+fullscreen, move-to-workspace, active, minimize (w state). Remaining:
+  - window.open_early / window.destroy / window.kill / window.bell /
+    window.update_rules
   - monitor.added/removed/focused/layout_changed
-  - workspace.created/removed/move_to_monitor/special_active
-  - config.reloaded (expose to user code), config.unload, config.props_refreshed
+  - workspace.special_active/created/removed/move_to_monitor
+  - config.unload, config.props_refreshed
   - layer.opened/closed, screenshare.state, input.keyboard.key (low)
 
 == 5. QUERIES / SELECTORS ==

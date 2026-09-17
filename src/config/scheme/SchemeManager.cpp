@@ -27,6 +27,9 @@
 #include <src/config/shared/actions/ConfigActions.hpp>
 #include <src/helpers/math/Direction.hpp>
 #include <src/input/Keys.hpp>
+#include <src/config/ConfigManager.hpp>
+#include <src/config/lua/ConfigManager.hpp>
+#include <src/config/lua/types/LuaConfigValue.hpp>
 #include <src/config/ConfigValue.hpp>
 #include <src/ipc/s1/S1.hpp>
 
@@ -49,6 +52,8 @@
 
 extern "C" {
 #include <scheme.h>
+#include <lua.h>
+#include <lauxlib.h>
 }
 
 
@@ -369,6 +374,18 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-release-input-capture (foreign-procedure "hl-scheme-release-input-capture" () int))
 (define c-hl-window-fullscreen-state (foreign-procedure "hl-scheme-window-fullscreen-state" (int int int int) int))
 (define c-hl-layout-message (foreign-procedure "hl-scheme-layout-message" (string) int))
+;; ---- config: set/get config options ----------------------------------------
+(define c-hl-config-begin (foreign-procedure "hl-config-begin" () int))
+(define c-hl-config-push-num (foreign-procedure "hl-config-push-num" (double) int))
+(define c-hl-config-push-bool (foreign-procedure "hl-config-push-bool" (int) int))
+(define c-hl-config-push-str (foreign-procedure "hl-config-push-str" (string) int))
+(define c-hl-config-tbl-open (foreign-procedure "hl-config-tbl-open" (int) int))
+(define c-hl-config-tbl-key (foreign-procedure "hl-config-tbl-key" (string) int))
+(define c-hl-config-tbl-set-hash (foreign-procedure "hl-config-tbl-set-hash" () int))
+(define c-hl-config-tbl-seti (foreign-procedure "hl-config-tbl-seti" (int) int))
+(define c-hl-config-set (foreign-procedure "hl-config-set" (string) int))
+(define c-hl-config-last-error (foreign-procedure "hl-config-last-error" () scheme-object))
+(define c-hl-config-get (foreign-procedure "hl-config-get" (string) scheme-object))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -721,6 +738,64 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; send a message to the active workspace's layout (see custom-layouts)
 (define (hl-layout-msg msg)
   (= 0 (c-hl-layout-message (hl--str msg))))
+
+;; ---- config -----------------------------------------------------------------
+;; set/get config options from scheme. keys accept "general:gaps_in" or
+;; "general.gaps_in". values: number, string, boolean, list (vec2-style
+;; array), or alist (hash table, e.g. '((top . 10) (bottom . 10))).
+;; writes propagate like a runtime hl.config — the affected subsystems
+;; refresh immediately.
+(define (hl-config key val)
+  (c-hl-config-begin)
+  (hl--push-val val)
+  (if (= 0 (c-hl-config-set (hl--str key)))
+      #t
+      (errorf 'hl-config "~a" (c-hl-config-last-error))))
+
+(define (hl--push-val v)
+  (cond ((number? v) (c-hl-config-push-num (exact->inexact v)))
+        ((boolean? v) (c-hl-config-push-bool (if v 1 0)))
+        ((string? v) (c-hl-config-push-str v))
+        ((and (pair? v) (pair? (car v)))
+         ;; alist → hash table
+         (c-hl-config-tbl-open 1)
+         (for-each (lambda (kv)
+                     (c-hl-config-tbl-key (hl--str (car kv)))
+                     (hl--push-val (cdr kv))
+                     (c-hl-config-tbl-set-hash))
+                   v))
+        ((list? v)
+         ;; array table (e.g. a vec2 '(20 20))
+         (c-hl-config-tbl-open 0)
+         (let loop ((rest v) (i 1))
+           (unless (null? rest)
+             (hl--push-val (car rest))
+             (c-hl-config-tbl-seti i)
+             (loop (cdr rest) (+ i 1)))))
+        (else (errorf 'hl-config "unsupported value ~s" v))))
+
+(define (hl-config-get key)
+  (let ((s (c-hl-config-get (hl--str key))))
+    (if (not s)
+        #f
+        (hl--unmarshal (hl--split-lines s)))))
+
+;; decode "b|n|s|t" + payload lines into a scheme value
+(define (hl--unmarshal lines)
+  (case (string->symbol (car lines))
+    ((b) (string=? (cadr lines) "1"))
+    ((n) (string->number (cadr lines)))
+    ((s) (cadr lines))
+    ((t)
+     (let loop ((rest (cdr lines)) (acc '()))
+       (cond ((null? rest) (reverse acc))
+             ((null? (cdr rest)) (reverse acc)) ; malformed tail
+             (else
+              (let ((k (car rest)) (v (cadr rest)))
+                (let ((k2 (if (let ((n (string->number k))) n) (string->number k) (string->symbol k)))
+                      (v2 (or (string->number v) v)))
+                  (loop (cddr rest) (cons (cons k2 v2) acc))))))))
+    (else #f)))
 
 ;; toggles; modes mirror Fullscreen::eFullscreenMode (1 maximized, 2 fullscreen)
 ;; optional second arg = mode (default 2); (hl-window-fullscreen w 1) maximizes
@@ -1746,6 +1821,169 @@ namespace Config::Scheme {
         return actionResult("layout-msg", Config::Actions::layoutMessage(std::string(msg ? msg : "")));
     }
 
+    // ---- config: setting config options from scheme ---------------------------
+    // The values live in CConfigManager::m_configValues (dotted key →
+    // ILuaConfigValue). Each value parses itself off a lua stack; we keep a
+    // private scratch lua_State (the same liblua the compositor links) purely
+    // as the typed front door — the config manager's interpreter is never
+    // involved. Propagation is a plain prop-refresh, exactly like
+    // hyprctl eval 'hl.config(...)'.
+
+    static lua_State*  g_configScratch = nullptr;
+    static std::string g_configError;
+
+    static Config::Lua::ILuaConfigValue* configValueByKey(const char* key) {
+        auto* mgr = sc<Lua::CConfigManager*>(Config::mgr().get());
+        if (!mgr || !key || !*key)
+            return nullptr;
+        auto& vals = mgr->m_configValues;
+        auto  it   = vals.find(std::string(key));
+        if (it == vals.end()) {
+            std::string k = key;
+            std::ranges::replace(k, ':', '.');
+            it = vals.find(k);
+        }
+        return it == vals.end() ? nullptr : it->second.get();
+    }
+
+    static lua_State* configScratch() {
+        if (!g_configScratch)
+            g_configScratch = luaL_newstate();
+        return g_configScratch;
+    }
+
+    // clears the scratch stack: once at the start of each hl-config value
+    static int hlConfigBegin() {
+        if (!g_up)
+            return -1;
+        lua_settop(configScratch(), 0);
+        return 0;
+    }
+
+    static int hlConfigPushNum(double v) {
+        if (!g_up)
+            return -1;
+        lua_pushnumber(configScratch(), v);
+        return 0;
+    }
+
+    static int hlConfigPushBool(int v) {
+        if (!g_up)
+            return -1;
+        lua_pushboolean(configScratch(), v != 0);
+        return 0;
+    }
+
+    static int hlConfigPushStr(const char* v) {
+        if (!g_up)
+            return -1;
+        lua_pushlstring(configScratch(), v ? v : "", v ? strlen(v) : 0);
+        return 0;
+    }
+
+    static int hlConfigTblOpen(int isHash) {
+        if (!g_up)
+            return -1;
+        lua_createtable(configScratch(), isHash ? 0 : 4, isHash ? 4 : 0);
+        return 0;
+    }
+
+    static int hlConfigTblKey(const char* k) {
+        if (!g_up)
+            return -1;
+        lua_pushlstring(configScratch(), k ? k : "", k ? strlen(k) : 0);
+        return 0;
+    }
+
+    static int hlConfigTblSetHash() {
+        if (!g_up)
+            return -1;
+        lua_rawset(configScratch(), -3); // pops key + value onto the table below
+        return 0;
+    }
+
+    static int hlConfigTblSeti(int idx) {
+        if (!g_up)
+            return -1;
+        lua_rawseti(configScratch(), -2, idx); // pops the value onto the table below
+        return 0;
+    }
+
+    static int hlConfigSet(const char* key) {
+        if (!g_up)
+            return -1;
+        auto* val = configValueByKey(key);
+        if (!val) {
+            g_configError = std::string("unknown config key '") + (key ? key : "") + "'";
+            return -1;
+        }
+        lua_State*   L   = configScratch();
+        const auto   err = val->parse(L);
+        lua_settop(L, 0);
+        if (err.errorCode != Config::Lua::PARSE_ERROR_OK) {
+            g_configError = err.message.empty() ? "parse error" : err.message;
+            return -2;
+        }
+        Supplementary::refresher()->scheduleRefresh(val->refreshBits());
+        return 0;
+    }
+
+    static ptr hlConfigLastError() {
+        return Sstring_utf8(g_configError.c_str(), g_configError.size());
+    }
+
+    // read side: marshal the value back as an encoded string
+    // "b\n0|1" | "n\n<num>" | "s\n<str>" | "t\n(key\nvalue\n)*" ; #f = unknown
+    static ptr hlConfigGet(const char* key) {
+        if (!g_up)
+            return Sfalse;
+        auto* val = configValueByKey(key);
+        if (!val)
+            return Sfalse;
+        lua_State* L = configScratch();
+        val->push(L);
+        std::string out;
+        switch (lua_type(L, -1)) {
+            case LUA_TNIL: lua_settop(L, 0); return Sfalse;
+            case LUA_TBOOLEAN: out = std::string("b\n") + (lua_toboolean(L, -1) ? "1" : "0"); break;
+            case LUA_TNUMBER: {
+                char buf[64];
+                snprintf(buf, sizeof buf, "n\n%.17g", lua_tonumber(L, -1));
+                out = buf;
+                break;
+            }
+            case LUA_TSTRING: out = std::string("s\n") + lua_tostring(L, -1); break;
+            case LUA_TTABLE: {
+                out = "t\n";
+                lua_pushnil(L);
+                while (lua_next(L, -2) != 0) {
+                    std::string k, v;
+                    if (lua_type(L, -2) == LUA_TSTRING)
+                        k = lua_tostring(L, -2);
+                    else
+                        k = std::to_string((long long)lua_tointeger(L, -2));
+                    switch (lua_type(L, -1)) {
+                        case LUA_TNUMBER: {
+                            char buf[64];
+                            snprintf(buf, sizeof buf, "%.17g", lua_tonumber(L, -1));
+                            v = buf;
+                            break;
+                        }
+                        case LUA_TSTRING: v = lua_tostring(L, -1); break;
+                        case LUA_TBOOLEAN: v = lua_toboolean(L, -1) ? "1" : "0"; break;
+                        default: v = "?"; break;
+                    }
+                    out += k + "\n" + v + "\n";
+                    lua_pop(L, 1);
+                }
+                break;
+            }
+            default: lua_settop(L, 0); return Sfalse;
+        }
+        lua_settop(L, 0);
+        return Sstring_utf8(out.c_str(), out.size());
+    }
+
     static ptr hlSchemeWindowInitialClass(int id) {
         if (!g_up)
             return Sfalse;
@@ -2063,76 +2301,11 @@ namespace Config::Scheme {
         g_up = false;
     }
 
-    void init() {
-        static bool done = false;
-        if (done) {
-            // soft reload: the interpreter and bootstrap are still alive;
-            // re-attach the plumbing that shutdown() removed
-            g_up = true;
-            if (g_pEventLoopManager && IPC::Socket1::sock()) {
-                g_schemeIpcCommand = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
-                    .name    = "scheme",
-                    .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
-                    .handler = [](const IPC::Socket1::SRequest& req) {
-                        auto code = req.command.substr(req.command.find_first_of(' ') + 1);
-                        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
-                        std::string out;
-                        if (Sstringp(r)) {
-                            for (iptr i = 0; i < Sstring_length(r); ++i)
-                                out += (char)Sstring_ref(r, i);
-                        }
-                        return IPC::Socket1::SResponse(out);
-                    }});
-            }
-            g_reloadListener = Event::bus()->m_events.config.reloaded.listen([] { reloadScheme(); });
-            g_lifecycleListeners.emplace_back(Event::bus()->m_events.start.listen([] {
-                g_startSeen = true;
-                auto pending = std::move(g_pendingStart);
-                g_pendingStart.clear();
-                for (const auto id : pending)
-                    fireScheme(id);
-            }));
-            reloadScheme();
-            return;
-        }
-        done = true;
-
-        g_configPath = userConfigPath();
-        if (g_configPath.empty() || !std::filesystem::exists(g_configPath)) {
-            LOG(Log::INFO, "[scheme] no hyprland.scm found, scheme scripting disabled");
-            return;
-        }
-
-        // pin ourselves: bump the dlopen refcount so the compositor's
-        // dlclose on unload never unmaps the live interpreter
-        {
-            Dl_info self{};
-            if (dladdr((void*)&init, &self) && self.dli_fname)
-                dlopen(self.dli_fname, RTLD_NOW | RTLD_NOLOAD);
-        }
-        Sscheme_init(nullptr);
-        // boot files live next to the plugin (.so dir), with the install
-        // prefix and the dev kit as fallbacks
-        std::string bootDir;
-        Dl_info info{};
-        if (dladdr((void*)&init, &info) && info.dli_fname)
-            bootDir = std::filesystem::path(info.dli_fname).parent_path().string();
-        const std::string home = getenv("HOME") ? getenv("HOME") : "";
-        const std::vector<std::string> bootDirs = {"/home/chris/GITE/chez-pic", bootDir, home + "/.local/lib/hyprscheme", "/usr/lib/hyprscheme"};
-        const auto tryBoot = [&bootDirs](const char* name) {
-            for (const auto& dir : bootDirs) {
-                if (dir.empty())
-                    continue;
-                const auto p = dir + "/" + name;
-                if (std::filesystem::exists(p))
-                    return p;
-            }
-            return std::string(name);
-        };
-        Sregister_boot_file(tryBoot("petite.boot").c_str());
-        Sregister_boot_file(tryBoot("scheme.boot").c_str());
-        Sbuild_heap(nullptr, nullptr);
-
+    // attachInterp: register foreign symbols and load the prelude + API
+    // bootstrap. Called on first init and on every soft reload (so a
+    // re-loaded plugin picks up its new scheme API against the live
+    // interpreter). Returns false when the bootstrap failed.
+    static bool attachInterp() {
         Sregister_symbol("hl-scheme-bind", (void*)hlSchemeBind);
         Sregister_symbol("hl-scheme-exec", (void*)hlSchemeExec);
         Sregister_symbol("hl-scheme-timer", (void*)hlSchemeTimer);
@@ -2218,6 +2391,17 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-release-input-capture", (void*)hlSchemeReleaseInputCapture);
         Sregister_symbol("hl-scheme-window-fullscreen-state", (void*)hlSchemeWindowFullscreenState);
         Sregister_symbol("hl-scheme-layout-message", (void*)hlSchemeLayoutMessage);
+        Sregister_symbol("hl-config-begin", (void*)hlConfigBegin);
+        Sregister_symbol("hl-config-push-num", (void*)hlConfigPushNum);
+        Sregister_symbol("hl-config-push-bool", (void*)hlConfigPushBool);
+        Sregister_symbol("hl-config-push-str", (void*)hlConfigPushStr);
+        Sregister_symbol("hl-config-tbl-open", (void*)hlConfigTblOpen);
+        Sregister_symbol("hl-config-tbl-key", (void*)hlConfigTblKey);
+        Sregister_symbol("hl-config-tbl-set-hash", (void*)hlConfigTblSetHash);
+        Sregister_symbol("hl-config-tbl-seti", (void*)hlConfigTblSeti);
+        Sregister_symbol("hl-config-set", (void*)hlConfigSet);
+        Sregister_symbol("hl-config-last-error", (void*)hlConfigLastError);
+        Sregister_symbol("hl-config-get", (void*)hlConfigGet);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
         Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
@@ -2248,9 +2432,109 @@ namespace Config::Scheme {
 
         if (Stop_level_value(Sstring_to_symbol("hl--ready")) == Sfalse) {
             LOG(Log::ERR, "[scheme] bootstrap failed, scheme scripting disabled");
-            return;
+            return false;
         }
         g_up = true;
+        return true;
+    }
+
+    void init() {
+        static bool done = false;
+        static std::filesystem::file_time_type loadedTime;
+        if (done) {
+            // the interpreter lives in the pinned first mapping: a re-load
+            // re-attaches the SAME code. If the binary changed on disk, say
+            // so instead of silently ignoring the upgrade.
+            {
+                Dl_info self{};
+                if (dladdr((void*)&init, &self) && self.dli_fname) {
+                    std::error_code ec;
+                    const auto t = std::filesystem::last_write_time(self.dli_fname, ec);
+                    if (!ec && t != loadedTime)
+                        LOG(Log::ERR, "[scheme] the plugin binary changed on disk since this session started; "
+                                      "restart the compositor to load the new version (the running interpreter "
+                                      "cannot be replaced in-place)");
+                }
+            }
+            // soft reload: the interpreter is still alive; re-attach the
+            // foreign symbols, the (possibly new) scheme API and the
+            // plumbing that shutdown() removed
+            if (!attachInterp())
+                return;
+            if (g_pEventLoopManager && IPC::Socket1::sock()) {
+                g_schemeIpcCommand = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
+                    .name    = "scheme",
+                    .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+                    .handler = [](const IPC::Socket1::SRequest& req) {
+                        auto code = req.command.substr(req.command.find_first_of(' ') + 1);
+                        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                        std::string out;
+                        if (Sstringp(r)) {
+                            for (iptr i = 0; i < Sstring_length(r); ++i)
+                                out += (char)Sstring_ref(r, i);
+                        }
+                        return IPC::Socket1::SResponse(out);
+                    }});
+            }
+            g_reloadListener = Event::bus()->m_events.config.reloaded.listen([] { reloadScheme(); });
+            g_lifecycleListeners.emplace_back(Event::bus()->m_events.start.listen([] {
+                g_startSeen = true;
+                auto pending = std::move(g_pendingStart);
+                g_pendingStart.clear();
+                for (const auto id : pending)
+                    fireScheme(id);
+            }));
+            reloadScheme();
+            return;
+        }
+        done = true;
+
+        g_configPath = userConfigPath();
+        if (g_configPath.empty() || !std::filesystem::exists(g_configPath)) {
+            LOG(Log::INFO, "[scheme] no hyprland.scm found, scheme scripting disabled");
+            return;
+        }
+
+        // pin ourselves: bump the dlopen refcount so the compositor's
+        // dlclose on unload never unmaps the live interpreter
+        {
+            Dl_info self{};
+            if (dladdr((void*)&init, &self) && self.dli_fname)
+                dlopen(self.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+        }
+        {
+            Dl_info selft{};
+            if (dladdr((void*)&init, &selft) && selft.dli_fname) {
+                std::error_code ec;
+                loadedTime = std::filesystem::last_write_time(selft.dli_fname, ec);
+            }
+        }
+        Sscheme_init(nullptr);
+        // boot files live next to the plugin (.so dir), with the install
+        // prefix and the dev kit as fallbacks
+        std::string bootDir;
+        Dl_info info{};
+        if (dladdr((void*)&init, &info) && info.dli_fname)
+            bootDir = std::filesystem::path(info.dli_fname).parent_path().string();
+        const std::string home = getenv("HOME") ? getenv("HOME") : "";
+        const std::vector<std::string> bootDirs = {"/home/chris/GITE/chez-pic", bootDir, home + "/.local/lib/hyprscheme", "/usr/lib/hyprscheme"};
+        const auto tryBoot = [&bootDirs](const char* name) {
+            for (const auto& dir : bootDirs) {
+                if (dir.empty())
+                    continue;
+                const auto p = dir + "/" + name;
+                if (std::filesystem::exists(p))
+                    return p;
+            }
+            return std::string(name);
+        };
+        Sregister_boot_file(tryBoot("petite.boot").c_str());
+        Sregister_boot_file(tryBoot("scheme.boot").c_str());
+        Sbuild_heap(nullptr, nullptr);
+
+        if (!attachInterp())
+            return;
+
 
         // Chez installs its own SIGSEGV/SIGABRT handlers during init,
         // displacing Hyprland's crash reporter. A plugin cannot reach

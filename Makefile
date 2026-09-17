@@ -31,7 +31,7 @@ CXXFLAGS += -std=c++2b -g -O2 -fPIC -fvisibility=hidden
 INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            -I$(CHEZ_BOOT) -Isrc/config/scheme \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
-LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz
+LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 
 SRC = src/config/scheme/SchemeManager.cpp src/config/scheme/SchemeLayout.cpp
 OBJ = $(SRC:.cpp=.o) src/plugin-main.o
