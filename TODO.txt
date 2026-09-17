@@ -2,14 +2,11 @@ Hyprscheme TODO — missing Scheme API, compiled from the wiki conversion
 (Sept 2026). Every entry was hit while writing the Scheme wiki; page
 references point into Hyprscheme.wiki. Suggested hl- names are proposals.
 
-== 1. CONFIG API (the big one — most wiki pages blocked on it) ==
-hl-config — set config options from Scheme: nested form and flat
-  ("path.option" = value) form; runtime changes from hyprctl scheme.
-  Needed by: config-options, animations, dwindle/master/scrolling-layout,
-  performance, tearing, xwayland, permissions (enforce_permissions), device
-  binds (drag_threshold), custom-layouts (layout selection!).
-  Companion read side: hl-config-get ("general:gaps_in" etc.) — needed for
-  option-aware binds (see code-snippets "smart gaps", "toggle animations").
+== 1. CONFIG API ==
+IMPLEMENTED 2026-09-17 (commit 99ef2e9): hl-config / hl-config-get — set
+and get config options from scheme with full propagation (scratch lua
+state over the config manager's own typed parsers; numbers, strings,
+bools, arrays, alists; typed error messages). Remaining in this section:
 hl-monitor — monitor rules: mode (incl. modeline strings), scale,
   position, transform, reserved area, colors (cm/sdr_eotf/bitdepth/icc/
   sdrbrightness/sdrsaturation), mirror, vrr, disabled, HEADLESS outputs.
