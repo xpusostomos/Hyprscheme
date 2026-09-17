@@ -91,12 +91,8 @@ hl-monitor-from, hl-monitor-at, hl-monitor-at-cursor, hl-workspace-info
 (live layout name!), hl-workspace-windows, hl-layers, hl-is-key-down,
 hl-loaded-plugins, hl-version. This closes pass/send-shortcut targeting
 (bind-globals). Remaining:
-  - window LISTS by selector (hl-windows-from) — only single-window
-    selectors today; iterate client-side with hl-window-from variants
-  - monitor OBJECTS with full property sets (position/scale/mode are in
-    hl-workspace-info-style alists only for workspaces; monitors return
-    names — extend hl-monitor-from to an info alist if wanted)
-  - hl-window-fullscreen-handler accessor
+  - (done 2026-09-17, commit b81c8dc) hl-windows-from, hl-monitor-info
+    alist, hl-window-fullscreen-handler — section 5 fully complete
 
 == 6. BINDS / SUBMAPS ==
   - 'submap-universal bind option (bind active in every submap)
