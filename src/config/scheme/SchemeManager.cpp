@@ -6,6 +6,8 @@
 #include <src/event/EventBus.hpp>
 #include <src/helpers/memory/Memory.hpp>
 #include <src/keybinds/Manager.hpp>
+#include <src/keybinds/InputState.hpp>
+#include <xkbcommon/xkbcommon.h>
 // g_pEventLoopManager is an inline variable: each DSO gets its own copy
 // unless references can preempt to the executable's exported (GNU_UNIQUE)
 // instance. -fvisibility=hidden would bind us to a private, forever-null
@@ -48,6 +50,18 @@
 #include <src/desktop/rule/layerRule/LayerRuleEffectContainer.hpp>
 #include <src/config/shared/workspace/WorkspaceRule.hpp>
 #include <src/config/shared/workspace/WorkspaceRuleManager.hpp>
+#include <src/desktop/history/WindowHistoryTracker.hpp>
+#include <src/desktop/history/WorkspaceHistoryTracker.hpp>
+#include <src/desktop/state/ViewQuery.hpp>
+#include <src/desktop/state/ViewState.hpp>
+#include <src/layout/algorithm/Algorithm.hpp>
+#include <src/layout/algorithm/TiledAlgorithm.hpp>
+#include <src/desktop/view/LayerSurface.hpp>
+// g_pPluginSystem is an inline variable — same GNU_UNIQUE unification
+// requirement as g_pEventLoopManager (see the pragma at the top).
+#pragma GCC visibility push(default)
+#include <src/plugins/PluginSystem.hpp>
+#pragma GCC visibility pop
 #include <src/config/ConfigValue.hpp>
 #include <src/ipc/s1/S1.hpp>
 
@@ -63,6 +77,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <filesystem>
+#include <regex>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -430,6 +445,22 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-workspace-rule-gap (foreign-procedure "hl-workspace-rule-gap" (string) int))
 (define c-hl-workspace-rule-layout-opt (foreign-procedure "hl-workspace-rule-layout-opt" (string string) int))
 (define c-hl-workspace-rule-commit (foreign-procedure "hl-workspace-rule-commit" () int))
+(define c-hl-window-from (foreign-procedure "hl-window-from" (string) double))
+(define c-hl-urgent-window (foreign-procedure "hl-urgent-window" () double))
+(define c-hl-last-window (foreign-procedure "hl-last-window" () double))
+(define c-hl-monitor-from (foreign-procedure "hl-monitor-from" (string) scheme-object))
+(define c-hl-monitor-at (foreign-procedure "hl-monitor-at" (double double) scheme-object))
+(define c-hl-monitor-at-cursor (foreign-procedure "hl-monitor-at-cursor" () scheme-object))
+(define c-hl-active-monitor (foreign-procedure "hl-active-monitor" () scheme-object))
+(define c-hl-active-workspace (foreign-procedure "hl-active-workspace" () scheme-object))
+(define c-hl-active-special-workspace (foreign-procedure "hl-active-special-workspace" () scheme-object))
+(define c-hl-last-workspace (foreign-procedure "hl-last-workspace" () scheme-object))
+(define c-hl-workspace-info (foreign-procedure "hl-workspace-info" (string) scheme-object))
+(define c-hl-workspace-windows (foreign-procedure "hl-workspace-windows" (string) scheme-object))
+(define c-hl-layers (foreign-procedure "hl-layers" () scheme-object))
+(define c-hl-is-key-down (foreign-procedure "hl-is-key-down" (string) int))
+(define c-hl-loaded-plugins (foreign-procedure "hl-loaded-plugins" () scheme-object))
+(define c-hl-version (foreign-procedure "hl-version" () scheme-object))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -957,6 +988,88 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                               (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
                          (else (errorf 'hl-workspace-rule "unsupported value for ~a" k)))))
                 (else (errorf 'hl-workspace-rule "spec must be an alist")))))))
+
+;; ---- queries ------------------------------------------------------------------
+;; selectors use the config selector syntax: "class:^foot$", "title:foo",
+;; "pid:123", "address:0x...", "workspace:3", "floating", "tiled", ...
+;; (hl-window-from SELECTOR) -> window handle | #f
+(define (hl-window-from sel)
+  (let ((id (c-hl-window-from (hl--str sel))))
+    (if (< id 0) #f (make-hl-window (inexact->exact id)))))
+
+(define (hl-urgent-window)
+  (let ((id (c-hl-urgent-window)))
+    (if (< id 0) #f (make-hl-window (inexact->exact id)))))
+
+(define (hl-last-window)
+  (let ((id (c-hl-last-window)))
+    (if (< id 0) #f (make-hl-window (inexact->exact id)))))
+
+;; monitors resolve by name or "desc:DESCRIPTION" (config monitor syntax)
+(define (hl-monitor-from sel)
+  (c-hl-monitor-from (hl--str sel)))
+
+(define (hl-monitor-at x y)
+  (c-hl-monitor-at (exact->inexact x) (exact->inexact y)))
+
+(define (hl-monitor-at-cursor)
+  (c-hl-monitor-at-cursor))
+
+(define (hl-active-monitor)
+  (c-hl-active-monitor))
+
+(define (hl-active-workspace)
+  (c-hl-active-workspace))
+
+(define (hl-active-special-workspace)
+  (c-hl-active-special-workspace))
+
+(define (hl-last-workspace)
+  (c-hl-last-workspace))
+
+;; => alist: (name addressableName monitor windows layout focused)
+(define (hl--pairs-from-lines lines)
+  (let loop ((rest lines) (acc '()))
+    (if (or (null? rest) (null? (cdr rest)))
+        (reverse acc)
+        (loop (cddr rest)
+              (cons (cons (string->symbol (car rest))
+                          (or (string->number (cadr rest)) (cadr rest)))
+                    acc)))))
+
+(define (hl-workspace-info sel)
+  (let ((s (c-hl-workspace-info (hl--str sel))))
+    (if (not s)
+        #f
+        (hl--pairs-from-lines (hl--split-lines s)))))
+
+;; windows on a workspace selector ("3", "name:foo", "special:bar")
+(define (hl-workspace-windows sel)
+  (let ((s (c-hl-workspace-windows (hl--str sel))))
+    (if (not s)
+        '()
+        (map make-hl-window (map string->number (hl--split-lines s))))))
+
+;; => list of (monitor . namespace) pairs
+(define (hl-layers)
+  (let ((s (c-hl-layers)))
+    (if (not s)
+        '()
+        (let loop ((rest (hl--split-lines s)) (acc '()))
+          (if (or (null? rest) (null? (cdr rest)))
+              (reverse acc)
+              (loop (cddr rest) (cons (cons (car rest) (cadr rest)) acc)))))))
+
+;; key by keysym name: (hl-is-key-down "Return")
+(define (hl-is-key-down key)
+  (= 1 (c-hl-is-key-down key)))
+
+(define (hl-loaded-plugins)
+  (let ((s (c-hl-loaded-plugins)))
+    (if s (hl--split-lines s) '())))
+
+(define (hl-version)
+  (c-hl-version))
 
 ;; ---- monitors, curves, animations, permissions ------------------------------
 
@@ -2791,6 +2904,270 @@ namespace Config::Scheme {
         return 0;
     }
 
+    // ---- queries ----------------------------------------------------------------
+
+    // selector matching, implemented here: prefixes dispatch to a full-match
+    // regex over class/initialclass/title/initialtitle, plus pid:/address:/
+    // tag:/stableid: equality and the bare "floating"/"tiled"/"active" forms.
+    static bool windowMatchesSelector(const PHLWINDOW& w, const std::string& sel) {
+        if (!w || !w->mapped())
+            return false;
+        if (sel.empty() || sel == "active")
+            return Desktop::focusState()->window() == w;
+
+        auto       body = sel;
+        auto       isFloat = std::optional<bool>{};
+        if (body.starts_with("floating")) {
+            isFloat = true;
+            body    = "active";
+        } else if (body.starts_with("tiled")) {
+            isFloat = false;
+            body    = "active";
+        }
+
+        auto matchRegex = [](const std::string& text, const std::string& pattern) {
+            try {
+                std::regex re(pattern);
+                return std::regex_match(text, re);
+            } catch (...) { return false; }
+        };
+
+        std::string mode, arg;
+        const auto& m = body;
+        auto strip  = [&m](const std::string& pfx, std::string& out) { if (m.starts_with(pfx)) { out = m.substr(pfx.size()); return true; } return false; };
+        if (strip("class:", arg)) { if (!matchRegex(w->metadata().appID(), arg)) return false; }
+        else if (strip("initialclass:", arg)) { if (!matchRegex(w->metadata().initialAppID(), arg)) return false; }
+        else if (strip("title:", arg)) { if (!matchRegex(w->metadata().title(), arg)) return false; }
+        else if (strip("initialtitle:", arg)) { if (!matchRegex(w->metadata().initialTitle(), arg)) return false; }
+        else if (strip("pid:", arg)) { if (std::to_string(w->backend().pid()) != arg) return false; }
+        else if (strip("address:", arg)) { if (std::format("0x{:x}", rc<uintptr_t>(w.get())) != arg) return false; }
+        else if (strip("tag:", arg)) {
+            bool tagged = false;
+            if (w->m_ruleApplicator)
+                for (const auto& t : w->m_ruleApplicator->m_tagKeeper.getTags())
+                    if (matchRegex(t, arg)) { tagged = true; break; }
+            if (!tagged) return false;
+        }
+
+        if (isFloat && w->isFloating() != *isFloat)
+            return false;
+        return true;
+    }
+
+    static long long hlWindowFrom(const char* sel) {
+        if (!g_up)
+            return -1;
+        const std::string selector = sel ? sel : "";
+        for (const auto& w : Desktop::windowState()->windows()) {
+            if (!windowMatchesSelector(w, selector))
+                continue;
+            const int id = g_nextWindowId++;
+            g_windows.emplace(id, PHLWINDOWREF(w));
+            return id;
+        }
+        return -1;
+    }
+
+    static long long hlUrgentWindow() {
+        if (!g_up)
+            return -1;
+        const auto w = Desktop::viewState()->query().urgent().runWindow();
+        if (!w)
+            return -1;
+        const int id = g_nextWindowId++;
+        g_windows.emplace(id, PHLWINDOWREF(w));
+        return id;
+    }
+
+    static long long hlLastWindow() {
+        if (!g_up)
+            return -1;
+        const auto current     = Desktop::focusState()->window();
+        const auto& fullHistory = Desktop::History::windowTracker()->fullHistory();
+        for (auto it = fullHistory.rbegin(); it != fullHistory.rend(); ++it) {
+            const auto candidate = it->lock();
+            if (!candidate || !candidate->mapped())
+                continue;
+            if (current && candidate == current)
+                continue;
+            const int id = g_nextWindowId++;
+            g_windows.emplace(id, PHLWINDOWREF(candidate));
+            return id;
+        }
+        return -1;
+    }
+
+    static ptr monitorNameResult(PHLMONITOR m) {
+        if (!m)
+            return Sfalse;
+        return Sstring_utf8(m->m_name.c_str(), m->m_name.size());
+    }
+
+    static ptr hlMonitorFrom(const char* sel) {
+        if (!g_up)
+            return Sfalse;
+        return monitorNameResult(State::monitorState()->query().configString(sel ? sel : "").run());
+    }
+
+    static ptr hlMonitorAt(double x, double y) {
+        if (!g_up)
+            return Sfalse;
+        return monitorNameResult(State::monitorState()->query().vec(Vector2D{x, y}).run());
+    }
+
+    static ptr hlMonitorAtCursor() {
+        if (!g_up || !Pointer::mgr())
+            return Sfalse;
+        const auto pos = Pointer::mgr()->untransformedPosition();
+        return monitorNameResult(State::monitorState()->query().vec(pos).run());
+    }
+
+    static ptr hlActiveMonitor() {
+        if (!g_up)
+            return Sfalse;
+        return monitorNameResult(Desktop::focusState()->monitor());
+    }
+
+    static ptr hlActiveWorkspace() {
+        if (!g_up)
+            return Sfalse;
+        const auto mon = Desktop::focusState()->monitor();
+        if (!mon || !mon->m_activeWorkspace)
+            return Sfalse;
+        const auto name = mon->m_activeWorkspace->displayName();
+        return Sstring_utf8(name.c_str(), name.size());
+    }
+
+    static ptr hlActiveSpecialWorkspace() {
+        if (!g_up)
+            return Sfalse;
+        const auto mon = Desktop::focusState()->monitor();
+        if (!mon || !mon->m_activeSpecialWorkspace)
+            return Sfalse;
+        const auto name = mon->m_activeSpecialWorkspace->displayName();
+        return Sstring_utf8(name.c_str(), name.size());
+    }
+
+    static ptr hlLastWorkspace() {
+        if (!g_up)
+            return Sfalse;
+        const auto mon     = Desktop::focusState()->monitor();
+        const auto current = mon ? mon->m_activeWorkspace : nullptr;
+        if (!current)
+            return Sfalse;
+        const auto previous = Desktop::History::workspaceTracker()->previousWorkspace(current);
+        auto       ws       = previous.workspace.lock();
+        if (!ws && previous.target.valid())
+            ws = State::Workspace::state()->find(previous.target);
+        if (!ws)
+            return Sfalse;
+        const auto name = ws->displayName();
+        return Sstring_utf8(name.c_str(), name.size());
+    }
+
+    // workspace resolution via the resolver (the query() chain has proven
+    // unreliable from the plugin; the resolver+find path is verified)
+    static PHLWORKSPACE workspaceFromSelector(const std::string& sel) {
+        const auto target = State::Workspace::resolver()->getWorkspaceTargetFromString(sel);
+        if (!target.valid())
+            return nullptr;
+        return State::Workspace::state()->find(target);
+    }
+
+    // workspace info as an encoded alist (k\nv\n lines, like config-get)
+    static ptr hlWorkspaceInfo(const char* sel) {
+        if (!g_up)
+            return Sfalse;
+        const auto ws = workspaceFromSelector(sel ? sel : "");
+        if (!ws)
+            return Sfalse;
+
+        std::string out;
+        const auto  add = [&out](const std::string& k, const std::string& v) { out += k + "\n" + v + "\n"; };
+        add("name", ws->displayName());
+        add("addressableName", ws->addressableName());
+        const auto mon = ws->m_monitor.lock();
+        add("monitor", mon ? mon->m_name : "");
+        add("windows", std::to_string(ws->getWindowCount()));
+        std::string layout = "unknown";
+        if (ws->space() && ws->space()->algorithm() && ws->space()->algorithm()->tiledAlgo()) {
+            const auto ln = ws->space()->algorithm()->tiledAlgo()->layoutName();
+            layout        = ln ? *ln : "unknown";
+        }
+        add("layout", layout);
+        add("focused", (mon && mon->m_activeWorkspace == ws) ? "1" : "0");
+        return Sstring_utf8(out.c_str(), out.size());
+    }
+
+    // windows on a workspace: newline-joined handle ids (like hl-windows)
+    static ptr hlWorkspaceWindows(const char* sel) {
+        if (!g_up)
+            return Sfalse;
+        const auto ws = workspaceFromSelector(sel ? sel : "");
+        if (!ws)
+            return Sfalse;
+        std::string joined;
+        for (const auto& w : Desktop::windowState()->windows()) {
+            if (!w->mapped() || w->m_workspace != ws)
+                continue;
+            const int id = g_nextWindowId++;
+            g_windows.emplace(id, PHLWINDOWREF(w));
+            if (!joined.empty())
+                joined += '\n';
+            joined += std::to_string(id);
+        }
+        if (joined.empty())
+            return Sfalse;
+        return Sstring_utf8(joined.c_str(), joined.size());
+    }
+
+    // layer surfaces as "monitor\nnamespace\n" pairs
+    static ptr hlLayers() {
+        if (!g_up)
+            return Sfalse;
+        std::string out;
+        for (const auto& mon : State::monitorState()->monitors()) {
+            for (const auto& level : mon->m_layerSurfaceLayers) {
+                for (const auto& lsRef : level) {
+                    const auto ls = lsRef.lock();
+                    if (!ls)
+                        continue;
+                    out += mon->m_name + "\n" + ls->m_namespace + "\n";
+                }
+            }
+        }
+        if (out.empty())
+            return Sfalse;
+        return Sstring_utf8(out.c_str(), out.size());
+    }
+
+    static int hlIsKeyDown(const char* key) {
+        if (!g_up || !Keybinds::mgr() || !key || !*key)
+            return 0;
+        const auto sym = xkb_keysym_from_name(key, XKB_KEYSYM_NO_FLAGS);
+        if (sym == XKB_KEY_NoSymbol)
+            return 0;
+        return Keybinds::mgr()->inputState().isKeysymDown(sym) ? 1 : 0;
+    }
+
+    static ptr hlLoadedPlugins() {
+        if (!g_up || !g_pPluginSystem)
+            return Sfalse;
+        std::string out;
+        for (const auto* plugin : g_pPluginSystem->getAllPlugins()) {
+            if (!out.empty())
+                out += '\n';
+            out += plugin->m_name;
+        }
+        if (out.empty())
+            return Sfalse;
+        return Sstring_utf8(out.c_str(), out.size());
+    }
+
+    static ptr hlVersion() {
+        return Sstring_utf8(HYPRLAND_VERSION, strlen(HYPRLAND_VERSION));
+    }
+
     static ptr hlSchemeWindowInitialClass(int id) {
         if (!g_up)
             return Sfalse;
@@ -3239,6 +3616,22 @@ namespace Config::Scheme {
         Sregister_symbol("hl-workspace-rule-gap", (void*)hlWorkspaceRuleGap);
         Sregister_symbol("hl-workspace-rule-layout-opt", (void*)hlWorkspaceRuleLayoutOpt);
         Sregister_symbol("hl-workspace-rule-commit", (void*)hlWorkspaceRuleCommit);
+        Sregister_symbol("hl-window-from", (void*)hlWindowFrom);
+        Sregister_symbol("hl-urgent-window", (void*)hlUrgentWindow);
+        Sregister_symbol("hl-last-window", (void*)hlLastWindow);
+        Sregister_symbol("hl-monitor-from", (void*)hlMonitorFrom);
+        Sregister_symbol("hl-monitor-at", (void*)hlMonitorAt);
+        Sregister_symbol("hl-monitor-at-cursor", (void*)hlMonitorAtCursor);
+        Sregister_symbol("hl-active-monitor", (void*)hlActiveMonitor);
+        Sregister_symbol("hl-active-workspace", (void*)hlActiveWorkspace);
+        Sregister_symbol("hl-active-special-workspace", (void*)hlActiveSpecialWorkspace);
+        Sregister_symbol("hl-last-workspace", (void*)hlLastWorkspace);
+        Sregister_symbol("hl-workspace-info", (void*)hlWorkspaceInfo);
+        Sregister_symbol("hl-workspace-windows", (void*)hlWorkspaceWindows);
+        Sregister_symbol("hl-layers", (void*)hlLayers);
+        Sregister_symbol("hl-is-key-down", (void*)hlIsKeyDown);
+        Sregister_symbol("hl-loaded-plugins", (void*)hlLoadedPlugins);
+        Sregister_symbol("hl-version", (void*)hlVersion);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
         Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
