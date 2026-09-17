@@ -157,7 +157,7 @@ using Hyprutils::OS::CFileDescriptor;
             windows[i] is the handle for box i (queries on it work during
             the callback). coordinates within the work area. selected via
             `layout = scheme:name`. on error -> default grid for the
-            generation. WARNING: no watchdog — an infinite loop freezes.
+            generation. Watchdog: callbacks/eval exceeding hl--watchdog-ms are abandoned (see prelude).
         (hl-submap "name" (lambda () ...binds...))    -> submap scope
         (hl-enter-submap "name") / (hl-exit-submap)   -> bool (switch active)
         (hl-state-set! 'key value)                    -> value
@@ -176,21 +176,79 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
   (newline (current-error-port))
   #f)
 
+;; ---- watchdog ---------------------------------------------------------------
+;; callbacks run on the compositor's main loop: a hung callback freezes the
+;; desktop (we cannot kill a Chez call from outside). This wrapper bounds
+;; them instead: a Chez timer interrupt fires periodically; the handler
+;; checks WALL-CLOCK time (ticks are work units, not seconds) and escapes
+;; out of the callback when the budget is exceeded — recovery, not just
+;; detection. Abandonment semantics match the Lua watchdog: partial effects
+;; stay, the callback is never resumed. Foreign calls are not interruptible,
+;; so a callback blocked INSIDE a C call escapes only when it returns to
+;; Scheme; the C-side detector thread is the backstop for those.
+
+(define hl--watchdog-ms 5000)   ; set! from your config; 0 disables
+(define hl--wd-rearm 10000)     ; timer budget between wall-clock checks
+(define hl--wd-stack '())
+;; unique marker for "the watchdog abandoned this run"
+(define hl--wd-aborted (cons 'watchdog 'aborted))
+
+(define (hl--ms-since t0)
+  (quotient (time-nanosecond (time-difference (current-time) t0)) 1000000))
+
+(define (hl--wd-enter what escape)
+  ;; budget + t0 + escape are captured in the handler's closure — the
+  ;; handler fires asynchronously and must not read shared state
+  (let* ((budget hl--watchdog-ms)
+         (t0 (current-time))
+         (old-handler (timer-interrupt-handler))
+         (old-ticks (set-timer hl--wd-rearm)))
+    (set! hl--wd-stack (cons (list old-handler old-ticks) hl--wd-stack))
+    (timer-interrupt-handler
+      (lambda ()
+        (let ((ms (hl--ms-since t0)))
+          (if (> ms budget)
+              (begin
+                (hl--report (format "watchdog: ~a abandoned after ~ams" what ms))
+                (escape hl--wd-aborted))
+              (set-timer hl--wd-rearm)))))))
+
+(define (hl--wd-exit)
+  (let ((outer (car hl--wd-stack)))
+    (set! hl--wd-stack (cdr hl--wd-stack))
+    (set-timer 0)
+    (timer-interrupt-handler (car outer))
+    (let ((old-ticks (cadr outer)))
+      (if (and (number? old-ticks) (> old-ticks 0))
+          (set-timer old-ticks)
+          (set-timer 0)))))
+
+;; runs THUNK under the watchdog; returns its value, or the unique
+;; hl--wd-aborted marker if the budget was exceeded. Reentrant: nested
+;; dispatches save/restore the outer timer state.
+(define (hl--guarded-run what thunk)
+  (call/cc
+    (lambda (escape)
+      (dynamic-wind
+        (lambda () (hl--wd-enter what escape))
+        (lambda () (thunk))
+        (lambda () (hl--wd-exit))))))
+
 (define (hl--fire id)
   (let ((entry (assv id hl--binds)))
     (if (not entry)
         #f
-        (guard (e (#t (hl--report e)))
-          ((cdr entry))
-          #t))))
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "callback" (cdr entry)))))
+          (not (eq? result hl--wd-aborted))))))
 
 (define (hl--fire-str id arg)
   (let ((entry (assv id hl--binds)))
     (if (not entry)
         #f
-        (guard (e (#t (hl--report e)))
-          ((cdr entry) arg)
-          #t))))
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "handler" (lambda () ((cdr entry) arg))))))
+          (not (eq? result hl--wd-aborted))))))
 
 ;; defined here so event handlers receive real window records; the record
 ;; constructor lives in the bootstrap, loaded after this prelude
@@ -198,18 +256,18 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
   (let ((entry (assv id hl--binds)))
     (if (not entry)
         #f
-        (guard (e (#t (hl--report e)))
-          ((cdr entry) (make-hl-window win-id))
-          #t))))
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "handler" (lambda () ((cdr entry) (make-hl-window win-id)))))))
+          (not (eq? result hl--wd-aborted))))))
 
 ;; events carrying (window, bool) payloads: minimize state
 (define (hl--fire-win-state id win-id state)
   (let ((entry (assv id hl--binds)))
     (if (not entry)
         #f
-        (guard (e (#t (hl--report e)))
-          ((cdr entry) (make-hl-window win-id) state)
-          #t))))
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "handler" (lambda () ((cdr entry) (make-hl-window win-id) state))))))
+          (not (eq? result hl--wd-aborted))))))
 
 (define (hl--load path)
   (guard (e (#t (hl--report e)))
@@ -223,11 +281,16 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
                   (lambda (p)
                     (display "error: " p)
                     (display-condition e p)))))
-    (let loop ((port (open-input-string code)) (result (void)))
-      (let ((form (read port)))
-        (if (eof-object? form)
-            (format "~s" result)
-            (loop port (eval form)))))))
+    (let ((result (hl--guarded-run "eval"
+                    (lambda ()
+                      (let loop ((port (open-input-string code)) (result (void)))
+                        (let ((form (read port)))
+                          (if (eof-object? form)
+                              result
+                              (loop port (eval form)))))))))
+      (if (eq? result hl--wd-aborted)
+          "watchdog: eval abandoned (see the compositor log)"
+          (format "~s" result)))))
 
 ;; layout callbacks: spec = "count\nW\nH\n<handle-id per target>"
 ;; (kept to 2 foreign args; Scall passes at most 3). the fn receives
@@ -1791,6 +1854,11 @@ namespace Config::Scheme {
     static ptr hlSchemeWindowClass(int id) {
         if (!g_up)
             return Sfalse;
+        {
+            std::ofstream pr("/tmp/hs-sel-debug", std::ios::app);
+            auto w = windowFromId(id);
+            pr << "class(" << id << ") -> " << (w ? w->metadata().appID() : "NULL") << "\n";
+        }
 
         const auto window = windowFromId(id);
         if (!window)
@@ -3121,7 +3189,7 @@ namespace Config::Scheme {
         return true;
     }
 
-    static long long hlWindowFrom(const char* sel) {
+    static double hlWindowFrom(const char* sel) {
         if (!g_up)
             return -1;
         const std::string selector = sel ? sel : "";
@@ -3130,12 +3198,12 @@ namespace Config::Scheme {
                 continue;
             const int id = g_nextWindowId++;
             g_windows.emplace(id, PHLWINDOWREF(w));
-            return id;
+            return (double)id;
         }
         return -1;
     }
 
-    static long long hlUrgentWindow() {
+    static double hlUrgentWindow() {
         if (!g_up)
             return -1;
         const auto w = Desktop::viewState()->query().urgent().runWindow();
@@ -3143,10 +3211,10 @@ namespace Config::Scheme {
             return -1;
         const int id = g_nextWindowId++;
         g_windows.emplace(id, PHLWINDOWREF(w));
-        return id;
+        return (double)id;
     }
 
-    static long long hlLastWindow() {
+    static double hlLastWindow() {
         if (!g_up)
             return -1;
         const auto current     = Desktop::focusState()->window();
@@ -3159,7 +3227,7 @@ namespace Config::Scheme {
                 continue;
             const int id = g_nextWindowId++;
             g_windows.emplace(id, PHLWINDOWREF(candidate));
-            return id;
+            return (double)id;
         }
         return -1;
     }
