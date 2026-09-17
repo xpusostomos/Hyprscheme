@@ -57,6 +57,14 @@
 #include <src/layout/algorithm/Algorithm.hpp>
 #include <src/layout/algorithm/TiledAlgorithm.hpp>
 #include <src/desktop/view/LayerSurface.hpp>
+#include <src/notification/NotificationOverlay.hpp>
+// g_pTrackpadGestures is an inline variable — GNU_UNIQUE unification needed
+#pragma GCC visibility push(default)
+#include <src/managers/input/trackpad/TrackpadGestures.hpp>
+#pragma GCC visibility pop
+#include <src/managers/input/trackpad/gestures/ITrackpadGesture.hpp>
+#include <atomic>
+#include <thread>
 // g_pPluginSystem is an inline variable — same GNU_UNIQUE unification
 // requirement as g_pEventLoopManager (see the pragma at the top).
 #pragma GCC visibility push(default)
@@ -464,6 +472,13 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-windows-from (foreign-procedure "hl-windows-from" (string) scheme-object))
 (define c-hl-monitor-info (foreign-procedure "hl-monitor-info" (string) scheme-object))
 (define c-hl-window-fullscreen-handler (foreign-procedure "hl-window-fullscreen-handler" (int) scheme-object))
+(define c-hl-notify (foreign-procedure "hl-notify" (string double string string double) scheme-object))
+(define c-hl-timer-set-enabled (foreign-procedure "hl-timer-set-enabled" (double int) int))
+(define c-hl-timer-enabled (foreign-procedure "hl-timer-enabled" (double) int))
+(define c-hl-timer-set-timeout (foreign-procedure "hl-timer-set-timeout" (double double) int))
+(define c-hl-exec-raw (foreign-procedure "hl-exec-raw" (string) int))
+(define c-hl-exec-with-rules (foreign-procedure "hl-exec-with-rules" (string) int))
+(define c-hl-gesture (foreign-procedure "hl-scheme-gesture" (int string int string double int) scheme-object))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -506,7 +521,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; eBindFlags bits from src/keybinds/Bind.hpp
 (define (hl--bind-flags alist)
   (let ((click (hl--opt alist 'click))
-        (drag  (hl--opt alist 'drag)))
+        (drag  (hl--opt alist 'drag))
+        (devices (hl--opt alist 'devices)))
     (when (and click drag)
       (errorf 'hl-bind "click and drag are exclusive"))
     (when (and (hl--opt alist 'mouse)
@@ -523,7 +539,15 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
        (if (or click drag) 2 0)              ; click/drag imply release
        (if click 512 0)
        (if drag 1024 0)
-       (if (hl--opt alist 'device-inclusive) 8192 0))))
+       (if (hl--opt alist 'dont-inhibit) 256 0)
+       (if (hl--opt alist 'submap-universal) 2048 0)
+       (if (hl--opt alist 'allow-input-capture) 4096 0)
+       ;; device-scoped binds default to INCLUSIVE (upstream semantics):
+       ;; with 'devices set and no explicit 'device-inclusive #f, the flag is on
+       (if (or (and devices (not (hl--opt alist 'device-inclusive)))
+               (hl--opt alist 'device-inclusive))
+           8192
+           0))))
 
 (define (hl-bind mods key thunk . opts)
   (let* ((alist (hl--pairs opts))
@@ -1093,6 +1117,69 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-fullscreen-handler w)
   (c-hl-window-fullscreen-handler (hl--wid w)))
 
+;; ---- notifications ------------------------------------------------------------
+;; (hl-notify "text" 5000) or with options:
+;;   (hl-notify "text" 5000 '((icon . "info") (color . "0x80FF80FF") (font-size . 13)))
+;; icons: none warn info hint error/err confused/question ok
+;; color: 0xAARRGGBB hex string; 0 color = default for the icon
+(define (hl-notify text duration . opts)
+  (let ((alist (if (and (not (null? opts)) (pair? (car opts)) (pair? (caar opts))) (car opts) '())))
+    (let ((s (c-hl-notify (hl--str text) (exact->inexact duration)
+                          (hl--str (hl--aopt alist 'icon "none"))
+                          (hl--str (hl--aopt alist 'color "0"))
+                          (exact->inexact (hl--aopt alist 'font-size 13)))))
+      (if s #t #f))))
+
+;; ---- timer handles --------------------------------------------------------------
+;; hl-after/hl-repeat return timer ids; these control them afterwards
+(define (hl-timer-set-enabled id enabled)
+  (if (= 0 (c-hl-timer-set-enabled (exact->inexact id) (if enabled 1 0)))
+      #t
+      (errorf 'hl-timer-set-enabled "unknown timer")))
+(define (hl-timer-enabled? id)
+  (= 1 (c-hl-timer-enabled (exact->inexact id))))
+(define (hl-timer-set-timeout id ms)
+  (if (= 0 (c-hl-timer-set-timeout (exact->inexact id) (exact->inexact ms)))
+      #t
+      (errorf 'hl-timer-set-timeout "timeout must be >= 1ms")))
+
+;; ---- exec variants ----------------------------------------------------------------
+;; (hl-exec-raw "cmd") — no shell; the string is execvp'd (space-split)
+;; (hl-exec-with-rules "[float size 800 500] mygame") — classic exec rules
+(define (hl-exec-raw cmd)
+  (> (c-hl-exec-raw cmd) 0))
+(define (hl-exec-with-rules cmd)
+  (> (c-hl-exec-with-rules cmd) 0))
+
+;; ---- gestures ----------------------------------------------------------------------
+;; (hl-gesture 3 "swipe" (lambda () ...) ['mods "SUPER"] ['scale 1.0] ['disable-inhibit #t])
+;; the thunk fires when the gesture ends (3+ finger swipes/pinches).
+;; live variant: (hl-gesture-live 3 "swipe" on-begin on-update on-end ...) —
+;; on-update receives (dx dy scale) as a 3-list.
+(define (hl-gesture fingers direction thunk . opts)
+  (let ((alist (if (and (not (null? opts)) (pair? (car opts)) (pair? (caar opts))) (car opts) '())))
+    (let ((s (c-hl-gesture fingers (hl--str direction) 0
+                           (hl--str (hl--aopt alist 'mods ""))
+                           (exact->inexact (hl--aopt alist 'scale 1.0))
+                           (if (hl--aopt alist 'disable-inhibit #f) 1 0))))
+      (if (not s)
+          (errorf 'hl-gesture "~a" (c-hl-config-last-error))
+          (hl--register (string->number s) thunk)))))
+
+(define (hl-gesture-live fingers direction on-begin on-update on-end . opts)
+  (let ((alist (if (and (not (null? opts)) (pair? (car opts)) (pair? (caar opts))) (car opts) '())))
+    (let ((s (c-hl-gesture fingers (hl--str direction) 1
+                           (hl--str (hl--aopt alist 'mods ""))
+                           (exact->inexact (hl--aopt alist 'scale 1.0))
+                           (if (hl--aopt alist 'disable-inhibit #f) 1 0))))
+      (if (not s)
+          (errorf 'hl-gesture "~a" (c-hl-config-last-error))
+          (let ((ids (map string->number (hl--split-lines s))))
+            (hl--register (car ids) on-begin)
+            (hl--register (cadr ids) (lambda (payload) (apply on-update (map string->number (hl--split-lines payload)))))
+            (hl--register (caddr ids) on-end)
+            #t)))))
+
 ;; ---- monitors, curves, animations, permissions ------------------------------
 
 ;; (hl-monitor "DP-1" '((mode . "preferred") (scale . "1.6") (position . "0x0")
@@ -1382,11 +1469,63 @@ namespace Config::Scheme {
     static std::vector<Hyprutils::Signal::CHyprSignalListener> g_lifecycleListeners;
 
 
+    // ---- the callback watchdog --------------------------------------------------
+    // A detector thread: scheme callbacks run on the main loop, so a hung one
+    // freezes everything. We can't safely kill a Chez call, but we can SAY SO —
+    // one loud log line + notification per overrun.
+
+    static std::atomic<bool>        g_watchdogRun{false};
+    static std::atomic<int64_t>     g_callbackStartMs{0};
+    static std::atomic<const char*> g_callbackWhat{""};
+
+    static int64_t watchdogNowMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    static void watchdogEnter(const char* what) {
+        {
+            std::ofstream pr("/tmp/hs-wd-probe", std::ios::app);
+            pr << "enter " << what << "\n";
+        }
+        g_callbackWhat = what;
+        g_callbackStartMs = watchdogNowMs();
+    }
+
+    static void watchdogExit() {
+        g_callbackStartMs = 0;
+    }
+
+    static void startWatchdog() {
+        if (g_watchdogRun.exchange(true))
+            return;
+        std::thread([] {
+            bool reported = false;
+            while (g_watchdogRun) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                const auto start = g_callbackStartMs.load();
+                if (start == 0) {
+                    reported = false;
+                    continue;
+                }
+                const auto elapsed = watchdogNowMs() - start;
+                if (elapsed > 5000 && !reported) {
+                    reported = true;
+                    // LOG ONLY — the notification overlay is not thread-safe and
+                    // aborts when poked from a side thread (verified: signal 6)
+                    LOG(Log::ERR, "[scheme] watchdog: callback '{}' has been running for {}ms — the compositor is likely frozen by it", g_callbackWhat.load(),
+                        elapsed);
+                }
+            }
+        }).detach();
+    }
+
     static Keybinds::SBindResult fireSchemeBind(int id) {
         if (!g_up)
             return {.success = false, .error = "scheme interpreter not initialized"};
 
+        watchdogEnter("bind callback");
         const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--fire")), Sinteger(id));
+        watchdogExit();
         if (r == Sfalse)
             return {.success = false, .error = "scheme keybind callback failed"};
         return {};
@@ -1396,7 +1535,9 @@ namespace Config::Scheme {
     static void fireScheme(int id) {
         if (!g_up)
             return;
+        watchdogEnter("handler");
         Scall1(Stop_level_value(Sstring_to_symbol("hl--fire")), Sinteger(id));
+        watchdogExit();
     }
 
     // called from Scheme via foreign-procedure; flags are raw eBindFlags bits,
@@ -1466,7 +1607,9 @@ namespace Config::Scheme {
         if (!g_up)
             return;
 
+        watchdogEnter("handler");
         Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-str")), Sinteger(id), Sstring_utf8(arg.c_str(), arg.size()));
+        watchdogExit();
     }
 
     // events carrying window payloads: the window crosses as a fresh handle id
@@ -1477,7 +1620,9 @@ namespace Config::Scheme {
         const int winId = g_nextWindowId++;
         g_windows.emplace(winId, PHLWINDOWREF(window));
 
+        watchdogEnter("handler");
         Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-win")), Sinteger(id), Sinteger(winId));
+        watchdogExit();
     }
 
     // called from Scheme via foreign-procedure; repeat != 0 re-arms forever
@@ -3244,6 +3389,185 @@ namespace Config::Scheme {
         return Sstring_utf8(name.c_str(), name.size());
     }
 
+    // ---- notifications ---------------------------------------------------------
+
+    static ptr hlNotify(const char* text, double durationMs, const char* icon, const char* color, double fontSize) {
+        if (!g_up)
+            return Sfalse;
+
+        // icon names, mirroring the lua config's table
+        eIcons  theIcon = ICON_NONE;
+        const std::string ic = icon ? icon : "";
+        const std::pair<const char*, eIcons> ICON_NAMES[] = {
+            {"warning", ICON_WARNING}, {"warn", ICON_WARNING},     {"info", ICON_INFO},       {"hint", ICON_HINT},
+            {"error", ICON_ERROR},     {"err", ICON_ERROR},        {"confused", ICON_CONFUSED},
+            {"question", ICON_CONFUSED}, {"ok", ICON_OK},           {"none", ICON_NONE},
+        };
+        for (const auto& [n, i] : ICON_NAMES)
+            if (ic == n) {
+                theIcon = i;
+                break;
+            }
+
+        // color: config hex form "0xAARRGGBB" (decimal digits also accepted)
+        CHyprColor col(0);
+        const std::string cs = color ? color : "";
+        if (!cs.empty()) {
+            try {
+                col = CHyprColor(std::stoull(cs.starts_with("0x") || cs.starts_with("0X") ? cs.substr(2) : cs, nullptr, 16));
+            } catch (...) {
+                g_configError = "hl-notify: bad color (expected 0xAARRGGBB)";
+                return Sfalse;
+            }
+        }
+
+        Notification::overlay()->addNotification(text ? text : "", col, sc<float>(durationMs), theIcon, sc<float>(fontSize));
+        return Strue;
+    }
+
+    // ---- timer handles ----------------------------------------------------------
+
+    static std::unordered_map<int, uint64_t> g_timerMs;
+
+    static SP<CEventLoopTimer> timerById(int id) {
+        for (const auto& [tid, t] : g_timers)
+            if (tid == id)
+                return t;
+        return nullptr;
+    }
+
+    static int hlTimerSetEnabled(double id, int enabled) {
+        if (!g_up)
+            return -1;
+        const auto timer = timerById(sc<int>(id));
+        if (!timer)
+            return -1;
+        if (enabled != 0) {
+            const auto it = g_timerMs.find(sc<int>(id));
+            timer->updateTimeout(std::chrono::milliseconds(it != g_timerMs.end() ? sc<int64_t>(it->second) : 1));
+        } else
+            timer->updateTimeout(std::nullopt);
+        return 0;
+    }
+
+    static int hlTimerEnabled(double id) {
+        const auto timer = timerById(sc<int>(id));
+        return (timer && timer->armed()) ? 1 : 0;
+    }
+
+    static int hlTimerSetTimeout(double id, double ms) {
+        if (!g_up)
+            return -1;
+        const auto timer = timerById(sc<int>(id));
+        if (!timer || ms < 1)
+            return -1;
+        g_timerMs[sc<int>(id)] = sc<uint64_t>(ms);
+        timer->updateTimeout(std::chrono::milliseconds(sc<int64_t>(ms)));
+        return 0;
+    }
+
+    // ---- exec variants ----------------------------------------------------------
+
+    static int hlSchemeExecRaw(const char* cmd) {
+        if (!g_up || !cmd)
+            return -1;
+        return (int)Config::Supplementary::executor()->spawnRaw(cmd).value_or(-1);
+    }
+
+    static int hlSchemeExecWithRules(const char* cmd) {
+        if (!g_up || !cmd)
+            return -1;
+        return (int)Config::Supplementary::executor()->spawnWithRules(cmd).value_or(-1);
+    }
+
+    // ---- gestures ---------------------------------------------------------------
+    // A scheme thunk (or three, for live gestures) behind the trackpad gesture
+    // system. Registered gestures are cleared by the config reload (the gesture
+    // manager clears itself), so no extra bookkeeping is needed.
+
+    class CSchemeGesture : public ITrackpadGesture {
+      public:
+        CSchemeGesture(int actionId, int beginId, int updateId, int endId) :
+            m_actionId(actionId), m_beginId(beginId), m_updateId(updateId), m_endId(endId) {}
+
+        void  begin(const STrackpadGestureBegin& e) override {
+            if (m_beginId >= 0)
+                fireSchemeBind(m_beginId);
+        }
+        void  update(const STrackpadGestureUpdate& e) override {
+            if (m_updateId < 0)
+                return;
+            float dx = 0, dy = 0;
+            if (e.swipe) {
+                dx = e.swipe->delta.x;
+                dy = e.swipe->delta.y;
+            }
+            fireSchemeStr(m_updateId, std::format("{} {} {}", dx, dy, e.scale));
+        }
+        void  end(const STrackpadGestureEnd& e) override {
+            if (m_endId >= 0)
+                fireSchemeBind(m_endId);
+            else if (m_actionId >= 0)
+                fireSchemeBind(m_actionId);
+        }
+
+      private:
+        int m_actionId, m_beginId, m_updateId, m_endId;
+    };
+
+    static Input::ModifierMask gestureMods(const char* mods) {
+        // space-separated modifier names → mask (SUPER = META)
+        uint8_t raw = 0;
+        if (!mods || !*mods)
+            return Input::ModifierMask(sc<Input::eKeyboardModifiers>(raw));
+        std::istringstream ss(mods);
+        for (std::string tok; ss >> tok;) {
+            std::transform(tok.begin(), tok.end(), tok.begin(), ::toupper);
+            if (tok == "SHIFT")
+                raw |= 1;
+            else if (tok == "CAPS")
+                raw |= 2;
+            else if (tok == "CTRL" || tok == "CONTROL")
+                raw |= 4;
+            else if (tok == "ALT")
+                raw |= 8;
+            else if (tok == "MOD3")
+                raw |= 32;
+            else if (tok == "SUPER" || tok == "META" || tok == "MOD2")
+                raw |= 64;
+            else if (tok == "MOD5")
+                raw |= 128;
+        }
+        return Input::ModifierMask(sc<Input::eKeyboardModifiers>(raw));
+    }
+
+    // (fingers, direction, live?, mods, scale, disableInhibit) → the allocated
+    // handler ids as "a" (simple) or "b u e" (live), space-separated; #f on error
+    static ptr hlSchemeGesture(int fingers, const char* direction, int live, const char* mods, double scale, int disableInhibit) {
+        if (!g_up || !g_pTrackpadGestures)
+            return Sfalse;
+        const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
+        if (dir == TRACKPAD_GESTURE_DIR_NONE) {
+            g_configError = std::string("hl-gesture: invalid direction '") + (direction ? direction : "") + "'";
+            return Sfalse;
+        }
+        const int a = g_nextBindId++;
+        int       b = -1, u = -1, e = -1;
+        if (live) {
+            b = g_nextBindId++;
+            u = g_nextBindId++;
+            e = g_nextBindId++;
+            g_pTrackpadGestures->addGesture(
+                makeUnique<CSchemeGesture>(-1, b, u, e), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
+            const auto ids = std::to_string(b) + "\n" + std::to_string(u) + "\n" + std::to_string(e);
+            return Sstring_utf8(ids.c_str(), ids.size());
+        }
+        g_pTrackpadGestures->addGesture(makeUnique<CSchemeGesture>(a, -1, -1, -1), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale),
+                                        disableInhibit != 0);
+        return Sstring_utf8(std::to_string(a).c_str(), std::to_string(a).size());
+    }
+
+
     static ptr hlSchemeWindowInitialClass(int id) {
         if (!g_up)
             return Sfalse;
@@ -3711,6 +4035,13 @@ namespace Config::Scheme {
         Sregister_symbol("hl-windows-from", (void*)hlWindowsFrom);
         Sregister_symbol("hl-monitor-info", (void*)hlMonitorInfo);
         Sregister_symbol("hl-window-fullscreen-handler", (void*)hlWindowFullscreenHandler);
+        Sregister_symbol("hl-notify", (void*)hlNotify);
+        Sregister_symbol("hl-timer-set-enabled", (void*)hlTimerSetEnabled);
+        Sregister_symbol("hl-timer-enabled", (void*)hlTimerEnabled);
+        Sregister_symbol("hl-timer-set-timeout", (void*)hlTimerSetTimeout);
+        Sregister_symbol("hl-exec-raw", (void*)hlSchemeExecRaw);
+        Sregister_symbol("hl-exec-with-rules", (void*)hlSchemeExecWithRules);
+        Sregister_symbol("hl-scheme-gesture", (void*)hlSchemeGesture);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
         Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
@@ -3744,6 +4075,7 @@ namespace Config::Scheme {
             return false;
         }
         g_up = true;
+        startWatchdog();
         return true;
     }
 
@@ -3776,7 +4108,9 @@ namespace Config::Scheme {
                     .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
                     .handler = [](const IPC::Socket1::SRequest& req) {
                         auto code = req.command.substr(req.command.find_first_of(' ') + 1);
+                        watchdogEnter("eval");
                         const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                        watchdogExit();
                         std::string out;
                         if (Sstringp(r)) {
                             for (iptr i = 0; i < Sstring_length(r); ++i)
@@ -3861,7 +4195,9 @@ namespace Config::Scheme {
                 .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
                 .handler = [](const IPC::Socket1::SRequest& req) {
                     auto code = req.command.substr(req.command.find_first_of(' ') + 1);
-                    const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                    watchdogEnter("eval");
+                        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                        watchdogExit();
                     std::string out;
                     if (Sstringp(r)) {
                         for (iptr i = 0; i < Sstring_length(r); ++i)
