@@ -26,10 +26,9 @@ layout-msg send. All verified live. Remaining from this section:
   - move a window directly to another MONITOR (moveToMonitor takes a
     workspace; no window-to-monitor action)
   - workspace change_id
-  - window-selector targeting for pass/send-shortcut (background windows)
-  - exec_raw, exec-with-rules
-  - hl-window-fullscreen-handler accessor
   - submap setSubmap via CA::setSubmap (scheme has enter/exit already)
+  (window-selector targeting, exec_raw, exec-with-rules and the
+  fullscreen-handler accessor: DONE in the queries/tail chunks)
 Originally-remaining list (for reference):
   - hl-focus-workspace (focus workspace by name/number) — *key* for binds;
     currently impossible (window-rules, device-binds-mouse, code-snippets)
@@ -94,25 +93,24 @@ hl-loaded-plugins, hl-version. This closes pass/send-shortcut targeting
   - (done 2026-09-17, commit b81c8dc) hl-windows-from, hl-monitor-info
     alist, hl-window-fullscreen-handler — section 5 fully complete
 
-== 6. BINDS / SUBMAPS ==
-  - 'submap-universal bind option (bind active in every submap)
-  - auto-chain submap: optional follow-up arg to hl-submap (next submap or
-    reset after a dispatch)
-  - exclusive per-device binds ('device-inclusive #f polarity)
-  - gestures: hl-gesture API + live gesture callbacks (whole page gap)
-
-== 7. TIMERS ==
-  - timer handles with enable/disable + enabled? (pausable named timers;
-    the state-flag workaround works but is clunky)
-
-== 8. NOTIFICATIONS ==
-  - hl-notify (text/timeout/icon/color/font-size); hyprctl notify via
-    hl-exec is the workaround documented in the wiki
-
-== 9. EXEC ==
-  - exec-with-rules (spawn with window-rule effects, e.g. float a spawned
-    game window) — dispatchers, window-rules, code-snippets
-  - hl-exec-raw (no sh -c)
+== 6-9. BINDS / SUBMAPS, TIMERS, NOTIFICATIONS, EXEC ==
+IMPLEMENTED 2026-09-17 (commit 3285bb8, the tail sweep):
+  - hl-notify (icon/color/font-size; built-in overlay)
+  - timer handles: hl-timer-set-enabled / enabled? / set-timeout over the
+    hl-after/hl-repeat ids (pause/resume/retune live)
+  - hl-exec-raw (no shell), hl-exec-with-rules ("[float] cmd" syntax)
+  - bind flags: 'submap-universal, 'dont-inhibit, 'allow-input-capture;
+    device-scoped binds default INCLUSIVE like upstream (old default was
+    exclusive — polarity bug fixed)
+  - gestures: hl-gesture (simple, fires on end) + hl-gesture-live
+    (begin/update/end; update gets (dx dy scale)); cleared on reload
+  - submap auto-chain ALREADY existed (hl-submap's 3rd arg = the reset-
+    target submap name) — the wiki agent had misread it as a thunk
+  - VERIFIED: special workspaces end-to-end; mouse binds without 'mouse
+    (the mouse: prefix implies it); hl-exec = /bin/sh -c (quotes work)
+Remaining in these sections:
+  - auto_consuming bind flag + the return-{ok=false} protocol
+  - live gesture event payloads beyond (dx dy scale) (rotation, pinch)
 
 == 10. TOOLING ==
   - Watchdog for scheme callbacks (infinite loop in a bind/layout freezes
