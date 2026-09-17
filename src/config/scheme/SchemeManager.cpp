@@ -40,10 +40,12 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <vector>
+
 
 extern "C" {
 #include <scheme.h>
@@ -154,6 +156,15 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
           ((cdr entry) (make-hl-window win-id))
           #t))))
 
+;; events carrying (window, bool) payloads: minimize state
+(define (hl--fire-win-state id win-id state)
+  (let ((entry (assv id hl--binds)))
+    (if (not entry)
+        #f
+        (guard (e (#t (hl--report e)))
+          ((cdr entry) (make-hl-window win-id) state)
+          #t))))
+
 (define (hl--load path)
   (guard (e (#t (hl--report e)))
     (load path)
@@ -253,6 +264,9 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-window-move-to-workspace (foreign-procedure "hl-scheme-window-move-to-workspace" (int string) int))
 (define c-hl-monitor-names (foreign-procedure "hl-scheme-monitor-names" () scheme-object))
 (define c-hl-window-event-listen (foreign-procedure "hl-scheme-window-event-listen" (int) int))
+(define c-hl-window-minimize-listen (foreign-procedure "hl-scheme-window-minimize-listen" () int))
+(define c-hl-lifecycle-listen (foreign-procedure "hl-scheme-lifecycle-listen" (int) int))
+(define c-hl-config-reloaded-listen (foreign-procedure "hl-scheme-config-reloaded-listen" () int))
 (define c-hl-unbind (foreign-procedure "hl-scheme-unbind" (int) int))
 (define c-hl-window-same (foreign-procedure "hl-scheme-window-same" (int int) int))
 (define c-hl-current-submap (foreign-procedure "hl-scheme-current-submap" () scheme-object))
@@ -758,6 +772,57 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-on-window-close handler)
   (hl--window-listen 1 handler))
 
+;; handlers receive the window handle
+(define (hl-on-window-title handler)
+  (hl--window-listen 2 handler))
+
+(define (hl-on-window-class handler)
+  (hl--window-listen 3 handler))
+
+(define (hl-on-window-urgent handler)
+  (hl--window-listen 4 handler))
+
+(define (hl-on-window-pin handler)
+  (hl--window-listen 5 handler))
+
+(define (hl-on-window-fullscreen handler)
+  (hl--window-listen 6 handler))
+
+;; fires when a window moves to a different workspace
+(define (hl-on-window-move-to-workspace handler)
+  (hl--window-listen 7 handler))
+
+;; fires when the focused window changes
+(define (hl-on-window-active handler)
+  (hl--window-listen 8 handler))
+
+;; handler signature: (lambda (w state) ...) — state is #t when minimized
+(define (hl-on-window-minimize handler)
+  (let ((id (c-hl-window-minimize-listen)))
+    (if (< id 0)
+        (errorf 'hl-on-window-minimize "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+;; lifecycle: fires once when the session starts (its first render frame) and
+;; once before exit. handlers registered after startup fire immediately.
+(define (hl-on-start handler)
+  (let ((id (c-hl-lifecycle-listen 0)))
+    (if (< id 0)
+        (errorf 'hl-on-start "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+(define (hl-on-shutdown handler)
+  (let ((id (c-hl-lifecycle-listen 1)))
+    (if (< id 0)
+        (errorf 'hl-on-shutdown "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+(define (hl-on-config-reloaded handler)
+  (let ((id (c-hl-config-reloaded-listen)))
+    (if (< id 0)
+        (errorf 'hl-on-config-reloaded "listener rejected, see compositor log")
+        (hl--register id handler))))
+
 ;; identity, as in Lua's windowEq: true iff both handles refer to the same
 ;; live window (two handles for one window each get their own id)
 (define (hl-window=? a b)
@@ -842,6 +907,13 @@ namespace Config::Scheme {
     static std::vector<Hyprutils::Signal::CHyprSignalListener> g_submapListeners;
     static std::vector<Hyprutils::Signal::CHyprSignalListener> g_windowEventListeners;
 
+    // lifecycle: the start event is dispatched by an init-time listener
+    // (covers the plugin-auto-loaded-at-startup path, where the config load
+    // precedes the first render frame).
+    static bool                                        g_startSeen      = false;
+    static std::vector<int>                            g_pendingStart;
+    static std::vector<Hyprutils::Signal::CHyprSignalListener> g_lifecycleListeners;
+
 
     static Keybinds::SBindResult fireSchemeBind(int id) {
         if (!g_up)
@@ -851,6 +923,13 @@ namespace Config::Scheme {
         if (r == Sfalse)
             return {.success = false, .error = "scheme keybind callback failed"};
         return {};
+    }
+
+    // fires a handler registered for id with no payload; errors contained
+    static void fireScheme(int id) {
+        if (!g_up)
+            return;
+        Scall1(Stop_level_value(Sstring_to_symbol("hl--fire")), Sinteger(id));
     }
 
     // called from Scheme via foreign-procedure; flags are raw eBindFlags bits,
@@ -1015,6 +1094,8 @@ namespace Config::Scheme {
 
     // resolves a handle id to the live window, or null if stale (dead or
     // unknown). lazily drops dead entries while we're here.
+    static std::optional<PHLWINDOW> actionWindow(int id);
+
     static PHLWINDOW windowFromId(int id) {
         const auto it = g_windows.find(id);
         if (it == g_windows.end())
@@ -1086,7 +1167,9 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
 
-        const auto window = windowFromId(id);
+        const auto window = actionWindow(id);
+        if (id >= 0 && !window)
+            return -1;
         if (!window)
             return -1;
 
@@ -1168,31 +1251,32 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
 
-        const auto window = windowFromId(id);
+        const auto window = actionWindow(id);
         if (!window)
             return -1;
 
-        return Config::Actions::focus(window) ? 0 : -2;
+        return Config::Actions::focus(*window) ? 0 : -2;
     }
 
     static int hlSchemeWindowFloat(int id) {
         if (!g_up)
             return -1;
 
-        const auto window = windowFromId(id);
+        const auto window = actionWindow(id);
         if (!window)
             return -1;
 
-        return Config::Actions::floatWindow(Config::Actions::TOGGLE_ACTION_TOGGLE, window) ? 0 : -2;
+        return Config::Actions::floatWindow(Config::Actions::TOGGLE_ACTION_TOGGLE, *window) ? 0 : -2;
     }
 
     static int hlSchemeWindowMoveToWorkspace(int id, const char* name) {
         if (!g_up || !name)
             return -1;
 
-        const auto window = windowFromId(id);
+        const auto window = actionWindow(id);
         if (!window)
             return -1;
+        const PHLWINDOW w = *window;
 
         const auto target = State::Workspace::resolver()->getWorkspaceTargetFromString(name);
         if (!target.valid())
@@ -1203,13 +1287,13 @@ namespace Config::Scheme {
             // create missing workspaces on the window's own monitor
             // (isEmpty=false, like Lua's resolveWorkspaceStr — an empty-flagged
             // workspace gets swept before the window lands in it)
-            const auto mon = window->m_workspace ? window->m_workspace->m_monitor.lock() : Desktop::focusState()->monitor();
+            const auto mon = w->m_workspace ? w->m_workspace->m_monitor.lock() : Desktop::focusState()->monitor();
             ws             = State::Workspace::state()->create(target, mon, false);
         }
         if (!ws)
             return -2;
 
-        return Config::Actions::moveToWorkspace(ws, false, window) ? 0 : -2;
+        return Config::Actions::moveToWorkspace(ws, false, w) ? 0 : -2;
     }
 
     // toggles the given fullscreen mode (FSMODE_FULLSCREEN=2, FSMODE_MAXIMIZED=1),
@@ -1218,15 +1302,16 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
 
-        const auto window = windowFromId(id);
+        const auto window = actionWindow(id);
         if (!window)
             return -1;
+        const PHLWINDOW w = *window;
 
         const auto mode = sc<Fullscreen::eFullscreenMode>(modeRaw);
-        if (Fullscreen::controller()->isFullscreen(window, mode))
-            return Config::Actions::fullscreenWindow(Fullscreen::FSMODE_NONE, false, window) ? 0 : -2;
+        if (Fullscreen::controller()->isFullscreen(w, mode))
+            return Config::Actions::fullscreenWindow(Fullscreen::FSMODE_NONE, false, w) ? 0 : -2;
 
-        return Config::Actions::fullscreenWindow(mode, false, window) ? 0 : -2;
+        return Config::Actions::fullscreenWindow(mode, false, w) ? 0 : -2;
     }
 
     static int hlSchemeWindowFullscreenMode(int id) {
@@ -1716,11 +1801,68 @@ namespace Config::Scheme {
 
         const int id = g_nextBindId++;
 
-        if (which == 0)
-            g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openLate.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); }));
-        else
-            g_windowEventListeners.emplace_back(Event::bus()->m_events.window.close.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); }));
+        switch (which) {
+            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openLate.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.close.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.title.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.class_.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 4: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.urgent.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 5: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.pin.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 6: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.fullscreen.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 7: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.moveToWorkspace.listen([id](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(id, w); })); break;
+            case 8: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.active.listen([id](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(id, w); })); break;
+            default: break;
+        }
 
+        return id;
+    }
+
+    // minimize fires with (window, state): pass the bool as a second arg
+    static int hlSchemeWindowMinimizeListen() {
+        if (!g_up)
+            return -1;
+
+        const int id = g_nextBindId++;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.window.minimize.listen([id](PHLWINDOW w, bool state) {
+            if (!g_up || !w)
+                return;
+            const int winId = g_nextWindowId++;
+            g_windows.emplace(winId, PHLWINDOWREF(w));
+            Scall3(Stop_level_value(Sstring_to_symbol("hl--fire-win-state")), Sinteger(id), Sinteger(winId), state ? Strue : Sfalse);
+        }));
+        return id;
+    }
+
+    // lifecycle: 0 = start (session's first render frame), 1 = shutdown
+    // (the exit action). Matches upstream: a handler registered after start
+    // already fired (only possible when the plugin itself loaded before the
+    // first frame) runs on the next loop pass.
+    static int hlSchemeLifecycleListen(int which) {
+        if (!g_up)
+            return -1;
+
+        const int id = g_nextBindId++;
+
+        if (which == 0) {
+            if (g_startSeen) {
+                // the handler is registered by Scheme only AFTER this call
+                // returns, so the immediate fire must wait for the next pass
+                if (g_pEventLoopManager)
+                    g_pEventLoopManager->doLater([id] { fireScheme(id); });
+            } else
+                g_pendingStart.emplace_back(id);
+        } else
+            g_windowEventListeners.emplace_back(Event::bus()->m_events.exit.listen([id] { fireScheme(id); }));
+
+        return id;
+    }
+
+    static int hlSchemeConfigReloadedListen() {
+        if (!g_up)
+            return -1;
+
+        const int id = g_nextBindId++;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.reloaded.listen([id] { fireScheme(id); }));
         return id;
     }
 
@@ -1907,14 +2049,52 @@ namespace Config::Scheme {
             g_schemeIpcCommand.reset();
         }
         g_reloadListener.reset();
+        g_lifecycleListeners.clear();
         Layouts::clear();
+        // remove our binds: the compositor keeps running without us
+        for (const auto& [id, b] : g_binds) {
+            if (Keybinds::mgr())
+                Keybinds::mgr()->removeBind(b);
+        }
+        g_binds.clear();
+        // the interpreter stays alive: Chez does not survive a teardown +
+        // re-init inside the compositor (the second Sbuild_heap hangs), so
+        // a re-load of the plugin re-attaches to the live interpreter
         g_up = false;
     }
 
     void init() {
         static bool done = false;
-        if (done)
+        if (done) {
+            // soft reload: the interpreter and bootstrap are still alive;
+            // re-attach the plumbing that shutdown() removed
+            g_up = true;
+            if (g_pEventLoopManager && IPC::Socket1::sock()) {
+                g_schemeIpcCommand = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
+                    .name    = "scheme",
+                    .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+                    .handler = [](const IPC::Socket1::SRequest& req) {
+                        auto code = req.command.substr(req.command.find_first_of(' ') + 1);
+                        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                        std::string out;
+                        if (Sstringp(r)) {
+                            for (iptr i = 0; i < Sstring_length(r); ++i)
+                                out += (char)Sstring_ref(r, i);
+                        }
+                        return IPC::Socket1::SResponse(out);
+                    }});
+            }
+            g_reloadListener = Event::bus()->m_events.config.reloaded.listen([] { reloadScheme(); });
+            g_lifecycleListeners.emplace_back(Event::bus()->m_events.start.listen([] {
+                g_startSeen = true;
+                auto pending = std::move(g_pendingStart);
+                g_pendingStart.clear();
+                for (const auto id : pending)
+                    fireScheme(id);
+            }));
+            reloadScheme();
             return;
+        }
         done = true;
 
         g_configPath = userConfigPath();
@@ -1923,9 +2103,34 @@ namespace Config::Scheme {
             return;
         }
 
+        // pin ourselves: bump the dlopen refcount so the compositor's
+        // dlclose on unload never unmaps the live interpreter
+        {
+            Dl_info self{};
+            if (dladdr((void*)&init, &self) && self.dli_fname)
+                dlopen(self.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+        }
         Sscheme_init(nullptr);
-        Sregister_boot_file("/home/chris/GITE/chez-pic/petite.boot");
-        Sregister_boot_file("/home/chris/GITE/chez-pic/scheme.boot");
+        // boot files live next to the plugin (.so dir), with the install
+        // prefix and the dev kit as fallbacks
+        std::string bootDir;
+        Dl_info info{};
+        if (dladdr((void*)&init, &info) && info.dli_fname)
+            bootDir = std::filesystem::path(info.dli_fname).parent_path().string();
+        const std::string home = getenv("HOME") ? getenv("HOME") : "";
+        const std::vector<std::string> bootDirs = {"/home/chris/GITE/chez-pic", bootDir, home + "/.local/lib/hyprscheme", "/usr/lib/hyprscheme"};
+        const auto tryBoot = [&bootDirs](const char* name) {
+            for (const auto& dir : bootDirs) {
+                if (dir.empty())
+                    continue;
+                const auto p = dir + "/" + name;
+                if (std::filesystem::exists(p))
+                    return p;
+            }
+            return std::string(name);
+        };
+        Sregister_boot_file(tryBoot("petite.boot").c_str());
+        Sregister_boot_file(tryBoot("scheme.boot").c_str());
         Sbuild_heap(nullptr, nullptr);
 
         Sregister_symbol("hl-scheme-bind", (void*)hlSchemeBind);
@@ -1950,6 +2155,9 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-window-move-to-workspace", (void*)hlSchemeWindowMoveToWorkspace);
         Sregister_symbol("hl-scheme-monitor-names", (void*)hlSchemeMonitorNames);
         Sregister_symbol("hl-scheme-window-event-listen", (void*)hlSchemeWindowEventListen);
+        Sregister_symbol("hl-scheme-window-minimize-listen", (void*)hlSchemeWindowMinimizeListen);
+        Sregister_symbol("hl-scheme-lifecycle-listen", (void*)hlSchemeLifecycleListen);
+        Sregister_symbol("hl-scheme-config-reloaded-listen", (void*)hlSchemeConfigReloadedListen);
         Sregister_symbol("hl-scheme-unbind", (void*)hlSchemeUnbind);
         Sregister_symbol("hl-scheme-window-same", (void*)hlSchemeWindowSame);
         Sregister_symbol("hl-scheme-current-submap", (void*)hlSchemeCurrentSubmap);
@@ -2075,6 +2283,16 @@ namespace Config::Scheme {
         // the lua config load clears all binds; (re)load our file once it settles.
         // as a plugin we load AFTER the initial config load, so also load now.
         g_reloadListener = Event::bus()->m_events.config.reloaded.listen([] { reloadScheme(); });
+
+        // lifecycle: dispatch hl-on-start handlers on the session's first
+        // render frame (start fires exactly once, after the first preChecks)
+        g_lifecycleListeners.emplace_back(Event::bus()->m_events.start.listen([] {
+            g_startSeen = true;
+            auto pending = std::move(g_pendingStart);
+            g_pendingStart.clear();
+            for (const auto id : pending)
+                fireScheme(id);
+        }));
         reloadScheme();
     }
 }

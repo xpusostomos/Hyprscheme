@@ -20,8 +20,23 @@ hl-permission — permission rules (binary/type/mode regexes).
   Needed by: permissions page.
 
 == 2. DISPATCHER SURFACE (the general "do things" layer) ==
-Scheme has no dispatch concept; the whole hl.dsp.* catalog is missing.
-High-value first (everyday tiling):
+IMPLEMENTED 2026-09-17 (commit cd9abc7): the core surface now exists as
+direct hl- functions — focus (workspace/monitor/direction/last/urgent),
+window move/swap/cycle/resize/center (px + direction), pin/pseudo/kill/
+signal/zorder/set-prop/tag/clear-tags, float/fullscreen with explicit
+action+mode, fullscreen-state, group API (toggle/cycle/index/move/lock),
+workspace rename/toggle-special/move-to-monitor/swap-monitors, cursor
+move/corner, dpms, pass, send-shortcut, send-key-state, event, global,
+force-idle, renderer-reload, release-input-capture, mouse drag/resize,
+layout-msg send. All verified live. Remaining from this section:
+  - move a window directly to another MONITOR (moveToMonitor takes a
+    workspace; no window-to-monitor action)
+  - workspace change_id
+  - window-selector targeting for pass/send-shortcut (background windows)
+  - exec_raw, exec-with-rules
+  - hl-window-fullscreen-handler accessor
+  - submap setSubmap via CA::setSubmap (scheme has enter/exit already)
+Originally-remaining list (for reference):
   - hl-focus-workspace (focus workspace by name/number) — *key* for binds;
     currently impossible (window-rules, device-binds-mouse, code-snippets)
   - hl-focus-direction / hl-focus-monitor / hl-focus-last / hl-focus-urgent
