@@ -379,7 +379,7 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
 static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define hl--binds '())
 
-(define c-hl-bind (foreign-procedure "hl-scheme-bind" (string string int string string) int))
+(define c-hl-bind (foreign-procedure "hl-scheme-bind" (string int string string) int))
 (define c-hl-exec (foreign-procedure "hl-scheme-exec" (string) int))
 (define c-hl-timer (foreign-procedure "hl-scheme-timer" (int int) int))
 (define c-hl-active-title (foreign-procedure "hl-scheme-active-title" () scheme-object))
@@ -640,9 +640,11 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
            8192
            0))))
 
-(define (hl--bind-impl mods key thunk . opts)
+(define (hl--bind-impl keys thunk . opts)
   (let* ((alist (hl--pairs opts))
-         (id (c-hl-bind mods key
+         (keys-str (hl--string-join keys " "))
+         (key (car (reverse keys)))
+         (id (c-hl-bind keys-str
                          (+ (hl--bind-flags alist)
                             (if (equal? key "catchall") 16384 0))
                          (or (hl--opt alist 'description) "")
@@ -654,7 +656,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                                        (else (loop (cdr rest) (string-append acc (car rest) ",")))))
                                "")))))
     (if (< id 0)
-        (errorf 'hl-bind "bind ~a ~a rejected, see compositor log" mods key)
+        (errorf 'hl-bind "bind ~a rejected, see compositor log" keys-str)
         (hl--register id thunk))))
 
 ;; hl-bind dispatches on the first argument:
@@ -662,17 +664,10 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;;   (hl-bind MODS KEY THUNK . OPTS)             — two strings
 (define (hl-bind . args)
   (if (and (pair? (car args)) (string? (car (car args))) (> (length (car args)) 1))
-      ;; list form: (kbd/hl-kbd result) thunk . opts
-      (let* ((tokens (car args)) (rest (cdr args))
-             (n (length tokens)))
-        (apply hl--bind-impl
-               (hl--string-join (let butlast ((l tokens) (k (- n 1)) (acc '()))
-                                  (if (= k 0) (reverse acc) (butlast (cdr l) (- k 1) (cons (car l) acc))))
-                                " ")
-               (car (reverse tokens))
-               rest))
-      ;; two-string form: mods key thunk . opts
-      (apply hl--bind-impl args)))
+      ;; list form: (kbd/hl-kbd result) thunk . opts — pass the list directly
+      (apply hl--bind-impl (car args) (cdr args))
+      ;; two-string form: mods key thunk . opts → join into one list
+      (apply hl--bind-impl (cons (car args) (cons (cadr args) '())) (cddr args))))
 
 ;; ---- key specification helpers -----------------------------------------------
 ;; (kbd "C-M-a")      — emacs syntax → (mods . key) pair for hl-bind
@@ -1699,17 +1694,14 @@ namespace Config::Scheme {
 
     // called from Scheme via foreign-procedure; flags are raw eBindFlags bits,
     // assembled Scheme-side from the options alist
-    static int hlSchemeBind(const char* mods, const char* key, int flags, const char* desc, const char* devices) {
+    static int hlSchemeBind(const char* keys_str, int flags, const char* desc, const char* devices) {
         if (!g_up)
             return -1;
 
         std::vector<std::string> keys;
-        std::istringstream       ss(mods ? mods : "");
+        std::istringstream       ss(keys_str ? keys_str : "");
         for (std::string tok; ss >> tok;)
             keys.emplace_back(std::move(tok));
-
-        if (key && *key)
-            keys.emplace_back(key);
 
         const int id = g_nextBindId++;
 
