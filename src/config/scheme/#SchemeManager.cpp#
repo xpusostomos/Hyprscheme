@@ -681,24 +681,15 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   '(("RET" . "Return") ("SPC" . "space") ("ESC" . "Escape")
     ("TAB" . "Tab") ("DEL" . "Delete") ("LFD" . "Return")))
 
-;; emacs mouse events → hyprland mouse:CODE
-;; emacs mouse-1=left, mouse-2=middle, mouse-3=right
-;; hyprland: 272=left, 273=right, 274=middle
-(define hl--emacs-mouse
-  '(("<down-mouse-1>" . "mouse:272") ("<mouse-1>" . "mouse:272")
-    ("<down-mouse-2>" . "mouse:274") ("<mouse-2>" . "mouse:274")
-    ("<down-mouse-3>" . "mouse:273") ("<mouse-3>" . "mouse:273")
-    ("<mouse-4>" . "mouse:275") ("<mouse-5>" . "mouse:276")))
-
 (define (hl--emacs-key name)
   ;; translate an emacs key name to the xkb/hyprland name
-  (let ((mapped (or (assoc name hl--emacs-keys) (assoc name hl--emacs-mouse))))
+  (let ((mapped (assoc name hl--emacs-keys)))
     (if mapped
         (cdr mapped)
-        ;; bracketed keyboard keysym: <f1> → F1, <left> → Left, <kp-1> → KP_1
         (if (and (> (string-length name) 2)
                  (char=? (string-ref name 0) #\<)
                  (char=? (string-ref name (- (string-length name) 1)) #\>))
+            ;; strip < and >, replace - with _ (e.g. <kp-1> → KP_1)
             (let* ((inner (substring name 1 (- (string-length name) 1)))
                    (n (string-length inner)))
               (let build ((i 0) (acc '()))
@@ -4329,7 +4320,7 @@ namespace Config::Scheme {
         if (dladdr((void*)&init, &info) && info.dli_fname)
             bootDir = std::filesystem::path(info.dli_fname).parent_path().string();
         const std::string home = getenv("HOME") ? getenv("HOME") : "";
-        const std::vector<std::string> bootDirs = {"/home/chris/GITE/chez-pic", bootDir, home + "/.local/lib/hyprscheme", "/usr/lib/hyprscheme"};
+        const std::vector<std::string> bootDirs = { bootDir, home + "/.local/lib/hyprscheme", "/usr/lib/hyprscheme"};
         const auto tryBoot = [&bootDirs](const char* name) {
             for (const auto& dir : bootDirs) {
                 if (dir.empty())
