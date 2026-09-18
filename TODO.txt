@@ -54,6 +54,41 @@ HYPRSCHEME_CONFIG (implemented 2026-09-18): env var selecting the scheme
   point at a scheme file (the config system has no language dispatch;
   Jeremy.cpp returns explicit paths verbatim into the Lua parser).
 
+== PER-GENERATION ENVIRONMENTS (implemented + verified 2026-09-18) ==
+Each config reload now evaluates in a FRESH Chez environment (a copy of
+  the persistent interaction environment made by hl--reset), so orphaned
+  definitions from previous generations cannot leak — consistency with
+  upstream's per-reload fresh lua_State. Verified live: an eval-defined
+  orphan and a load-split file's definitions both disappear on reload;
+  hl--state survives; the watchdog (t-watchdog) passes with per-generation
+  budget overrides.
+Mechanics:
+- hl--reset: clears hl--binds, clears the hl--generation slot (breaks the
+  reference chain so old generations are collectable), installs a fresh
+  copy of the persistent environment.
+- hl--load evaluates the config into (hl--target-env); hyprctl scheme
+  evals land in the current generation too (they die with it, like
+  upstream's evals).
+- load/eval are SHADOWED once in the persistent environment to target the
+  current generation — otherwise the documented config-splitting workflow
+  (load "keybinds.scm") would leak into the persistent env. The
+  interaction environment permits redefining imported names.
+- hl--wd-enter reads hl--watchdog-ms through the CURRENT generation
+  (config and hyprctl set!s land in the generation copy; the machinery's
+  own defining environment would never see them).
+PROCESS NOTE (an honest record): the first attempt was reverted on a
+  misdiagnosis. "Minimal repros" of a Chez deadlock were BROKEN — they
+  installed a timer-interrupt handler but never ARMED the timer (the only
+  set-timer call was inside the handler), so the handler never ran and
+  the runaway loop froze regardless of environment arguments. With the
+  timer armed, escapes through copy-environment targets work identically
+  to the interaction environment. The real issue all along was the budget
+  shadowing above. (Also learned the hard way: one-line bash exports
+  expand later assignments with the OLD value of an earlier variable — a
+  probe exported HYPRSCHEME_CONFIG=$XDG_CONFIG_HOME/... in the same
+  statement that set XDG_CONFIG_HOME, silently pointing the override at
+  the user's real config.)
+
 == REMAINING SMALL GAPS ==
 - Monitor set_special (upstream mon:set_special_workspace) — we only
   have toggle_special; an explicit set (open/close, not toggle) is a

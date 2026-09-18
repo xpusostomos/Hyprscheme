@@ -115,6 +115,15 @@ using Hyprutils::OS::CFileDescriptor;
          Any error prints and leaves hl--ready #f; the C side then disables
          scheme instead of continuing half-initialized.
 
+    Both phases evaluate into the PERSISTENT environment (the interpreter's
+    interaction environment), which holds the API and the cross-reload
+    state forever. Each config generation is then evaluated in its own
+    FRESH environment — a copy made by hl--reset — so definitions from
+    previous generations cannot leak into new ones (mirroring upstream's
+    per-generation lua_State). Machinery variables the config may set!
+    (hl--watchdog-ms) are read through the generation copy so overrides
+    reach them; hl--state is the one deliberate cross-generation bridge.
+
     After a successful bootstrap the scripting API is:
 
         (hl-bind '("SUPER" "SHIFT" "T") (lambda () ...))  -> id | error
@@ -174,6 +183,13 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
 ;; so everything user- or config-supplied must run under these guards.
 (define hl--ready #f)
 
+;; the current config generation's environment, or #f before the first
+;; hl--reset (the bootstrap load targets the persistent interaction
+;; environment). hl--reset installs a fresh copy per generation so user
+;; definitions from previous generations cannot leak into new ones.
+(define hl--generation #f)
+
+
 (define (hl--report e)
   (display "[scheme] error: " (current-error-port))
   (display-condition e (current-error-port))
@@ -202,8 +218,13 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
 
 (define (hl--wd-enter what escape)
   ;; budget + t0 + escape are captured in the handler's closure — the
-  ;; handler fires asynchronously and must not read shared state
-  (let* ((budget hl--watchdog-ms)
+  ;; handler fires asynchronously and must not read shared state. The
+  ;; budget is read through the CURRENT generation: config and hyprctl
+  ;; set!s land in the generation copy, and reading this closure's own
+  ;; defining environment would miss them.
+  (let* ((budget (if hl--generation
+                     (top-level-value 'hl--watchdog-ms hl--generation)
+                     hl--watchdog-ms))
          (t0 (current-time))
          (old-handler (timer-interrupt-handler))
          (old-ticks (set-timer hl--wd-rearm)))
@@ -313,13 +334,42 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
                         (hl--guarded-run "handler" (lambda () ((cdr entry) (make-hl-window win-id) state))))))
           (not (eq? result hl--wd-aborted))))))
 
+;; evaluate every form of a file into an environment (the explicit env
+;; argument is the point: plain load always targets the interaction
+;; environment, which would leak definitions across generations)
+(define (hl--eval-file path env)
+  (call-with-input-file path
+    (lambda (p)
+      (let loop ()
+        (let ((form (read p)))
+          (unless (eof-object? form)
+            (eval form env)
+            (loop)))))))
+
+;; the environment user-supplied code runs in: the current generation, or
+;; the persistent environment before the first reset
+(define (hl--target-env)
+  (or hl--generation (interaction-environment)))
+
 (define (hl--load path)
   (guard (e (#t (hl--report e)))
-    (load path)
+    (hl--eval-file path (hl--target-env))
     #t))
 
+;; generation-aware shadows of load/eval: user-code (load "file") and
+;; (eval x) must target the current generation, never the persistent
+;; environment — otherwise the documented config-splitting workflow (see
+;; core) would leak definitions across generations. Without hl--generation
+;; (bootstrap phase) they pass through.
+(define real-load load)
+(define real-eval eval)
+(define load (lambda (f) (if hl--generation (hl--load f) (real-load f))))
+(define eval (lambda (x . o) (real-eval x (if (null? o) (hl--target-env) (car o)))))
+
 ;; hyprctl scheme entry: evaluate all forms in the string, reply with the
-;; last value formatted, or the error text
+;; last value formatted, or the error text. Evals land in the current
+;; generation so they see the config's definitions — and die with it, like
+;; upstream's evals (they run in a lua_State the next reload discards).
 (define (hl--eval code)
   (guard (e (#t (call-with-string-output-port
                   (lambda (p)
@@ -327,11 +377,12 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
                     (display-condition e p)))))
     (let ((result (hl--guarded-run "eval"
                     (lambda ()
-                      (let loop ((port (open-input-string code)) (result (void)))
-                        (let ((form (read port)))
-                          (if (eof-object? form)
-                              result
-                              (loop port (eval form)))))))))
+                      (let ((env (hl--target-env)))
+                        (let loop ((port (open-input-string code)) (result (void)))
+                          (let ((form (read port)))
+                            (if (eof-object? form)
+                                result
+                                (loop port (eval form env))))))))))
       (if (eq? result hl--wd-aborted)
           "watchdog: eval abandoned (see the compositor log)"
           (format "~s" result)))))
@@ -1906,8 +1957,21 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-on-monitor-layout-changed handler)
   (hl--monitor-event-listen 3 handler))
 
+;; reload boundary: drop the previous generation's handler table and install
+;; a FRESH environment for the new one. The copy inherits the API (defined
+;; once in the persistent environment) but user definitions from previous
+;; generations become unreachable when the copy is replaced — the same
+;; clean-slate semantics as upstream's per-generation lua_State. hl--state
+;; is the one deliberate cross-generation bridge (it lives in the persistent
+;; environment).
 (define (hl--reset)
-  (set! hl--binds '()))
+  (set! hl--binds '())
+  ;; break the chain: clear the slot BEFORE copying so the new copy does
+  ;; not retain the previous generation's environment through it (that
+  ;; would keep every old generation alive), and user code never sees a
+  ;; stale env reference
+  (set! hl--generation #f)
+  (set! hl--generation (copy-environment (interaction-environment))))
 
 ;; cross-reload state: lives in the bootstrap (evaluated ONCE), deliberately
 ;; OUTSIDE hl--reset's reach. Reloads wipe binds/timers/listeners/handles;
