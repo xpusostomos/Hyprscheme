@@ -114,8 +114,9 @@ using Hyprutils::OS::CFileDescriptor;
 
     After a successful bootstrap the scripting API is:
 
-        (hl-bind "SUPER SHIFT" "T" (lambda () ...))   -> id | error
-        (hl-bind mods key thunk 'release #t 'description "d")  -> id | error
+        (hl-bind '("SUPER" "SHIFT" "T") (lambda () ...))  -> id | error
+        (hl-bind (kbd "C-M-t") thunk)                     -> id | error
+        (hl-bind "SUPER" "T" thunk 'release #t 'description "d") -> id | error
             options: release repeat locked non-consuming long-press
                      ignore-mods transparent description
         (hl-exec "command")                           -> pid | -1
