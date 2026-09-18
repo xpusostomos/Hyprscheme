@@ -406,6 +406,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-lifecycle-listen (foreign-procedure "hl-scheme-lifecycle-listen" (int) int))
 (define c-hl-config-reloaded-listen (foreign-procedure "hl-scheme-config-reloaded-listen" () int))
 (define c-hl-unbind (foreign-procedure "hl-scheme-unbind" (int) int))
+(define c-hl-unbind-key (foreign-procedure "hl-scheme-unbind-key" (string) int))
 (define c-hl-window-same (foreign-procedure "hl-scheme-window-same" (int int) int))
 (define c-hl-current-submap (foreign-procedure "hl-scheme-current-submap" () scheme-object))
 (define c-hl-cursor-pos (foreign-procedure "hl-scheme-cursor-pos" () scheme-object))
@@ -1546,6 +1547,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-unbind id)
   (= 0 (c-hl-unbind id)))
 
+;; removes ALL binds matching a key string (the display key as passed to
+;; hl-bind — e.g. "SUPER T", "C-M-x", "mouse:272"). case-insensitive,
+;; whitespace-insensitive. returns #t if any binds were removed.
+(define (hl-unbind-key key)
+  (= 0 (c-hl-unbind-key (hl--str key))))
+
 (define (hl-current-submap)
   (or (c-hl-current-submap) ""))
 
@@ -1721,6 +1728,12 @@ namespace Config::Scheme {
         const int id = g_nextBindId++;
 
         Keybinds::SExtraBindArgs args;
+        std::string display_key;
+        for (const auto& k : keys) {
+            if (!display_key.empty()) display_key += ' ';
+            display_key += k;
+        }
+        args.metadata.displayKey = display_key;
         if (desc && *desc)
             args.metadata.description = desc;
         args.metadata.submap      = g_regSubmap;
@@ -1743,6 +1756,17 @@ namespace Config::Scheme {
     }
 
     // called from Scheme via foreign-procedure: remove one scheme bind
+    static int hlSchemeUnbindKey(const char* key) {
+        if (!g_up || !Keybinds::mgr() || !key || !*key)
+            return -1;
+        const auto removed = Keybinds::mgr()->removeBinds(key);
+        // drop our g_binds entries whose displayKey matches
+        std::erase_if(g_binds, [&key](const auto& b) {
+            return b.second && b.second->metadata().displayKey == key;
+        });
+        return removed > 0 ? 0 : -1;
+    }
+
     static int hlSchemeUnbind(int id) {
         if (!g_up)
             return -1;
@@ -4089,6 +4113,7 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-lifecycle-listen", (void*)hlSchemeLifecycleListen);
         Sregister_symbol("hl-scheme-config-reloaded-listen", (void*)hlSchemeConfigReloadedListen);
         Sregister_symbol("hl-scheme-unbind", (void*)hlSchemeUnbind);
+        Sregister_symbol("hl-scheme-unbind-key", (void*)hlSchemeUnbindKey);
         Sregister_symbol("hl-scheme-window-same", (void*)hlSchemeWindowSame);
         Sregister_symbol("hl-scheme-current-submap", (void*)hlSchemeCurrentSubmap);
         Sregister_symbol("hl-scheme-cursor-pos", (void*)hlSchemeCursorPos);
