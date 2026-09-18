@@ -14,6 +14,9 @@ BIN=${BIN:-$HOME/.local/bin/hyprland-scheme}
 FILTER=${1:-}
 WORK=$(mktemp -d /tmp/hyprscheme-test.XXXXXX)
 export XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state
+# the scheme config reaches the plugin through HYPRSCHEME_CONFIG — dogfoods
+# the override on every run (if the env handling breaks, no test passes)
+export HYPRSCHEME_CONFIG=$XDG_CONFIG_HOME/hypr/hyprland.scm
 mkdir -p "$XDG_CONFIG_HOME/hypr" "$XDG_STATE_HOME"
 cp tests/config/hyprland.lua "$XDG_CONFIG_HOME/hypr/"
 cp tests/config/hyprland.scm "$XDG_CONFIG_HOME/hypr/"
@@ -27,15 +30,30 @@ cleanup() {
 trap cleanup EXIT
 
 echo "launching nested compositor (config: $XDG_CONFIG_HOME/hypr)"
+mapfile -t BEFORE < <(ls "$XDG_RUNTIME_DIR/hypr" 2>/dev/null)
 "$BIN" --config "$XDG_CONFIG_HOME/hypr/hyprland.lua" > "$WORK/compositor.log" 2>&1 &
 CPID=$!
-for _ in $(seq 1 60); do
-  HYPRLAND_INSTANCE_SIGNATURE=$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)
-  [[ -S "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock" ]] && break
+# wait for the NEW instance's IPC to answer — the socket file appears well
+# before the event loop services it (nested startup can take ~10s under
+# software rendering), and the dir list may contain stale entries from
+# killed instances, so only a dir that did not exist before AND answers
+# hyprctl counts.
+for _ in $(seq 1 240); do
+  HYPRLAND_INSTANCE_SIGNATURE=""
+  for d in $(ls "$XDG_RUNTIME_DIR/hypr" 2>/dev/null); do
+    if [[ " ${BEFORE[*]} " != *" $d "* ]] && env HYPRLAND_INSTANCE_SIGNATURE=$d timeout 2 hyprctl version >/dev/null 2>&1; then
+      HYPRLAND_INSTANCE_SIGNATURE=$d
+      break
+    fi
+  done
+  [[ -n $HYPRLAND_INSTANCE_SIGNATURE ]] && break
   sleep 0.5
 done
 export HYPRLAND_INSTANCE_SIGNATURE
-if ! timeout 5 env HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl plugin load "$HOME/.local/lib/hyprscheme/scheme-plugin.so" | grep -q ok; then
+if [[ -z $HYPRLAND_INSTANCE_SIGNATURE ]]; then
+  echo "FAIL: compositor never became responsive"; tail -20 "$WORK/compositor.log"; exit 1
+fi
+if ! timeout 20 env HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl plugin load "$HOME/.local/lib/hyprscheme/scheme-plugin.so" | grep -q ok; then
   echo "FAIL: plugin load"; tail -20 "$WORK/compositor.log"; exit 1
 fi
 sleep 1

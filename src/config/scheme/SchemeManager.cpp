@@ -26,6 +26,9 @@
 #include <src/state/WorkspaceState.hpp>
 #include <src/state/workspace/Resolver.hpp>
 #include <src/workspace/HLWorkspace.hpp>
+#include <src/workspace/RegularWorkspace.hpp>
+#include <src/workspace/query/Query.hpp>
+#include <src/layout/supplementary/WorkspaceAlgoMatcher.hpp>
 #include <src/config/shared/actions/ConfigActions.hpp>
 #include <src/helpers/math/Direction.hpp>
 #include <src/input/Keys.hpp>
@@ -124,7 +127,7 @@ using Hyprutils::OS::CFileDescriptor;
         (hl-repeat ms (lambda () ...))                -> id | error   (until reload;
                                                         a callback error stops it)
         (hl-active-title)                             -> string | #f
-        (hl-workspaces)                               -> list of strings
+        (hl-workspaces)                               -> list of workspace handles
         (hl-on-submap (lambda (name) ...))            -> id | error   (until reload)
         (hl-active-window)                            -> window | #f
         (hl-windows)                                  -> list of windows
@@ -132,8 +135,8 @@ using Hyprutils::OS::CFileDescriptor;
         (hl-window-alive? w)                          -> bool
         (hl-window-close w)                           -> bool
         (hl-window-class w)                           -> string | #f
-        (hl-window-workspace w)                       -> string | #f
-        (hl-window-monitor w)                         -> string | #f
+        (hl-window-workspace w)                       -> workspace handle | #f
+        (hl-window-monitor w)                         -> monitor handle | #f
         (hl-window-floating? w)                       -> bool
         (hl-window-size w)                            -> (w . h) | #f
         (hl-window-pid w)                             -> int | -1
@@ -144,10 +147,10 @@ using Hyprutils::OS::CFileDescriptor;
         (hl-window-fullscreen-mode w)                 -> 0 none | 1 max | 2 full
         (hl-window-hidden? w) / (hl-window-pinned? w) / (hl-window-x11? w) -> bool
         (hl-window-initial-class w) / (hl-window-initial-title w) -> string | #f
-        (hl-monitors)                                 -> list of names
+        (hl-monitors)                                 -> list of monitor handles
         (hl-on-window-open (lambda (w) ...))          -> id | error   (w = handle)
         (hl-on-window-close (lambda (w) ...))         -> id | error   (w = handle)
-        (hl-on-workspace-active (lambda (name) ...))  -> id | error
+        (hl-on-workspace-active (lambda (ws) ...))    -> id | error   (ws = handle)
         (hl-window=? a b)                             -> bool (same window)
         (hl-unbind id)                                -> bool
         (hl-current-submap)                           -> string
@@ -249,6 +252,46 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
         #f
         (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
                         (hl--guarded-run "handler" (lambda () ((cdr entry) arg))))))
+          (not (eq? result hl--wd-aborted))))))
+
+;; events carrying a boolean payload: the handler receives #t or #f
+(define (hl--fire-bool id arg)
+  (let ((entry (assv id hl--binds)))
+    (if (not entry)
+        #f
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "handler" (lambda () ((cdr entry) arg))))))
+          (not (eq? result hl--wd-aborted))))))
+
+;; events carrying a workspace handle: the payload crosses as a handle id
+;; (or #f); the record constructor lives in the bootstrap
+(define (hl--fire-ws id arg)
+  (let ((entry (assv id hl--binds)))
+    (if (not entry)
+        #f
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "handler" (lambda () ((cdr entry) (and (not (eq? arg #f)) (make-hl-workspace arg))))))))
+          (not (eq? result hl--wd-aborted))))))
+
+;; events carrying a monitor handle
+(define (hl--fire-mon id arg)
+  (let ((entry (assv id hl--binds)))
+    (if (not entry)
+        #f
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "handler" (lambda () ((cdr entry) (and (not (eq? arg #f)) (make-hl-monitor arg))))))))
+          (not (eq? result hl--wd-aborted))))))
+
+;; events carrying two handles (workspace, monitor); #f crosses for an
+;; absent one (e.g. no special workspace open)
+(define (hl--fire-ws-mon id ws mon)
+  (let ((entry (assv id hl--binds)))
+    (if (not entry)
+        #f
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "handler" (lambda () ((cdr entry)
+                                                                 (and (not (eq? ws #f)) (make-hl-workspace ws))
+                                                                 (and (not (eq? mon #f)) (make-hl-monitor mon))))))))
           (not (eq? result hl--wd-aborted))))))
 
 ;; defined here so event handlers receive real window records; the record
@@ -392,8 +435,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-window-alive (foreign-procedure "hl-scheme-window-alive" (int) int))
 (define c-hl-window-close (foreign-procedure "hl-scheme-window-close" (int) int))
 (define c-hl-window-class (foreign-procedure "hl-scheme-window-class" (int) scheme-object))
-(define c-hl-window-workspace-name (foreign-procedure "hl-scheme-window-workspace-name" (int) scheme-object))
-(define c-hl-window-monitor-name (foreign-procedure "hl-scheme-window-monitor-name" (int) scheme-object))
+(define c-hl-window-workspace-id (foreign-procedure "hl-scheme-window-workspace-id" (int) scheme-object))
+(define c-hl-window-monitor-id (foreign-procedure "hl-scheme-window-monitor-id" (int) scheme-object))
 (define c-hl-window-floating (foreign-procedure "hl-scheme-window-floating" (int) int))
 (define c-hl-window-size (foreign-procedure "hl-scheme-window-size" (int) scheme-object))
 (define c-hl-window-pid (foreign-procedure "hl-scheme-window-pid" (int) int))
@@ -405,12 +448,16 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-window-minimize-listen (foreign-procedure "hl-scheme-window-minimize-listen" () int))
 (define c-hl-lifecycle-listen (foreign-procedure "hl-scheme-lifecycle-listen" (int) int))
 (define c-hl-config-reloaded-listen (foreign-procedure "hl-scheme-config-reloaded-listen" () int))
+(define c-hl-config-props-refreshed-listen (foreign-procedure "hl-scheme-config-props-refreshed-listen" () int))
 (define c-hl-unbind (foreign-procedure "hl-scheme-unbind" (int) int))
 (define c-hl-unbind-key (foreign-procedure "hl-scheme-unbind-key" (string) int))
 (define c-hl-window-same (foreign-procedure "hl-scheme-window-same" (int int) int))
 (define c-hl-current-submap (foreign-procedure "hl-scheme-current-submap" () scheme-object))
 (define c-hl-cursor-pos (foreign-procedure "hl-scheme-cursor-pos" () scheme-object))
 (define c-hl-workspace-active-listen (foreign-procedure "hl-scheme-workspace-active-listen" () int))
+(define c-hl-monitor-event-listen (foreign-procedure "hl-scheme-monitor-event-listen" (int) int))
+(define c-hl-workspace-event-listen (foreign-procedure "hl-scheme-workspace-event-listen" (int) int))
+(define c-hl-workspace-change-id (foreign-procedure "hl-scheme-workspace-change-id" (string double) int))
 (define c-hl-define-layout (foreign-procedure "hl-scheme-define-layout" (string) int))
 
 ;; pure-function layout; see SchemeLayout.hpp for the contract
@@ -556,14 +603,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-active-workspace (foreign-procedure "hl-active-workspace" () scheme-object))
 (define c-hl-active-special-workspace (foreign-procedure "hl-active-special-workspace" () scheme-object))
 (define c-hl-last-workspace (foreign-procedure "hl-last-workspace" () scheme-object))
-(define c-hl-workspace-info (foreign-procedure "hl-workspace-info" (string) scheme-object))
 (define c-hl-workspace-windows (foreign-procedure "hl-workspace-windows" (string) scheme-object))
 (define c-hl-layers (foreign-procedure "hl-layers" () scheme-object))
 (define c-hl-is-key-down (foreign-procedure "hl-is-key-down" (string) int))
 (define c-hl-loaded-plugins (foreign-procedure "hl-loaded-plugins" () scheme-object))
 (define c-hl-version (foreign-procedure "hl-version" () scheme-object))
 (define c-hl-windows-from (foreign-procedure "hl-windows-from" (string) scheme-object))
-(define c-hl-monitor-info (foreign-procedure "hl-monitor-info" (string) scheme-object))
 (define c-hl-window-fullscreen-handler (foreign-procedure "hl-window-fullscreen-handler" (int) scheme-object))
 (define c-hl-notify (foreign-procedure "hl-notify" (string double string string double) scheme-object))
 (define c-hl-timer-set-enabled (foreign-procedure "hl-timer-set-enabled" (double int) int))
@@ -632,6 +677,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
        (if (or click drag) 2 0)              ; click/drag imply release
        (if click 512 0)
        (if drag 1024 0)
+       (if (hl--opt alist 'auto-consuming) 32 0)
        (if (hl--opt alist 'dont-inhibit) 256 0)
        (if (hl--opt alist 'submap-universal) 2048 0)
        (if (hl--opt alist 'allow-input-capture) 4096 0)
@@ -754,7 +800,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((joined (c-hl-workspace-names)))
     (if (eq? joined #f)
         '()
-        (hl--split-lines joined))))
+        (map make-hl-workspace (map string->number (hl--split-lines joined))))))
 
 (define (hl-on-submap thunk)
   (let ((id (c-hl-submap-listen)))
@@ -766,6 +812,58 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; keyed by id; the compositor can destroy the window at any moment, and
 ;; stale handles simply report #f — the id is the only thing crossing FFI.
 (define-record-type hl-window (fields id))
+
+;; workspaces and monitors use the same handle model: an opaque record
+;; wrapping an int id that indexes a weak-ref registry C++-side. Getters
+;; mirror upstream Lua's object fields 1:1; a stale or dead handle yields #f
+;; from every getter.
+(define-record-type hl-workspace (fields id))
+(define-record-type hl-monitor (fields id))
+
+(define c-hl-workspace-name (foreign-procedure "hl-workspace-name" (int) scheme-object))
+(define c-hl-workspace-addressable-name (foreign-procedure "hl-workspace-addressable-name" (int) scheme-object))
+(define c-hl-workspace-number (foreign-procedure "hl-workspace-number" (int) scheme-object))
+(define c-hl-workspace-monitor (foreign-procedure "hl-workspace-monitor" (int) scheme-object))
+(define c-hl-workspace-special (foreign-procedure "hl-workspace-special" (int) scheme-object))
+(define c-hl-workspace-active (foreign-procedure "hl-workspace-active" (int) scheme-object))
+(define c-hl-workspace-visible (foreign-procedure "hl-workspace-visible" (int) scheme-object))
+(define c-hl-workspace-empty (foreign-procedure "hl-workspace-empty" (int) scheme-object))
+(define c-hl-workspace-persistent (foreign-procedure "hl-workspace-persistent" (int) scheme-object))
+(define c-hl-workspace-has-urgent (foreign-procedure "hl-workspace-has-urgent" (int) scheme-object))
+(define c-hl-workspace-has-fullscreen (foreign-procedure "hl-workspace-has-fullscreen" (int) scheme-object))
+(define c-hl-workspace-fullscreen-mode (foreign-procedure "hl-workspace-fullscreen-mode" (int) scheme-object))
+(define c-hl-workspace-fullscreen-window (foreign-procedure "hl-workspace-fullscreen-window" (int) scheme-object))
+(define c-hl-workspace-last-window (foreign-procedure "hl-workspace-last-window" (int) scheme-object))
+(define c-hl-workspace-window-count (foreign-procedure "hl-workspace-window-count" (int) scheme-object))
+(define c-hl-workspace-group-count (foreign-procedure "hl-workspace-group-count" (int) scheme-object))
+(define c-hl-workspace-tiled-layout (foreign-procedure "hl-workspace-tiled-layout" (int) scheme-object))
+(define c-hl-workspace-alive (foreign-procedure "hl-workspace-alive" (int) scheme-object))
+(define c-hl-workspace-same (foreign-procedure "hl-workspace-same" (int int) scheme-object))
+(define c-hl-workspace-selector (foreign-procedure "hl-workspace-selector" (int) scheme-object))
+
+(define c-hl-monitor-name (foreign-procedure "hl-monitor-name" (int) scheme-object))
+(define c-hl-monitor-description (foreign-procedure "hl-monitor-description" (int) scheme-object))
+(define c-hl-monitor-number (foreign-procedure "hl-monitor-number" (int) scheme-object))
+(define c-hl-monitor-enabled (foreign-procedure "hl-monitor-enabled" (int) scheme-object))
+(define c-hl-monitor-focused (foreign-procedure "hl-monitor-focused" (int) scheme-object))
+(define c-hl-monitor-x (foreign-procedure "hl-monitor-x" (int) scheme-object))
+(define c-hl-monitor-y (foreign-procedure "hl-monitor-y" (int) scheme-object))
+(define c-hl-monitor-width (foreign-procedure "hl-monitor-width" (int) scheme-object))
+(define c-hl-monitor-height (foreign-procedure "hl-monitor-height" (int) scheme-object))
+(define c-hl-monitor-scale (foreign-procedure "hl-monitor-scale" (int) scheme-object))
+(define c-hl-monitor-transform (foreign-procedure "hl-monitor-transform" (int) scheme-object))
+(define c-hl-monitor-refresh-rate (foreign-procedure "hl-monitor-refresh-rate" (int) scheme-object))
+(define c-hl-monitor-mode (foreign-procedure "hl-monitor-mode" (int) scheme-object))
+(define c-hl-monitor-dpms (foreign-procedure "hl-monitor-dpms" (int) scheme-object))
+(define c-hl-monitor-vrr (foreign-procedure "hl-monitor-vrr" (int) scheme-object))
+(define c-hl-monitor-10bit (foreign-procedure "hl-monitor-10bit" (int) scheme-object))
+(define c-hl-monitor-reserved (foreign-procedure "hl-monitor-reserved" (int) scheme-object))
+(define c-hl-monitor-mirror-of (foreign-procedure "hl-monitor-mirror-of" (int) scheme-object))
+(define c-hl-monitor-active-workspace (foreign-procedure "hl-monitor-active-workspace" (int) scheme-object))
+(define c-hl-monitor-active-special-workspace (foreign-procedure "hl-monitor-active-special-workspace" (int) scheme-object))
+(define c-hl-monitor-alive (foreign-procedure "hl-monitor-alive" (int) scheme-object))
+(define c-hl-monitor-same (foreign-procedure "hl-monitor-same" (int int) scheme-object))
+(define c-hl-monitor-selector (foreign-procedure "hl-monitor-selector" (int) scheme-object))
 
 (define (hl-active-window)
   (let ((id (c-hl-active-window-id)))
@@ -789,11 +887,15 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-class w)
   (c-hl-window-class (hl-window-id w)))
 
+;; => workspace handle, or #f
 (define (hl-window-workspace w)
-  (c-hl-window-workspace-name (hl-window-id w)))
+  (let ((id (c-hl-window-workspace-id (hl-window-id w))))
+    (and id (make-hl-workspace id))))
 
+;; => monitor handle, or #f
 (define (hl-window-monitor w)
-  (c-hl-window-monitor-name (hl-window-id w)))
+  (let ((id (c-hl-window-monitor-id (hl-window-id w))))
+    (and id (make-hl-monitor id))))
 
 (define (hl-window-floating? w)
   (= 1 (c-hl-window-floating (hl-window-id w))))
@@ -816,22 +918,22 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-float w . opt)
   (= 0 (c-hl-window-float-act (hl--wid w) (hl--togact (if (null? opt) 'toggle (car opt))))))
 
-(define (hl-window-move-to-workspace w name)
-  (= 0 (c-hl-window-move-to-workspace (hl--wid w) (hl--str name))))
+(define (hl-window-move-to-workspace w ws)
+  (= 0 (c-hl-window-move-to-workspace (hl--wid w) (hl--ws-arg ws))))
 
 ;; ---- actions: navigation and geometry --------------------------------------
 ;; directions: "l"/"r"/"u"/"d" or 'left/'right/'up/'down. Window args accept
 ;; a handle or #f (= active window). Action results: #t on success, #f on
 ;; rejection (message in the compositor log).
 
-(define (hl-focus-workspace name)
-  (= 0 (c-hl-focus-workspace (hl--str name))))
+(define (hl-focus-workspace ws)
+  (= 0 (c-hl-focus-workspace (hl--ws-arg ws))))
 
 (define (hl-focus-direction dir)
   (= 0 (c-hl-focus-direction (hl--dir dir))))
 
-(define (hl-focus-monitor name)
-  (= 0 (c-hl-focus-monitor (hl--str name))))
+(define (hl-focus-monitor mon)
+  (= 0 (c-hl-focus-monitor (hl--mon-arg mon))))
 
 (define (hl-focus-last)
   (= 0 (c-hl-focus-last)))
@@ -938,17 +1040,22 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; ---- actions: workspaces and monitors ---------------------------------------
 
-(define (hl-workspace-rename old-name new-name)
-  (= 0 (c-hl-workspace-rename (hl--str old-name) (hl--str new-name))))
+(define (hl-workspace-rename old new)
+  (= 0 (c-hl-workspace-rename (hl--ws-arg old) (hl--str new))))
 
 (define (hl-workspace-move-to-monitor ws mon)
-  (= 0 (c-hl-workspace-move-monitor (hl--str ws) (hl--str mon))))
+  (= 0 (c-hl-workspace-move-monitor (hl--ws-arg ws) (hl--mon-arg mon))))
 
-(define (hl-workspace-toggle-special name)
-  (= 0 (c-hl-workspace-toggle-special (hl--str name))))
+(define (hl-workspace-toggle-special ws)
+  (= 0 (c-hl-workspace-toggle-special (hl--ws-arg ws))))
 
 (define (hl-workspace-swap-monitors mon1 mon2)
-  (= 0 (c-hl-workspace-swap-monitors (hl--str mon1) (hl--str mon2))))
+  (= 0 (c-hl-workspace-swap-monitors (hl--mon-arg mon1) (hl--mon-arg mon2))))
+
+;; change a numbered workspace's ID (upstream validates: must be > 0, not in
+;; use, and only NUMBERED workspaces can be re-IDed — named/special cannot)
+(define (hl-workspace-change-id ws new-id)
+  (= 0 (c-hl-workspace-change-id (hl--ws-arg ws) (exact->inexact new-id))))
 
 ;; ---- actions: cursor and misc -----------------------------------------------
 
@@ -968,9 +1075,9 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-force-renderer-reload)
   (= 0 (c-hl-force-renderer-reload)))
 
-;; act: 'toggle/'on/'off; mon: #f (all) or a monitor name
+;; act: 'toggle/'on/'off; mon: #f (all) or a monitor handle/name
 (define (hl-dpms act . mon)
-  (= 0 (c-hl-dpms (hl--togact act) (if (null? mon) "" (hl--str (car mon))))))
+  (= 0 (c-hl-dpms (hl--togact act) (if (null? mon) "" (hl--mon-arg (car mon))))))
 
 (define (hl-force-idle seconds)
   (= 0 (c-hl-force-idle (exact->inexact seconds))))
@@ -1133,7 +1240,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;;   layout animation layout_opts
 (define (hl-workspace-rule ws spec)
   (let ((enabled (hl--aopt spec 'enabled #t)))
-    (if (not (= 0 (c-hl-workspace-rule-begin (hl--str ws) (if enabled 1 0))))
+    (if (not (= 0 (c-hl-workspace-rule-begin (hl--ws-arg ws) (if enabled 1 0))))
         (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))
         (let loop ((rest spec))
           (cond ((null? rest)
@@ -1195,49 +1302,214 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (< id 0) #f (make-hl-window (inexact->exact id)))))
 
 ;; monitors resolve by name or "desc:DESCRIPTION" (config monitor syntax)
+;; monitor queries => monitor handle, or #f
 (define (hl-monitor-from sel)
-  (c-hl-monitor-from (hl--str sel)))
+  (let ((id (c-hl-monitor-from (hl--str sel))))
+    (and id (make-hl-monitor id))))
 
 (define (hl-monitor-at x y)
-  (c-hl-monitor-at (exact->inexact x) (exact->inexact y)))
+  (let ((id (c-hl-monitor-at (exact->inexact x) (exact->inexact y))))
+    (and id (make-hl-monitor id))))
 
 (define (hl-monitor-at-cursor)
-  (c-hl-monitor-at-cursor))
+  (let ((id (c-hl-monitor-at-cursor)))
+    (and id (make-hl-monitor id))))
 
 (define (hl-active-monitor)
-  (c-hl-active-monitor))
+  (let ((id (c-hl-active-monitor)))
+    (and id (make-hl-monitor id))))
 
+;; workspace queries => workspace handle, or #f
 (define (hl-active-workspace)
-  (c-hl-active-workspace))
+  (let ((id (c-hl-active-workspace)))
+    (and id (make-hl-workspace id))))
 
 (define (hl-active-special-workspace)
-  (c-hl-active-special-workspace))
+  (let ((id (c-hl-active-special-workspace)))
+    (and id (make-hl-workspace id))))
 
 (define (hl-last-workspace)
-  (c-hl-last-workspace))
+  (let ((id (c-hl-last-workspace)))
+    (and id (make-hl-workspace id))))
 
-;; => alist: (name addressableName monitor windows layout focused)
-(define (hl--pairs-from-lines lines)
-  (let loop ((rest lines) (acc '()))
-    (if (or (null? rest) (null? (cdr rest)))
-        (reverse acc)
-        (loop (cddr rest)
-              (cons (cons (string->symbol (car rest))
-                          (or (string->number (cadr rest)) (cadr rest)))
-                    acc)))))
-
-(define (hl-workspace-info sel)
-  (let ((s (c-hl-workspace-info (hl--str sel))))
-    (if (not s)
-        #f
-        (hl--pairs-from-lines (hl--split-lines s)))))
-
-;; windows on a workspace selector ("3", "name:foo", "special:bar")
-(define (hl-workspace-windows sel)
-  (let ((s (c-hl-workspace-windows (hl--str sel))))
+;; windows on a workspace (a workspace handle or selector: "3", "name:foo",
+;; "special:bar") => list of window handles
+(define (hl-workspace-windows ws)
+  (let ((s (c-hl-workspace-windows (hl--ws-arg ws))))
     (if (not s)
         '()
         (map make-hl-window (map string->number (hl--split-lines s))))))
+
+;; ---- workspace/monitor handle getters ---------------------------------------
+;; every getter takes a handle; a stale or dead handle yields #f from every
+;; getter, like an expired object in upstream Lua. Getters mirror Lua's
+;; workspace/monitor object fields 1:1.
+
+;; handles are accepted anywhere a selector string is: the handle resolves
+;; through its canonical selector, like upstream's selector-or-object
+;; helpers. A dead handle resolves to "" and the action fails cleanly.
+(define (hl--ws-arg ws)
+  (if (hl-workspace? ws)
+      (or (c-hl-workspace-selector (hl-workspace-id ws)) "")
+      (hl--str ws)))
+
+(define (hl--mon-arg m)
+  (if (hl-monitor? m)
+      (or (c-hl-monitor-selector (hl-monitor-id m)) "")
+      (hl--str m)))
+
+;; -- workspace getters
+(define (hl-workspace-name w)
+  (c-hl-workspace-name (hl-workspace-id w)))
+
+(define (hl-workspace-addressable-name w)
+  (c-hl-workspace-addressable-name (hl-workspace-id w)))
+
+;; the workspace's numbered ID, or #f for named/special workspaces
+(define (hl-workspace-number w)
+  (c-hl-workspace-number (hl-workspace-id w)))
+
+;; => monitor handle, or #f
+(define (hl-workspace-monitor w)
+  (let ((id (c-hl-workspace-monitor (hl-workspace-id w))))
+    (and id (make-hl-monitor id))))
+
+(define (hl-workspace-special? w)
+  (eq? (c-hl-workspace-special (hl-workspace-id w)) #t))
+
+;; #t when this workspace is the active (or active special) one on its monitor
+(define (hl-workspace-active? w)
+  (eq? (c-hl-workspace-active (hl-workspace-id w)) #t))
+
+(define (hl-workspace-visible? w)
+  (eq? (c-hl-workspace-visible (hl-workspace-id w)) #t))
+
+(define (hl-workspace-empty? w)
+  (eq? (c-hl-workspace-empty (hl-workspace-id w)) #t))
+
+(define (hl-workspace-persistent? w)
+  (eq? (c-hl-workspace-persistent (hl-workspace-id w)) #t))
+
+(define (hl-workspace-has-urgent? w)
+  (eq? (c-hl-workspace-has-urgent (hl-workspace-id w)) #t))
+
+(define (hl-workspace-has-fullscreen? w)
+  (eq? (c-hl-workspace-has-fullscreen (hl-workspace-id w)) #t))
+
+;; internal fullscreen mode (0 none / 1 max / 2 full), -1 when none
+(define (hl-workspace-fullscreen-mode w)
+  (c-hl-workspace-fullscreen-mode (hl-workspace-id w)))
+
+;; => window handle, or #f
+(define (hl-workspace-fullscreen-window w)
+  (let ((id (c-hl-workspace-fullscreen-window (hl-workspace-id w))))
+    (and id (make-hl-window id))))
+
+;; => window handle, or #f
+(define (hl-workspace-last-window w)
+  (let ((id (c-hl-workspace-last-window (hl-workspace-id w))))
+    (and id (make-hl-window id))))
+
+(define (hl-workspace-window-count w)
+  (c-hl-workspace-window-count (hl-workspace-id w)))
+
+(define (hl-workspace-group-count w)
+  (c-hl-workspace-group-count (hl-workspace-id w)))
+
+;; the tiled layout currently serving the workspace (string)
+(define (hl-workspace-tiled-layout w)
+  (c-hl-workspace-tiled-layout (hl-workspace-id w)))
+
+(define (hl-workspace-alive? w)
+  (eq? (c-hl-workspace-alive (hl-workspace-id w)) #t))
+
+(define (hl-workspace=? a b)
+  (eq? (c-hl-workspace-same (hl-workspace-id a) (hl-workspace-id b)) #t))
+
+;; -- monitor getters
+(define (hl-monitor-name m)
+  (c-hl-monitor-name (hl-monitor-id m)))
+
+(define (hl-monitor-description m)
+  (c-hl-monitor-description (hl-monitor-id m)))
+
+(define (hl-monitor-number m)
+  (c-hl-monitor-number (hl-monitor-id m)))
+
+(define (hl-monitor-enabled? m)
+  (eq? (c-hl-monitor-enabled (hl-monitor-id m)) #t))
+
+(define (hl-monitor-focused? m)
+  (eq? (c-hl-monitor-focused (hl-monitor-id m)) #t))
+
+(define (hl-monitor-x m)
+  (c-hl-monitor-x (hl-monitor-id m)))
+
+(define (hl-monitor-y m)
+  (c-hl-monitor-y (hl-monitor-id m)))
+
+(define (hl-monitor-width m)
+  (c-hl-monitor-width (hl-monitor-id m)))
+
+(define (hl-monitor-height m)
+  (c-hl-monitor-height (hl-monitor-id m)))
+
+(define (hl-monitor-scale m)
+  (c-hl-monitor-scale (hl-monitor-id m)))
+
+;; rotation/flip transform (0-7), see the monitor docs
+(define (hl-monitor-transform m)
+  (c-hl-monitor-transform (hl-monitor-id m)))
+
+(define (hl-monitor-refresh-rate m)
+  (c-hl-monitor-refresh-rate (hl-monitor-id m)))
+
+;; current mode as "WIDTHxHEIGHT@RATE"
+(define (hl-monitor-mode m)
+  (c-hl-monitor-mode (hl-monitor-id m)))
+
+(define (hl-monitor-dpms? m)
+  (eq? (c-hl-monitor-dpms (hl-monitor-id m)) #t))
+
+(define (hl-monitor-vrr? m)
+  (eq? (c-hl-monitor-vrr (hl-monitor-id m)) #t))
+
+(define (hl-monitor-10bit? m)
+  (eq? (c-hl-monitor-10bit (hl-monitor-id m)) #t))
+
+;; reserved area as an alist: ((top . n) (left . n) (right . n) (bottom . n))
+(define (hl-monitor-reserved m)
+  (let ((s (c-hl-monitor-reserved (hl-monitor-id m))))
+    (if (not s)
+        #f
+        (let loop ((rest (hl--split-lines s)) (acc '()))
+          (if (or (null? rest) (null? (cdr rest)))
+              (reverse acc)
+              (loop (cddr rest)
+                    (cons (cons (string->symbol (car rest))
+                                (string->number (cadr rest)))
+                          acc)))))))
+
+;; the monitor this one mirrors, as a handle; #f when not a mirror
+(define (hl-monitor-mirror-of m)
+  (let ((id (c-hl-monitor-mirror-of (hl-monitor-id m))))
+    (and id (make-hl-monitor id))))
+
+;; => workspace handle, or #f
+(define (hl-monitor-active-workspace m)
+  (let ((id (c-hl-monitor-active-workspace (hl-monitor-id m))))
+    (and id (make-hl-workspace id))))
+
+;; => workspace handle, or #f when no special workspace is open
+(define (hl-monitor-active-special-workspace m)
+  (let ((id (c-hl-monitor-active-special-workspace (hl-monitor-id m))))
+    (and id (make-hl-workspace id))))
+
+(define (hl-monitor-alive? m)
+  (eq? (c-hl-monitor-alive (hl-monitor-id m)) #t))
+
+(define (hl-monitor=? a b)
+  (eq? (c-hl-monitor-same (hl-monitor-id a) (hl-monitor-id b)) #t))
 
 ;; => list of (monitor . namespace) pairs
 (define (hl-layers)
@@ -1266,14 +1538,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (not s)
         '()
         (map make-hl-window (map string->number (hl--split-lines s))))))
-
-;; => alist: (name description position-x position-y width height scale
-;;            transform focused active-workspace vrr-active bitdepth-10bit)
-(define (hl-monitor-info sel)
-  (let ((s (c-hl-monitor-info (hl--str sel))))
-    (if (not s)
-        #f
-        (hl--pairs-from-lines (hl--split-lines s)))))
 
 ;; which fullscreen handler a window uses (string)
 (define (hl-window-fullscreen-handler w)
@@ -1357,7 +1621,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if kv (cdr kv) default)))
 
 (define (hl-monitor output fields)
-  (if (not (= 0 (c-hl-monitor-begin (hl--str output))))
+  (if (not (= 0 (c-hl-monitor-begin (hl--mon-arg output))))
       (errorf 'hl-monitor "~a" (c-hl-config-last-error))
       (let loop ((rest fields))
         (cond ((null? rest)
@@ -1474,7 +1738,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((joined (c-hl-monitor-names)))
     (if (eq? joined #f)
         '()
-        (hl--split-lines joined))))
+        (map make-hl-monitor (map string->number (hl--split-lines joined))))))
 
 (define (hl--window-listen which handler)
   (let ((id (c-hl-window-event-listen which)))
@@ -1519,6 +1783,23 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         (errorf 'hl-on-window-minimize "listener rejected, see compositor log")
         (hl--register id handler))))
 
+;; fires when a window is created and mapped, but before window rules are
+;; applied (hl-on-window-open waits for full initialization)
+(define (hl-on-window-open-early handler)
+  (hl--window-listen 9 handler))
+
+;; fires when the window is forcefully killed, e.g. via hyprctl kill
+(define (hl-on-window-kill handler)
+  (hl--window-listen 10 handler))
+
+;; fires when a window rings the system bell, even if it's muted
+(define (hl-on-window-bell handler)
+  (hl--window-listen 11 handler))
+
+;; fires when a window's rules are re-evaluated, e.g. on a title change
+(define (hl-on-window-update-rules handler)
+  (hl--window-listen 12 handler))
+
 ;; lifecycle: fires once when the session starts (its first render frame) and
 ;; once before exit. handlers registered after startup fire immediately.
 (define (hl-on-start handler)
@@ -1537,6 +1818,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((id (c-hl-config-reloaded-listen)))
     (if (< id 0)
         (errorf 'hl-on-config-reloaded "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+;; handler signature: (lambda (scheduled?) ...) — #t when the prop refresh ran
+;; as scheduled, #f when it was executed prematurely
+(define (hl-on-config-props-refreshed handler)
+  (let ((id (c-hl-config-props-refreshed-listen)))
+    (if (< id 0)
+        (errorf 'hl-on-config-props-refreshed "listener rejected, see compositor log")
         (hl--register id handler))))
 
 ;; identity, as in Lua's windowEq: true iff both handles refer to the same
@@ -1569,6 +1858,53 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (< id 0)
         (errorf 'hl-on-workspace-active "listener rejected, see compositor log")
         (hl--register id handler))))
+
+;; handler signature: (lambda (ws) ...) — ws is a workspace handle
+(define (hl--workspace-event-listen which handler)
+  (let ((id (c-hl-workspace-event-listen which)))
+    (if (< id 0)
+        (errorf 'hl-on-workspace "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+;; fires when a workspace is created
+(define (hl-on-workspace-created handler)
+  (hl--workspace-event-listen 0 handler))
+
+;; fires when a workspace is removed. The handle it passes is BORN DEAD —
+;; every getter on it returns #f, exactly like an expired object in upstream
+;; Lua. See the comment at the C++ listener for why the name is not provided.
+(define (hl-on-workspace-removed handler)
+  (hl--workspace-event-listen 1 handler))
+
+;; fires when the opened special workspace on a monitor changes; handler
+;; signature: (lambda (ws mon) ...) — ws is #f when no special workspace is
+;; open on that monitor
+(define (hl-on-workspace-special-active handler)
+  (hl--workspace-event-listen 2 handler))
+
+;; fires when a workspace moves to a different monitor: (lambda (ws mon) ...)
+(define (hl-on-workspace-move-to-monitor handler)
+  (hl--workspace-event-listen 3 handler))
+
+;; handler signature: (lambda (mon) ...) — mon is a monitor handle
+(define (hl--monitor-event-listen which handler)
+  (let ((id (c-hl-monitor-event-listen which)))
+    (if (< id 0)
+        (errorf 'hl-on-monitor "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+(define (hl-on-monitor-added handler)
+  (hl--monitor-event-listen 0 handler))
+
+(define (hl-on-monitor-removed handler)
+  (hl--monitor-event-listen 1 handler))
+
+(define (hl-on-monitor-focused handler)
+  (hl--monitor-event-listen 2 handler))
+
+;; fires when the monitor arrangement changes (no payload)
+(define (hl-on-monitor-layout-changed handler)
+  (hl--monitor-event-listen 3 handler))
 
 (define (hl--reset)
   (set! hl--binds '()))
@@ -1608,6 +1944,14 @@ namespace Config::Scheme::Internals {
     // whenever it wants; a stale handle is detected via lock() == nullptr.
     // Deliberately non-owning: a strong ref would keep a zombie window alive.
     std::unordered_map<int, PHLWINDOWREF> g_windows;
+
+    // workspace and monitor handles: same model as window handles — an int id
+    // in the user-facing record, mapped to a weak ref here so handles can be
+    // validated (and go stale) at use time. Deliberately non-owning too.
+    int g_nextWorkspaceId = 0;
+    int g_nextMonitorId   = 0;
+    std::unordered_map<int, PHLWORKSPACEREF> g_workspaces;
+    std::unordered_map<int, PHLMONITORREF>   g_monitors;
 }
 
 namespace Config::Scheme {
@@ -1800,6 +2144,17 @@ namespace Config::Scheme {
         watchdogExit();
     }
 
+    // fires a handler registered for id with a boolean payload (#t/#f); all
+    // errors are contained inside hl--fire-bool's guard
+    static void fireSchemeBool(int id, bool arg) {
+        if (!g_up)
+            return;
+
+        watchdogEnter("handler");
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-bool")), Sinteger(id), arg ? Strue : Sfalse);
+        watchdogExit();
+    }
+
     // events carrying window payloads: the window crosses as a fresh handle id
     static void fireSchemeWin(int id, PHLWINDOW window) {
         if (!g_up || !window)
@@ -1810,6 +2165,95 @@ namespace Config::Scheme {
 
         watchdogEnter("handler");
         Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-win")), Sinteger(id), Sinteger(winId));
+        watchdogExit();
+    }
+
+    // handle registries resolve like windowFromId: lock, or drop the dead
+    // entry while we're here
+    static PHLWORKSPACE workspaceFromId(int id) {
+        const auto it = g_workspaces.find(id);
+        if (it == g_workspaces.end())
+            return nullptr;
+        auto ws = it->second.lock();
+        if (!ws)
+            g_workspaces.erase(it);
+        return ws;
+    }
+
+    static PHLMONITOR monitorFromId(int id) {
+        const auto it = g_monitors.find(id);
+        if (it == g_monitors.end())
+            return nullptr;
+        auto mon = it->second.lock();
+        if (!mon)
+            g_monitors.erase(it);
+        return mon;
+    }
+
+    // events carrying workspace/monitor payloads: the object crosses as a
+    // fresh handle id; a null object crosses as #f. The Ref variant stores
+    // the weak ref as-is without locking — used by workspace.removed, which
+    // fires mid-destruction (that handle is born dead; see the comment at
+    // the listener).
+    static void fireSchemeWs(int id, PHLWORKSPACE ws) {
+        if (!g_up)
+            return;
+
+        int wsId = -1;
+        if (ws) {
+            wsId = g_nextWorkspaceId++;
+            g_workspaces.emplace(wsId, PHLWORKSPACEREF(ws));
+        }
+
+        watchdogEnter("handler");
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-ws")), Sinteger(id), wsId >= 0 ? Sinteger(wsId) : Sfalse);
+        watchdogExit();
+    }
+
+    static void fireSchemeWsRef(int id, PHLWORKSPACEREF ws) {
+        if (!g_up)
+            return;
+
+        const int wsId = g_nextWorkspaceId++;
+        g_workspaces.emplace(wsId, ws);
+
+        watchdogEnter("handler");
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-ws")), Sinteger(id), Sinteger(wsId));
+        watchdogExit();
+    }
+
+    static void fireSchemeMon(int id, PHLMONITOR mon) {
+        if (!g_up)
+            return;
+
+        int monId = -1;
+        if (mon) {
+            monId = g_nextMonitorId++;
+            g_monitors.emplace(monId, PHLMONITORREF(mon));
+        }
+
+        watchdogEnter("handler");
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-mon")), Sinteger(id), monId >= 0 ? Sinteger(monId) : Sfalse);
+        watchdogExit();
+    }
+
+    // two-handle payloads (workspace, monitor); a null object crosses as #f
+    static void fireSchemeWsMon(int id, PHLWORKSPACE ws, PHLMONITOR mon) {
+        if (!g_up)
+            return;
+
+        int wsId = -1, monId = -1;
+        if (ws) {
+            wsId = g_nextWorkspaceId++;
+            g_workspaces.emplace(wsId, PHLWORKSPACEREF(ws));
+        }
+        if (mon) {
+            monId = g_nextMonitorId++;
+            g_monitors.emplace(monId, PHLMONITORREF(mon));
+        }
+
+        watchdogEnter("handler");
+        Scall3(Stop_level_value(Sstring_to_symbol("hl--fire-ws-mon")), Sinteger(id), wsId >= 0 ? Sinteger(wsId) : Sfalse, monId >= 0 ? Sinteger(monId) : Sfalse);
         watchdogExit();
     }
 
@@ -1869,9 +2313,11 @@ namespace Config::Scheme {
             const auto ws = wsRef.lock();
             if (!ws)
                 continue;
+            const int id = g_nextWorkspaceId++;
+            g_workspaces.emplace(id, wsRef);
             if (!joined.empty())
                 joined += '\n';
-            joined += ws->displayName();
+            joined += std::to_string(id);
         }
 
         if (joined.empty())
@@ -1993,7 +2439,7 @@ namespace Config::Scheme {
         return Sstring_utf8(s.c_str(), s.size());
     }
 
-    static ptr hlSchemeWindowWorkspaceName(int id) {
+    static ptr hlSchemeWindowWorkspaceId(int id) {
         if (!g_up)
             return Sfalse;
 
@@ -2001,11 +2447,12 @@ namespace Config::Scheme {
         if (!window || !window->m_workspace)
             return Sfalse;
 
-        const auto s = window->m_workspace->displayName();
-        return Sstring_utf8(s.c_str(), s.size());
+        const int wsId = g_nextWorkspaceId++;
+        g_workspaces.emplace(wsId, PHLWORKSPACEREF(window->m_workspace));
+        return Sinteger(wsId);
     }
 
-    static ptr hlSchemeWindowMonitorName(int id) {
+    static ptr hlSchemeWindowMonitorId(int id) {
         if (!g_up)
             return Sfalse;
 
@@ -2017,7 +2464,9 @@ namespace Config::Scheme {
         if (!monitor)
             return Sfalse;
 
-        return Sstring_utf8(monitor->m_name.c_str(), monitor->m_name.size());
+        const int monId = g_nextMonitorId++;
+        g_monitors.emplace(monId, PHLMONITORREF(monitor));
+        return Sinteger(monId);
     }
 
     static int hlSchemeWindowFloating(int id) {
@@ -2848,6 +3297,17 @@ namespace Config::Scheme {
         return 0;
     }
 
+    static int hlWorkspaceChangeId(const char* wsName, double newId) {
+        if (!g_up)
+            return -1;
+        const auto ws = workspaceFromName(wsName);
+        if (!ws) {
+            g_configError = "no workspace named " + std::string(wsName ? wsName : "");
+            return -1;
+        }
+        return Config::Actions::changeWorkspaceID(ws, sc<int64_t>(newId)) ? 0 : -2;
+    }
+
     // gap fields (reserved / reserved_area): the value is pushed onto the
     // scratch stack by the config push helpers
     static int hlMonitorFieldGap(const char* field) {
@@ -3357,35 +3817,37 @@ namespace Config::Scheme {
         return -1;
     }
 
-    static ptr monitorNameResult(PHLMONITOR m) {
+    static ptr monitorIdResult(PHLMONITOR m) {
         if (!m)
             return Sfalse;
-        return Sstring_utf8(m->m_name.c_str(), m->m_name.size());
+        const int id = g_nextMonitorId++;
+        g_monitors.emplace(id, PHLMONITORREF(m));
+        return Sinteger(id);
     }
 
     static ptr hlMonitorFrom(const char* sel) {
         if (!g_up)
             return Sfalse;
-        return monitorNameResult(State::monitorState()->query().configString(sel ? sel : "").run());
+        return monitorIdResult(State::monitorState()->query().configString(sel ? sel : "").run());
     }
 
     static ptr hlMonitorAt(double x, double y) {
         if (!g_up)
             return Sfalse;
-        return monitorNameResult(State::monitorState()->query().vec(Vector2D{x, y}).run());
+        return monitorIdResult(State::monitorState()->query().vec(Vector2D{x, y}).run());
     }
 
     static ptr hlMonitorAtCursor() {
         if (!g_up || !Pointer::mgr())
             return Sfalse;
         const auto pos = Pointer::mgr()->untransformedPosition();
-        return monitorNameResult(State::monitorState()->query().vec(pos).run());
+        return monitorIdResult(State::monitorState()->query().vec(pos).run());
     }
 
     static ptr hlActiveMonitor() {
         if (!g_up)
             return Sfalse;
-        return monitorNameResult(Desktop::focusState()->monitor());
+        return monitorIdResult(Desktop::focusState()->monitor());
     }
 
     static ptr hlActiveWorkspace() {
@@ -3394,8 +3856,9 @@ namespace Config::Scheme {
         const auto mon = Desktop::focusState()->monitor();
         if (!mon || !mon->m_activeWorkspace)
             return Sfalse;
-        const auto name = mon->m_activeWorkspace->displayName();
-        return Sstring_utf8(name.c_str(), name.size());
+        const int id = g_nextWorkspaceId++;
+        g_workspaces.emplace(id, PHLWORKSPACEREF(mon->m_activeWorkspace));
+        return Sinteger(id);
     }
 
     static ptr hlActiveSpecialWorkspace() {
@@ -3404,8 +3867,9 @@ namespace Config::Scheme {
         const auto mon = Desktop::focusState()->monitor();
         if (!mon || !mon->m_activeSpecialWorkspace)
             return Sfalse;
-        const auto name = mon->m_activeSpecialWorkspace->displayName();
-        return Sstring_utf8(name.c_str(), name.size());
+        const int id = g_nextWorkspaceId++;
+        g_workspaces.emplace(id, PHLWORKSPACEREF(mon->m_activeSpecialWorkspace));
+        return Sinteger(id);
     }
 
     static ptr hlLastWorkspace() {
@@ -3421,8 +3885,276 @@ namespace Config::Scheme {
             ws = State::Workspace::state()->find(previous.target);
         if (!ws)
             return Sfalse;
-        const auto name = ws->displayName();
-        return Sstring_utf8(name.c_str(), name.size());
+        const int id = g_nextWorkspaceId++;
+        g_workspaces.emplace(id, PHLWORKSPACEREF(ws));
+        return Sinteger(id);
+    }
+
+    // ---- workspace/monitor handle getters -------------------------------------
+    // Mirror upstream Lua's workspace and monitor object fields 1:1 (see
+    // LuaWorkspace.cpp / LuaMonitor.cpp). All getters resolve the handle
+    // first; a stale or dead handle yields #f from every getter, like an
+    // expired Lua object.
+
+    static ptr boolResult(bool b) {
+        return b ? Strue : Sfalse;
+    }
+
+    static ptr windowHandleResult(PHLWINDOW w) {
+        if (!w)
+            return Sfalse;
+        const int id = g_nextWindowId++;
+        g_windows.emplace(id, PHLWINDOWREF(w));
+        return Sinteger(id);
+    }
+
+    static ptr workspaceHandleResult(PHLWORKSPACE ws) {
+        if (!ws)
+            return Sfalse;
+        const int id = g_nextWorkspaceId++;
+        g_workspaces.emplace(id, PHLWORKSPACEREF(ws));
+        return Sinteger(id);
+    }
+
+    static ptr monitorHandleResult(PHLMONITOR mon) {
+        if (!mon)
+            return Sfalse;
+        const int id = g_nextMonitorId++;
+        g_monitors.emplace(id, PHLMONITORREF(mon));
+        return Sinteger(id);
+    }
+
+    template <typename F>
+    static ptr wsGet(int id, F&& fn) {
+        if (!g_up)
+            return Sfalse;
+        const auto ws = workspaceFromId(id);
+        if (!ws)
+            return Sfalse;
+        return fn(ws);
+    }
+
+    template <typename F>
+    static ptr monGet(int id, F&& fn) {
+        if (!g_up)
+            return Sfalse;
+        const auto mon = monitorFromId(id);
+        if (!mon)
+            return Sfalse;
+        return fn(mon);
+    }
+
+    // -- workspace getters
+    static ptr hlWorkspaceName(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { const auto& s = ws->displayName(); return Sstring_utf8(s.c_str(), s.size()); });
+    }
+
+    static ptr hlWorkspaceAddressableName(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { const auto& s = ws->addressableName(); return Sstring_utf8(s.c_str(), s.size()); });
+    }
+
+    static ptr hlWorkspaceNumber(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+            const auto n = ws->numberedID();
+            return n ? Sinteger(sc<int>(*n)) : Sfalse;
+        });
+    }
+
+    static ptr hlWorkspaceMonitor(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return monitorHandleResult(ws->m_monitor.lock()); });
+    }
+
+    static ptr hlWorkspaceSpecial(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->type() == Workspace::eWorkspaceType::SPECIAL); });
+    }
+
+    static ptr hlWorkspaceActive(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+            const auto mon = ws->m_monitor.lock();
+            return boolResult(mon && (mon->m_activeWorkspace == ws || mon->m_activeSpecialWorkspace == ws));
+        });
+    }
+
+    static ptr hlWorkspaceVisible(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->visible()); });
+    }
+
+    static ptr hlWorkspaceEmpty(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->getWindowCount() == 0); });
+    }
+
+    static ptr hlWorkspacePersistent(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+            const auto REGULAR = dynamicPointerCast<Workspace::CRegularWorkspace>(ws);
+            return boolResult(REGULAR && REGULAR->isPersistent());
+        });
+    }
+
+    static ptr hlWorkspaceHasUrgent(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->hasUrgentWindow()); });
+    }
+
+    static ptr hlWorkspaceHasFullscreen(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(Fullscreen::controller()->hasFullscreen(ws)); });
+    }
+
+    static ptr hlWorkspaceFullscreenMode(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(sc<int>(Fullscreen::controller()->getFullscreenModes(ws).internal)); });
+    }
+
+    static ptr hlWorkspaceFullscreenWindow(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return windowHandleResult(Fullscreen::controller()->getFullscreenWindow(ws)); });
+    }
+
+    static ptr hlWorkspaceLastWindow(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return windowHandleResult(ws->getLastFocusedWindow()); });
+    }
+
+    static ptr hlWorkspaceWindowCount(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(ws->getWindowCount()); });
+    }
+
+    static ptr hlWorkspaceGroupCount(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(ws->getGroups()); });
+    }
+
+    // windows on the workspace as newline-joined window-handle ids
+
+    static ptr hlWorkspaceTiledLayout(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+            std::string layoutName = "unknown";
+            const auto  SPACE      = ws->space();
+            if (SPACE && SPACE->algorithm() && SPACE->algorithm()->tiledAlgo())
+                layoutName = Layout::Supplementary::algoMatcher()->getNameForTiledAlgo(SPACE->algorithm()->tiledAlgo().get());
+            return Sstring_utf8(layoutName.c_str(), layoutName.size());
+        });
+    }
+
+    static ptr hlWorkspaceAlive(int id) {
+        return boolResult(g_up && workspaceFromId(id) != nullptr);
+    }
+
+    // identity, mirroring hl-window=?: true iff both handles lock to the same
+    // live workspace; dead handles are never "the same" as anything
+    static ptr hlWorkspaceSame(int a, int b) {
+        const auto wa = g_up ? workspaceFromId(a) : nullptr;
+        const auto wb = g_up ? workspaceFromId(b) : nullptr;
+        return boolResult(wa && wb && wa.get() == wb.get());
+    }
+
+    // -- monitor getters
+    static ptr hlMonitorName(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_name.c_str(), mon->m_name.size()); });
+    }
+
+    static ptr hlMonitorDescription(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_description.c_str(), mon->m_description.size()); });
+    }
+
+    static ptr hlMonitorNumber(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_id)); });
+    }
+
+    static ptr hlMonitorEnabled(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_enabled); });
+    }
+
+    static ptr hlMonitorFocused(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(Desktop::focusState()->monitor() == mon); });
+    }
+
+    static ptr hlMonitorX(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_position.x)); });
+    }
+
+    static ptr hlMonitorY(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_position.y)); });
+    }
+
+    static ptr hlMonitorWidth(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_size.x)); });
+    }
+
+    static ptr hlMonitorHeight(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_size.y)); });
+    }
+
+    static ptr hlMonitorScale(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sflonum(sc<double>(mon->m_scale)); });
+    }
+
+    static ptr hlMonitorTransform(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_transform)); });
+    }
+
+    static ptr hlMonitorRefreshRate(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sflonum(sc<double>(mon->m_refreshRate)); });
+    }
+
+    static ptr hlMonitorMode(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr {
+            const auto s = std::format("{}x{}@{}", sc<int>(mon->m_size.x), sc<int>(mon->m_size.y), mon->m_refreshRate);
+            return Sstring_utf8(s.c_str(), s.size());
+        });
+    }
+
+    static ptr hlMonitorDpms(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_dpmsStatus); });
+    }
+
+    static ptr hlMonitorVrr(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_vrrActive != 0); });
+    }
+
+    static ptr hlMonitor10bit(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_enabled10bit); });
+    }
+
+    // reserved area as a k\nv\n-encoded map (schemed into an alist); all-zero
+    // when nothing is reserved
+    static ptr hlMonitorReserved(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr {
+            const auto& r = mon->m_reservedArea;
+            const auto  s = std::format("top\n{}\nleft\n{}\nright\n{}\nbottom\n{}\n", r.top(), r.left(), r.right(), r.bottom());
+            return Sstring_utf8(s.c_str(), s.size());
+        });
+    }
+
+    // the monitor this one mirrors, as a handle; #f when not a mirror
+    static ptr hlMonitorMirrorOf(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return monitorHandleResult(mon->m_mirrorOf.lock()); });
+    }
+
+    static ptr hlMonitorActiveWorkspace(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return workspaceHandleResult(mon->m_activeWorkspace); });
+    }
+
+    static ptr hlMonitorActiveSpecialWorkspace(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return workspaceHandleResult(mon->m_activeSpecialWorkspace); });
+    }
+
+    static ptr hlMonitorAlive(int id) {
+        return boolResult(g_up && monitorFromId(id) != nullptr);
+    }
+
+    static ptr hlMonitorSame(int a, int b) {
+        const auto ma = g_up ? monitorFromId(a) : nullptr;
+        const auto mb = g_up ? monitorFromId(b) : nullptr;
+        return boolResult(ma && mb && ma.get() == mb.get());
+    }
+
+    // -- selector bridges: handles are accepted anywhere a selector string is,
+    // resolved through the canonical selector exactly like upstream's
+    // *SelectorOrObject helpers (LuaBindingsInternal.cpp)
+    static ptr hlWorkspaceSelector(int id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+            const auto s = Workspace::selector(*ws);
+            return Sstring_utf8(s.c_str(), s.size());
+        });
+    }
+
+    static ptr hlMonitorSelector(int id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_name.c_str(), mon->m_name.size()); });
     }
 
     // workspace resolution via the resolver (the query() chain has proven
@@ -3432,31 +4164,6 @@ namespace Config::Scheme {
         if (!target.valid())
             return nullptr;
         return State::Workspace::state()->find(target);
-    }
-
-    // workspace info as an encoded alist (k\nv\n lines, like config-get)
-    static ptr hlWorkspaceInfo(const char* sel) {
-        if (!g_up)
-            return Sfalse;
-        const auto ws = workspaceFromSelector(sel ? sel : "");
-        if (!ws)
-            return Sfalse;
-
-        std::string out;
-        const auto  add = [&out](const std::string& k, const std::string& v) { out += k + "\n" + v + "\n"; };
-        add("name", ws->displayName());
-        add("addressableName", ws->addressableName());
-        const auto mon = ws->m_monitor.lock();
-        add("monitor", mon ? mon->m_name : "");
-        add("windows", std::to_string(ws->getWindowCount()));
-        std::string layout = "unknown";
-        if (ws->space() && ws->space()->algorithm() && ws->space()->algorithm()->tiledAlgo()) {
-            const auto ln = ws->space()->algorithm()->tiledAlgo()->layoutName();
-            layout        = ln ? *ln : "unknown";
-        }
-        add("layout", layout);
-        add("focused", (mon && mon->m_activeWorkspace == ws) ? "1" : "0");
-        return Sstring_utf8(out.c_str(), out.size());
     }
 
     // windows on a workspace: newline-joined handle ids (like hl-windows)
@@ -3546,30 +4253,6 @@ namespace Config::Scheme {
         if (joined.empty())
             return Sfalse;
         return Sstring_utf8(joined.c_str(), joined.size());
-    }
-
-    // monitor info as k/v line pairs (hl--pairs-from-lines scheme-side)
-    static ptr hlMonitorInfo(const char* sel) {
-        if (!g_up)
-            return Sfalse;
-        const auto mon = State::monitorState()->query().configString(sel ? sel : "").run();
-        if (!mon)
-            return Sfalse;
-        std::string out;
-        const auto  add = [&out](const std::string& k, const std::string& v) { out += k + "\n" + v + "\n"; };
-        add("name", mon->m_name);
-        add("description", mon->m_description);
-        add("position-x", std::to_string((int)mon->m_position.x));
-        add("position-y", std::to_string((int)mon->m_position.y));
-        add("width", std::to_string((int)mon->m_size.x));
-        add("height", std::to_string((int)mon->m_size.y));
-        add("scale", std::to_string(mon->m_scale));
-        add("transform", std::to_string(sc<int>(mon->m_transform)));
-        add("focused", (Desktop::focusState()->monitor() == mon) ? "1" : "0");
-        add("active-workspace", mon->m_activeWorkspace ? mon->m_activeWorkspace->displayName() : "");
-        add("vrr-active", mon->m_vrrActive ? "1" : "0");
-        add("bitdepth-10bit", mon->m_enabled10bit ? "1" : "0");
-        return Sstring_utf8(out.c_str(), out.size());
     }
 
     static ptr hlWindowFullscreenHandler(int id) {
@@ -3799,9 +4482,11 @@ namespace Config::Scheme {
 
         std::string joined;
         for (const auto& m : State::monitorState()->monitors()) {
+            const int id = g_nextMonitorId++;
+            g_monitors.emplace(id, PHLMONITORREF(m));
             if (!joined.empty())
                 joined += '\n';
-            joined += m->m_name;
+            joined += std::to_string(id);
         }
 
         if (joined.empty())
@@ -3826,6 +4511,10 @@ namespace Config::Scheme {
             case 6: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.fullscreen.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
             case 7: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.moveToWorkspace.listen([id](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(id, w); })); break;
             case 8: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.active.listen([id](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(id, w); })); break;
+            case 9: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openEarly.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 10: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.kill.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 11: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.bell.listen([id](PHLWINDOW w, Event::SCallbackInfo&) { fireSchemeWin(id, w); })); break;
+            case 12: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.updateRules.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
             default: break;
         }
 
@@ -3872,12 +4561,65 @@ namespace Config::Scheme {
         return id;
     }
 
+    static int hlSchemeMonitorListen(int which) {
+        if (!g_up)
+            return -1;
+        const int id = g_nextBindId++;
+        switch (which) {
+            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.added.listen([id](PHLMONITOR m) { fireSchemeMon(id, m); })); break;
+            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.removed.listen([id](PHLMONITOR m) { fireSchemeMon(id, m); })); break;
+            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.focused.listen([id](PHLMONITOR m) { fireSchemeMon(id, m); })); break;
+            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.layoutChanged.listen([id] { fireScheme(id); })); break;
+            default: break;
+        }
+        return id;
+    }
+
+    static int hlSchemeWorkspaceListen(int which) {
+        if (!g_up)
+            return -1;
+        const int id = g_nextBindId++;
+        switch (which) {
+            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.created.listen([id](PHLWORKSPACEREF ws) { auto w = ws.lock(); if (w) fireSchemeWs(id, w); })); break;
+            // removed fires from ~CHLWorkspace: the payload cannot be locked
+            // (hyprutils marks the impl "destroying"), but the data pointer
+            // stays valid until the destructor returns, so the name COULD be
+            // read through it — the same members the destructor itself just
+            // formatted into its IPC events.
+            //
+            // Decision (2026-09-18): this event delivers a born-dead handle
+            // whose getters all return #f, exactly matching upstream Lua (an
+            // expired object reads all-nil). The name is retrievable at this
+            // instant — a later enhancement could snapshot it into the handle
+            // at fire time and expose it through (hl-workspace-name), but that
+            // would go beyond what Lua offers, so it is deliberately not done.
+            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.removed.listen([id](PHLWORKSPACEREF ws) { fireSchemeWsRef(id, ws); })); break;
+            // fires (ws mon) handles; ws is #f when no special workspace is
+            // open on the monitor (upstream crosses nil the same way)
+            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.specialActive.listen([id](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(id, ws, mon); })); break;
+            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.moveToMonitor.listen([id](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(id, ws, mon); })); break;
+            default: break;
+        }
+        return id;
+    }
+
     static int hlSchemeConfigReloadedListen() {
         if (!g_up)
             return -1;
 
         const int id = g_nextBindId++;
         g_windowEventListeners.emplace_back(Event::bus()->m_events.config.reloaded.listen([id] { fireScheme(id); }));
+        return id;
+    }
+
+    // handler receives #t when the prop refresh ran as scheduled, #f when it
+    // was executed prematurely
+    static int hlSchemePropsRefreshedListen() {
+        if (!g_up)
+            return -1;
+
+        const int id = g_nextBindId++;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.props_refreshed.listen([id](const bool scheduled) { fireSchemeBool(id, scheduled); }));
         return id;
     }
 
@@ -3916,8 +4658,7 @@ namespace Config::Scheme {
 
         const int id = g_nextBindId++;
         g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.active.listen([id](PHLWORKSPACE ws) {
-            if (ws)
-                fireSchemeStr(id, ws->displayName());
+            fireSchemeWs(id, ws);
         }));
         return id;
     }
@@ -4030,6 +4771,13 @@ namespace Config::Scheme {
     }
 
     static std::string userConfigPath() {
+        // HYPRSCHEME_CONFIG overrides the default location, mirroring how
+        // HYPRLAND_CONFIG overrides the compositor's config discovery
+        // (Jeremy::getMainConfigPath returns the env path verbatim, no
+        // canonicalization)
+        if (const char* overridePath = getenv("HYPRSCHEME_CONFIG"); overridePath && *overridePath)
+            return overridePath;
+
         const char* cfg = getenv("XDG_CONFIG_HOME");
         std::string base;
         if (cfg && *cfg)
@@ -4099,8 +4847,8 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-window-alive", (void*)hlSchemeWindowAlive);
         Sregister_symbol("hl-scheme-window-close", (void*)hlSchemeWindowClose);
         Sregister_symbol("hl-scheme-window-class", (void*)hlSchemeWindowClass);
-        Sregister_symbol("hl-scheme-window-workspace-name", (void*)hlSchemeWindowWorkspaceName);
-        Sregister_symbol("hl-scheme-window-monitor-name", (void*)hlSchemeWindowMonitorName);
+        Sregister_symbol("hl-scheme-window-workspace-id", (void*)hlSchemeWindowWorkspaceId);
+        Sregister_symbol("hl-scheme-window-monitor-id", (void*)hlSchemeWindowMonitorId);
         Sregister_symbol("hl-scheme-window-floating", (void*)hlSchemeWindowFloating);
         Sregister_symbol("hl-scheme-window-size", (void*)hlSchemeWindowSize);
         Sregister_symbol("hl-scheme-window-pid", (void*)hlSchemeWindowPid);
@@ -4112,12 +4860,16 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-window-minimize-listen", (void*)hlSchemeWindowMinimizeListen);
         Sregister_symbol("hl-scheme-lifecycle-listen", (void*)hlSchemeLifecycleListen);
         Sregister_symbol("hl-scheme-config-reloaded-listen", (void*)hlSchemeConfigReloadedListen);
+        Sregister_symbol("hl-scheme-config-props-refreshed-listen", (void*)hlSchemePropsRefreshedListen);
         Sregister_symbol("hl-scheme-unbind", (void*)hlSchemeUnbind);
         Sregister_symbol("hl-scheme-unbind-key", (void*)hlSchemeUnbindKey);
         Sregister_symbol("hl-scheme-window-same", (void*)hlSchemeWindowSame);
         Sregister_symbol("hl-scheme-current-submap", (void*)hlSchemeCurrentSubmap);
         Sregister_symbol("hl-scheme-cursor-pos", (void*)hlSchemeCursorPos);
         Sregister_symbol("hl-scheme-workspace-active-listen", (void*)hlSchemeWorkspaceActiveListen);
+        Sregister_symbol("hl-scheme-workspace-event-listen", (void*)hlSchemeWorkspaceListen);
+        Sregister_symbol("hl-scheme-monitor-event-listen", (void*)hlSchemeMonitorListen);
+        Sregister_symbol("hl-scheme-workspace-change-id", (void*)hlWorkspaceChangeId);
         Sregister_symbol("hl-scheme-window-fullscreen-toggle", (void*)hlSchemeWindowFullscreenToggle);
         Sregister_symbol("hl-scheme-window-fullscreen-mode", (void*)hlSchemeWindowFullscreenMode);
         Sregister_symbol("hl-scheme-focus-workspace", (void*)hlSchemeFocusWorkspace);
@@ -4220,14 +4972,56 @@ namespace Config::Scheme {
         Sregister_symbol("hl-active-workspace", (void*)hlActiveWorkspace);
         Sregister_symbol("hl-active-special-workspace", (void*)hlActiveSpecialWorkspace);
         Sregister_symbol("hl-last-workspace", (void*)hlLastWorkspace);
-        Sregister_symbol("hl-workspace-info", (void*)hlWorkspaceInfo);
+        Sregister_symbol("hl-workspace-name", (void*)hlWorkspaceName);
+        Sregister_symbol("hl-workspace-addressable-name", (void*)hlWorkspaceAddressableName);
+        Sregister_symbol("hl-workspace-number", (void*)hlWorkspaceNumber);
+        Sregister_symbol("hl-workspace-monitor", (void*)hlWorkspaceMonitor);
+        Sregister_symbol("hl-workspace-special", (void*)hlWorkspaceSpecial);
+        Sregister_symbol("hl-workspace-active", (void*)hlWorkspaceActive);
+        Sregister_symbol("hl-workspace-visible", (void*)hlWorkspaceVisible);
+        Sregister_symbol("hl-workspace-empty", (void*)hlWorkspaceEmpty);
+        Sregister_symbol("hl-workspace-persistent", (void*)hlWorkspacePersistent);
+        Sregister_symbol("hl-workspace-has-urgent", (void*)hlWorkspaceHasUrgent);
+        Sregister_symbol("hl-workspace-has-fullscreen", (void*)hlWorkspaceHasFullscreen);
+        Sregister_symbol("hl-workspace-fullscreen-mode", (void*)hlWorkspaceFullscreenMode);
+        Sregister_symbol("hl-workspace-fullscreen-window", (void*)hlWorkspaceFullscreenWindow);
+        Sregister_symbol("hl-workspace-last-window", (void*)hlWorkspaceLastWindow);
+        Sregister_symbol("hl-workspace-window-count", (void*)hlWorkspaceWindowCount);
+        Sregister_symbol("hl-workspace-group-count", (void*)hlWorkspaceGroupCount);
+        Sregister_symbol("hl-workspace-tiled-layout", (void*)hlWorkspaceTiledLayout);
+        Sregister_symbol("hl-workspace-alive", (void*)hlWorkspaceAlive);
+        Sregister_symbol("hl-workspace-same", (void*)hlWorkspaceSame);
+        Sregister_symbol("hl-workspace-selector", (void*)hlWorkspaceSelector);
+        Sregister_symbol("hl-workspace-windows", (void*)hlWorkspaceWindows);
         Sregister_symbol("hl-workspace-windows", (void*)hlWorkspaceWindows);
         Sregister_symbol("hl-layers", (void*)hlLayers);
         Sregister_symbol("hl-is-key-down", (void*)hlIsKeyDown);
         Sregister_symbol("hl-loaded-plugins", (void*)hlLoadedPlugins);
         Sregister_symbol("hl-version", (void*)hlVersion);
         Sregister_symbol("hl-windows-from", (void*)hlWindowsFrom);
-        Sregister_symbol("hl-monitor-info", (void*)hlMonitorInfo);
+        Sregister_symbol("hl-monitor-name", (void*)hlMonitorName);
+        Sregister_symbol("hl-monitor-description", (void*)hlMonitorDescription);
+        Sregister_symbol("hl-monitor-number", (void*)hlMonitorNumber);
+        Sregister_symbol("hl-monitor-enabled", (void*)hlMonitorEnabled);
+        Sregister_symbol("hl-monitor-focused", (void*)hlMonitorFocused);
+        Sregister_symbol("hl-monitor-x", (void*)hlMonitorX);
+        Sregister_symbol("hl-monitor-y", (void*)hlMonitorY);
+        Sregister_symbol("hl-monitor-width", (void*)hlMonitorWidth);
+        Sregister_symbol("hl-monitor-height", (void*)hlMonitorHeight);
+        Sregister_symbol("hl-monitor-scale", (void*)hlMonitorScale);
+        Sregister_symbol("hl-monitor-transform", (void*)hlMonitorTransform);
+        Sregister_symbol("hl-monitor-refresh-rate", (void*)hlMonitorRefreshRate);
+        Sregister_symbol("hl-monitor-mode", (void*)hlMonitorMode);
+        Sregister_symbol("hl-monitor-dpms", (void*)hlMonitorDpms);
+        Sregister_symbol("hl-monitor-vrr", (void*)hlMonitorVrr);
+        Sregister_symbol("hl-monitor-10bit", (void*)hlMonitor10bit);
+        Sregister_symbol("hl-monitor-reserved", (void*)hlMonitorReserved);
+        Sregister_symbol("hl-monitor-mirror-of", (void*)hlMonitorMirrorOf);
+        Sregister_symbol("hl-monitor-active-workspace", (void*)hlMonitorActiveWorkspace);
+        Sregister_symbol("hl-monitor-active-special-workspace", (void*)hlMonitorActiveSpecialWorkspace);
+        Sregister_symbol("hl-monitor-alive", (void*)hlMonitorAlive);
+        Sregister_symbol("hl-monitor-same", (void*)hlMonitorSame);
+        Sregister_symbol("hl-monitor-selector", (void*)hlMonitorSelector);
         Sregister_symbol("hl-window-fullscreen-handler", (void*)hlWindowFullscreenHandler);
         Sregister_symbol("hl-notify", (void*)hlNotify);
         Sregister_symbol("hl-timer-set-enabled", (void*)hlTimerSetEnabled);
@@ -4328,9 +5122,11 @@ namespace Config::Scheme {
 
         g_configPath = userConfigPath();
         if (g_configPath.empty() || !std::filesystem::exists(g_configPath)) {
-            LOG(Log::INFO, "[scheme] no hyprland.scm found, scheme scripting disabled");
+            LOG(Log::INFO, "[scheme] no scheme config found at {} (HYPRSCHEME_CONFIG {}), scheme scripting disabled",
+                g_configPath.empty() ? "<unset>" : g_configPath, getenv("HYPRSCHEME_CONFIG") ? "override ignored: file missing" : "not set");
             return;
         }
+        LOG(Log::INFO, "[scheme] config: {}", g_configPath);
 
         // pin ourselves: bump the dlopen refcount so the compositor's
         // dlclose on unload never unmaps the live interpreter

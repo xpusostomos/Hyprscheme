@@ -21,8 +21,8 @@
 ;; ---- Queries --------------------------------------------------------------
 
 ;; (hl-active-title)  -> string | #f
-;; (hl-workspaces)    -> list of workspace names
-;; (hl-monitors)      -> list of monitor names
+;; (hl-workspaces)    -> list of workspace handles
+;; (hl-monitors)      -> list of monitor handles
 ;; (hl-windows)       -> list of window handles
 ;; (hl-window-class w) (hl-window-title w) (hl-window-workspace w)
 ;; (hl-window-floating? w) (hl-window-size w) (hl-window-pid w) ...
@@ -33,7 +33,7 @@
 
 ;; (hl-on-window-open (lambda (w) ...))     ; w is a window handle
 ;; (hl-on-window-close (lambda (w) ...))
-;; (hl-on-workspace-active (lambda (name) ...))
+;; (hl-on-workspace-active (lambda (ws) ...))  ; ws = workspace handle
 ;; (hl-on-submap (lambda (name) ...))
 (hl-on-window-open (lambda (w)
   (when (equal? (hl-window-class w) "foot")

@@ -1,56 +1,198 @@
 Hyprscheme TODO — genuinely outstanding items
-(consolidated 2026-09-17 after the tail sweep). The large API chunks
-are all implemented and verified — config, actions/dispatchers, events,
-rules, queries, notifications, timer handles, exec variants, gestures,
-watchdog (see git log and the wiki's per-page state). What follows is
-what is still missing or unverified. Suggested hl- names are proposals.
+(consolidated 2026-09-18; every item verified against the code and
+against upstream's Lua bindings on this date — stale entries removed,
+see the AUDIT section for what was dropped and why. Suggested hl- names
+are proposals.)
 
-== BINDS ==
-auto_consuming flag + the return-{ok=false} protocol — passing the
-  keypress to the window when the action didn't succeed ('transparent
-  / 'non-consuming cover related pass-through; this one needs a result
-  channel from the bind callback). Suggested: 'auto-consuming option.
-Unbind by key — remove all binds registered on a key (upstream
-  hl.unbind("key")). Suggested: (hl-unbind-key "SUPER" "L").
+== HANDLE MODEL (implemented + runtime-verified 2026-09-18) ==
+The string-payload design was replaced by upstream's handle model, per
+agreed decisions (break OK; handles+selectors accepted; *-info deleted;
+workspace-removed born dead; input alists stay):
+- Workspace and monitor handles join window handles: opaque records
+  wrapping an int id (define-record-type hl-workspace / hl-monitor),
+  backed by weak-ref registries (g_workspaces / g_monitors). Fresh handle
+  per hand-out; identity via hl-workspace=? / hl-monitor=?; staleness via
+  hl-workspace-alive? / hl-monitor-alive?; every getter on a stale handle
+  returns #f.
+- Getters mirror upstream Lua's object fields 1:1 (LuaWorkspace.cpp /
+  LuaMonitor.cpp): hl-workspace-{name,addressable-name,number,monitor,
+  special?,active?,visible?,empty?,persistent?,has-urgent?,has-fullscreen?,
+  fullscreen-mode,fullscreen-window,last-window,window-count,group-count,
+  tiled-layout} and hl-monitor-{name,description,number,enabled?,focused?,
+  x,y,width,height,scale,transform,refresh-rate,mode,dpms?,vrr?,10bit?,
+  reserved,mirror-of,active-workspace,active-special-workspace}.
+  hl-workspace-info and hl-monitor-info are DELETED, replaced by these.
+- Handles are accepted anywhere a selector string is, via the selector
+  bridges (hl--ws-arg / hl--mon-arg -> hl-workspace-selector /
+  hl-monitor-selector) — the same object-to-selector conversion upstream's
+  workspaceSelectorFromLuaSelectorOrObject performs.
+- Events now deliver handles: hl-on-workspace-active/-created/-special-
+  active/-move-to-monitor, hl-on-monitor-added/-removed/-focused, and the
+  special-active / move-to-monitor payloads are (ws mon) handle pairs with
+  #f for an absent workspace (upstream nil parity). window.open_early /
+  kill / bell / update_rules wrappers (which 9-12) landed with this batch.
+  config.props_refreshed delivers #t/#f (hl-on-config-props-refreshed).
+- hl-workspace-change-id (CA::changeWorkspaceID) is wired and exposed.
+- Built clean; prelude loads and bootstrap compiles under bare Chez; all
+  foreign-procedure symbols cross-checked against Sregister_symbol.
+  RUNTIME VERIFIED 2026-09-18: the full test suite passes 7/7 against a
+  nested compositor, plus live probes of the new surface (getters,
+  handle collections, window->workspace handle chains, handles as
+  selectors, identity across calls, event registration for the new
+  events). Wiki updated: events.md, scheme-utilities.md, dispatchers.md,
+  code-snippets.md (four snippets rewritten to the handle API).
 
-== ACTIONS / DISPATCHERS (small leftovers) ==
-Move a window directly to another MONITOR — CA::moveToMonitor takes a
-  workspace; there is no window-to-monitor action.
-Workspace change_id — CA::changeWorkspaceID.
-Submap setSubmap — CA::setSubmap exists; scheme already has enter/exit;
-  decide whether a scheme-facing switch-by-name is wanted.
+== CONFIG LOCATION ==
+HYPRSCHEME_CONFIG (implemented 2026-09-18): env var selecting the scheme
+  config, overriding the default $XDG_CONFIG_HOME/hypr/hyprland.scm —
+  mirrors how HYPRLAND_CONFIG overrides the compositor's config discovery
+  (verbatim path, no canonicalization). Dogfooded: tests/run.sh exports it
+  for every run, so the suite exercises the override continuously; the
+  default path was probe-verified once without the var. Also documented in
+  the wiki (environment-variables.md, core.md) — where two stale claims
+  were fixed: HYPRLAND_CONFIG / --config select the LUA config and cannot
+  point at a scheme file (the config system has no language dispatch;
+  Jeremy.cpp returns explicit paths verbatim into the Lua parser).
+
+== REMAINING SMALL GAPS ==
+- Monitor set_special (upstream mon:set_special_workspace) — we only
+  have toggle_special; an explicit set (open/close, not toggle) is a
+  small addition if wanted.
+- Workspace group LIST and monitor hardware fields (hardware_details,
+  available_modes, serial, physical size, mirrors list) are not exposed —
+  counts and the common fields are; add on demand.
+- auto-consuming Scheme protocol (callback returning #f = decline) — see
+  BINDS below; flag bit already lands.
+
+== BINDS: auto-consuming protocol (narrower than it looked) ==
+The result channel ALREADY EXISTS — the old TODO claim ("needs a result
+channel from the bind callback") was wrong:
+- fireSchemeBind returns Keybinds::SBindResult (SchemeManager.cpp:1692).
+- BIND_FLAG_AUTO_CONSUMING = 1<<5 = 32 upstream (Bind.hpp:24); the WIP
+  flag assembly matches.
+- The keybind manager consumes it: CONSUMES = !NON_CONSUMING &&
+  (!AUTO_CONSUMING || result.success) && !passEvent (Manager.cpp:565).
+What is actually missing: the Scheme half of the protocol. hl--fire
+(:238-244) discards the callback's return value — it only reports
+ran/aborted. Needed:
+- a convention for the callback to DECLINE the key (upstream's
+  return {ok = false}) — suggest returning #f from the thunk;
+- hl--fire must propagate that distinctly and fireSchemeBind map it to
+  SBindResult{.success = false}. Upstream Lua maps callback ERRORS to
+  success=false too (ConfigManager.cpp:1418), so error and decline
+  behave identically downstream — mirror that, no distinction needed.
+- Optionally expose passEvent (upstream's explicit forward) later; not
+  required for parity.
+
+== WINDOW.DESTROY (decided, not implemented) ==
+Verified against upstream Lua (2026-09-18): the Lua destroy callback
+receives NIL — the bus event is Event<PHLWINDOWREF> emitted from ~CWindow
+(Window.cpp:173), the listener locks it (LuaEventHandler.cpp:97) which
+returns empty while impl_->destroying() (hyprutils WeakPtr.hpp:175), and
+CLuaWindow::push turns an empty ref into lua_pushnil. There is no
+identity mechanism, no dead-handle object; upstream's object model never
+resurrects a window. (Its only identity-across-death mechanism is the
+closewindow IPC event, which formats the window ADDRESS at close time
+while the window is alive, Window.cpp:1610.)
+DECISION: expose it as (hl-on-window-destroy FN) with a ZERO-ARGUMENT
+  callback (exact upstream parity, ~3 lines). Identity belongs to
+  hl-on-window-close, which gets a live handle; destroy's distinct value
+  is timing (post close-animation, windows that vanish without a close
+  request).
+If post-mortem identity is ever wanted, the upstream-blessed shape is an
+  (hl-window-address W) accessor (upstream exposes window.address) plus
+  stashing it from hl-on-window-close — not a destroy payload.
+Also: window.destroy is the one window event the IN FLIGHT chunk did not
+  stub at all.
+
+== ACTIONS / DISPATCHERS ==
+Workspace change_id — CA::changeWorkspaceID (written, needs wiring — see
+  IN FLIGHT).
+Exec carrying a rule OBJECT — the path is NOT the private spawnWithRules
+  overload (that was the old guess). Upstream Lua builds an
+  SP<CWindowRule> from a table via Internal::buildRuleFromTable and calls
+  the public spawn(SExecRequest{.exec, .rule}) (LuaBindingsDispatchers.cpp:
+  163-171). Gap: an alist→CWindowRule builder in the plugin plus the
+  SExecRequest spawn form. The "[rules] cmd" string form already works
+  via hl-exec-with-rules.
 Per-effect rule handles — rule effects are raw-string based today;
   per-effect get/set may be wanted (mirrors upstream's set_prop).
+  Decision item.
+REMOVED (audit): "Move a window directly to another MONITOR" — upstream
+  Lua has no direct action either: dsp_moveToMonitor resolves the monitor
+  and moves the window to its ACTIVE workspace (LuaBindingsDispatchers.cpp:
+  451-458). Expressible today: (hl-window-move-to-workspace w
+  (hl-monitor-active-workspace (hl-monitor-from MON))). Optional: a
+  convenience
+  wrapper (hl-window-move-to-monitor W MON) with silent/follow, ~5 lines,
+  for exact API parity.
+REMOVED (audit): "Submap setSubmap" — already done: hl-enter-submap calls
+  CA::setSubmap (SchemeManager.cpp:4296-4300). Switch-by-name exists.
 
-== EVENTS (the remaining bus events) ==
-window.open_early / window.destroy / window.kill / window.bell /
-  window.update_rules
-monitor.added / removed / focused / layout_changed
-workspace.special_active / created / removed / move_to_monitor
-config.unload / config.props_refreshed
-layer.opened / closed; screenshare.state; input.keyboard.key (low)
-(hl-on-window-title/class/urgent/pin/fullscreen/move-to-workspace/
-active/minimize and the lifecycle events EXIST — only these remain.)
+== EVENTS (remaining bus events) ==
+config.unload — not started. (Note: upstream maps it onto config.preReload,
+  LuaEventHandler.cpp:159 — same shape as our config.reloaded.)
+layer.opened / closed; screenshare.state; input.keyboard.key (low).
+window.destroy — see the dedicated entry above.
+RESOLVED (audit): special_active / move_to_monitor payload — now delivered
+  as (ws mon) HANDLE pairs with #f for an absent workspace, upstream nil
+  parity; the monitor argument is no longer dropped.
 
 == DEVICES ==
 Per-device CONFIG API (hl-device NAME OPTS) — sensitivity, enabled,
   keybinds, tags, tablet output binding. Per-device BINDS exist.
+  Confirmed absent from the plugin.
 
 == GESTURES ==
-Live gesture payloads beyond (dx dy scale) — rotation, pinch events,
-  cancel state. The simple and live forms work.
+Live gesture payload enrichment — data exists upstream, we drop it:
+  SPinchUpdateEvent carries scale AND rotation (IPointer.hpp:77), the
+  end events carry cancelled (IPointer.hpp:64); our update fire is
+  std::format("{} {} {}", dx, dy, scale) (SchemeManager.cpp:3711) — no
+  rotation, no cancel state, and the string form cannot say which
+  gesture type it is. Suggest an alist or extra args when touched.
 
-== EXEC ==
-Programmatic exec-with-rules carrying a rule OBJECT (the
-  spawnWithRules rule parameter) — the "[rules] cmd" string form is
-  already exposed via hl-exec-with-rules.
+== DOCS (wiki drift in ../Hyprscheme.wiki) ==
+Stale claims that contradict the code — fix when touching these pages:
+- window-rules.md and code-snippets.md ("Float browsers' extension
+  windows") both say a window title-change event does not exist yet. It
+  does: hl-on-window-title. The float-browsers recipe is buildable.
+- virtual-gpu.md says "monitor management is not yet available from
+  Scheme". It is: hl-monitor (see monitors.md).
+- binds.md, bind-flags.md, scheme-utilities.md carry "auto_consuming ...
+  tracked in the project TODO" notes — update when the protocol lands
+  (the flag itself is already in the working tree).
+- RESOLVED: dispatchers.md change_id note (now documents
+  hl-workspace-change-id) and events.md's "planned" list (rewired events
+  moved to the available table; the window.destroy row now states the
+  actual nil payload). Remaining drift is the bullets above and below.
+- core.md says Scheme callbacks have "no watchdog" — stale, the watchdog
+  exists (see the project's watchdog chunk and tests/t-watchdog.sh).
 
 == TOOLING ==
 Interactive REPL (hyprctl repl equivalent; hyprctl scheme is one-shot).
 Editor completion stub (a scheme skeleton with all hl- signatures,
-parity with upstream's Lua stubs).
+  parity with upstream's Lua stubs).
 README refresh — the config/rules/queries/gestures/watchdog chunks
   postdate the original README.
+Tests — tests/ should grow to cover as many scenarios as possible
+  (standing goal; see tests/run.sh and t-*.sh). RESOLVED 2026-09-18:
+  the harness now waits for the NEW instance's IPC to answer before
+  loading the plugin (the socket file appears ~6s before the event loop
+  services it under software rendering, and ls -t | head -1 could grab a
+  stale instance dir), and tests/config/hyprland.lua now uses the
+  current 2-arg hl.bind form. The "wayland-1.lock" log line is normal
+  socket-creation noise, not an error. Next: add t-*.sh coverage for the
+  handle getters and the newly wired events.
+
+== AUDIT (2026-09-18 — removed as stale, kept as a record) ==
+- Unbind by key — DONE (hl-unbind-key, commit 1ada231).
+- Submap setSubmap — already implemented (see ACTIONS above).
+- Window-to-monitor — upstream parity exists via move-to-active-workspace
+  (see ACTIONS above).
+- "needs a result channel" for auto-consuming — the channel exists
+  (SBindResult); only the Scheme-side convention is missing (see BINDS).
+- window.destroy "difficult payload problem" — resolved: upstream passes
+  nil; zero-arg callback is the answer (see WINDOW.DESTROY).
 
 == WATCHDOG NOTES (no action — documented limits) ==
 Recovery is out of scope by design (a Chez call cannot be killed
