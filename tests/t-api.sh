@@ -174,8 +174,8 @@ noerr '(hl-monitor-mirror-of am)'
 noerr '(hl-monitor-active-workspace am)'
 noerr '(hl-monitor-active-special-workspace am)'
 ok '(boolean? (hl-monitor-alive? am))'
-ok '(hl-monitor=? am am)'
-ok '(hl-monitor (hl-monitor-name am) (quote ((reserved . ((top . 0))))))'
+ok '(hl-monitor-rule-add!=? am am)'
+ok '(hl-monitor-rule-add! (hl-monitor-name am) (quote ((reserved . ((top . 0))))))'
 
 # ---- config -----------------------------------------------------------------
 ok '(hl-config-add! "general:gaps_in" 5)'
@@ -214,7 +214,7 @@ noerr '(hl-window-from "class:^api-main$")'
 ok '(let ((l (hl-windows))) (and (list? l) (pair? l)))'
 noerr '(hl-active-title)'
 noerr '(hl-active-window)'
-ok '(boolean? (hl-mouse "drag"))'
+ok '(boolean? (hl-mouse-action! "drag"))'
 
 # ---- navigation -------------------------------------------------------------
 ok '(hl-workspace-focus! (hl-active-workspace))'

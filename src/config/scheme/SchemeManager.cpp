@@ -1097,8 +1097,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-send-key-state! mods key state . w)
   (= 0 (c-hl-send-key-state mods key state (if (null? w) -1 (hl--wid (car w))))))
 
-;; interactive drag/resize for mouse binds: (hl-mouse "drag") / (hl-mouse "resize")
-(define (hl-mouse action)
+;; interactive drag/resize for mouse binds: (hl-mouse-action! "drag") / (hl-mouse-action! "resize")
+(define (hl-mouse-action! action)
   (= 0 (c-hl-mouse (hl--str action))))
 
 (define (hl-release-input-capture!)
@@ -1506,7 +1506,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-monitor-alive? m)
   (eq? (c-hl-monitor-alive (hl-monitor-id m)) #t))
 
-(define (hl-monitor=? a b)
+(define (hl-monitor-rule-add!=? a b)
   (eq? (c-hl-monitor-same (hl-monitor-id a) (hl-monitor-id b)) #t))
 
 ;; => list of (monitor . namespace) pairs
@@ -1606,7 +1606,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; ---- monitors, curves, animations, permissions ------------------------------
 
-;; (hl-monitor "DP-1" '((mode . "preferred") (scale . "1.6") (position . "0x0")
+;; (hl-monitor-rule-add! "DP-1" '((mode . "preferred") (scale . "1.6") (position . "0x0")
 ;;                      (transform . 0) (bitdepth . 10) (vrr . 1)
 ;;                      (reserved . '((top . 60)))))
 ;; string fields: mode position scale mirror cm icc sdr_eotf
@@ -1618,14 +1618,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((kv (assq key alist)))
     (if kv (cdr kv) default)))
 
-(define (hl-monitor output fields)
+(define (hl-monitor-rule-add! output fields)
   (if (not (= 0 (c-hl-monitor-begin (hl--mon-arg output))))
-      (errorf 'hl-monitor "~a" (c-hl-config-last-error))
+      (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))
       (let loop ((rest fields))
         (cond ((null? rest)
                (if (= 0 (c-hl-monitor-commit))
                    #t
-                   (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+                   (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
               ((pair? (car rest))
                (let* ((kv (car rest))
                       (f  (hl--str (car kv)))
@@ -1633,23 +1633,23 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                  (cond ((string? v)
                         (if (= 0 (c-hl-monitor-field-str f v))
                             (loop (cdr rest))
-                            (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+                            (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
                        ((number? v)
                         (if (= 0 (c-hl-monitor-field-num f (exact->inexact v)))
                             (loop (cdr rest))
-                            (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+                            (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
                        ((boolean? v)
                         (if (= 0 (c-hl-monitor-field-bool f (if v 1 0)))
                             (loop (cdr rest))
-                            (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
+                            (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
                        ((pair? v)
                         (c-hl-config-begin)
                         (hl--push-val v)
                         (if (= 0 (c-hl-monitor-field-gap f))
                             (loop (cdr rest))
-                            (errorf 'hl-monitor "~a" (c-hl-config-last-error))))
-                       (else (errorf 'hl-monitor "unsupported value for ~a" f)))))
-              (else (errorf 'hl-monitor "fields must be alist pairs"))))))
+                            (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
+                       (else (errorf 'hl-monitor-rule-add! "unsupported value for ~a" f)))))
+              (else (errorf 'hl-monitor-rule-add! "fields must be alist pairs"))))))
 
 ;; (hl-curve-add! "mycurve" 'bezier 0.25 0.1 0.25 1.0)
 ;; (hl-curve-add! "myspring" 'spring 250 25 1)
@@ -3269,7 +3269,7 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
         if (!output || !*output) {
-            g_configError = "hl-monitor: output name required";
+            g_configError = "hl-monitor-rule-add!: output name required";
             return -1;
         }
         g_monitorParser      = makeUnique<Config::CMonitorRuleParser>(std::string(output));
@@ -3304,7 +3304,7 @@ namespace Config::Scheme {
             p.rule().m_sdrEotf = NTransferFunction::fromString(v);
             ok                 = true;
         } else {
-            g_configError = "hl-monitor: unknown string field '" + f + "'";
+            g_configError = "hl-monitor-rule-add!: unknown string field '" + f + "'";
             return -1;
         }
         if (!ok)
@@ -3341,7 +3341,7 @@ namespace Config::Scheme {
         else if (f == "min_luminance")
             val.reset(new Config::Lua::CLuaConfigFloat(-1.F));
         else {
-            g_configError = "hl-monitor: unknown numeric field '" + f + "'";
+            g_configError = "hl-monitor-rule-add!: unknown numeric field '" + f + "'";
             return -1;
         }
 
@@ -3405,7 +3405,7 @@ namespace Config::Scheme {
             return -1;
         const std::string f = field ? field : "";
         if (f != "reserved" && f != "reserved_area") {
-            g_configError = "hl-monitor: unknown gap field '" + f + "'";
+            g_configError = "hl-monitor-rule-add!: unknown gap field '" + f + "'";
             return -1;
         }
         Config::Lua::CLuaConfigCssGap gap(0);
@@ -3428,7 +3428,7 @@ namespace Config::Scheme {
             return -1;
         const std::string f = field ? field : "";
         if (f != "disabled") {
-            g_configError = "hl-monitor: unknown bool field '" + f + "'";
+            g_configError = "hl-monitor-rule-add!: unknown bool field '" + f + "'";
             return -1;
         }
         g_monitorParser->rule().m_disabled = (v != 0);

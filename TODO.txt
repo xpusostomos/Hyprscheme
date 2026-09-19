@@ -184,6 +184,17 @@ OLD MYSTERY EXPLAINED: the "deferred doLater variant never fired its
   event-loop copy. The 10/10 suites passed because no test verified that a
   timer or bind actually FIRED — only that registration returned ids.
 
+== RENAMES + DOC RESTRUCTURE (completed 2026-09-19) ==
+hl-monitor -> hl-monitor-rule-add!; hl-mouse -> hl-mouse-action!
+  (boundary-safe rename; the hl-monitor rename also touched the
+  define-record-type / make-hl-monitor constructor — fixed).
+dispatchers.md RESTRUCTURED to Scheme-first: every Lua dispatcher table
+  entry now carries the Scheme function as the primary documentation,
+  with the Lua source noted as e.g. `*from lua hl.dsp.window.close*`.
+  The Lua `hl.dsp.*` method tables are retained for reference with a
+  Scheme-equivalents note beneath each; all naming is current
+  (! convention, *-toggle!, *-set!, *-add!, *-rule-add!, *-action!).
+
 == REMAINING SMALL GAPS ==
 Every toggle API should also have an explicit set form taking a boolean
   (the hl-window-workspace-set! convention). Already settable:
