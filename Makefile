@@ -28,7 +28,7 @@ CHEZ_BOOT ?= $(CHEZ_WORK)/boot/ta6le
 CHEZ_KERNEL = $(CHEZ_BOOT)/libkernel.a
 
 HYPRLAND_VERSION := $(shell git -C $(HYPRLAND_SRC) describe --tags --always 2>/dev/null || echo $(HYPR_COMMIT))
-CXXFLAGS += -std=c++2b -g -O2 -fPIC -fvisibility=hidden -DHYPRLAND_VERSION='"$(HYPRLAND_VERSION)"'
+CXXFLAGS += -std=c++2b -g -O2 -fPIC -DHYPRLAND_VERSION='"$(HYPRLAND_VERSION)"'
 INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            -I$(CHEZ_BOOT) -Isrc/config/scheme \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`

@@ -24,6 +24,11 @@ PASS=0 FAIL=0
 
 cleanup() {
   [[ -n ${CPID:-} ]] && kill -9 "$CPID" 2>/dev/null
+  # KEEP=1 preserves the workdir (compositor log + config) for debugging
+  if [[ ${KEEP:-0} == 1 ]]; then
+    echo "KEEP=1: workdir preserved at $WORK"
+    return
+  fi
   [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && rm -rf "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE" 2>/dev/null
   rm -rf "$WORK"
 }

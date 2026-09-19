@@ -89,6 +89,112 @@ PROCESS NOTE (an honest record): the first attempt was reverted on a
   statement that set XDG_CONFIG_HOME, silently pointing the override at
   the user's real config.)
 
+== TEST COVERAGE (implemented 2026-09-18) ==
+t-api.sh calls every public hl- API and checks rational return shapes;
+  t-coverage.sh is a META-test that extracts the API list from the
+  bootstrap and fails if any public API is not referenced by the suite —
+  future APIs force test additions. t-zz-exit.sh (runs last) covers
+  hl-exit. Suite: 10/10.
+FOUR REAL BUGS found by the coverage test, all fixed:
+- (hl-bind "" KEY ...) — empty mods produced an empty token that the
+  keybind resolver rejected: EVERY modless bind (all submap binds) was
+  broken. The two-string wrapper now omits the mods token when empty.
+- hl-send-shortcut / hl-send-key-state — passed strings into (int int int)
+  foreign procedures: they could never work. C++ now resolves mods (via
+  gestureMods) and keysyms (xkb_keysym_from_name, case-insensitive).
+- hl-animation accepted UNKNOWN animation leaves; the config re-apply on
+  the next reload then CRASHED the compositor. Leaves are now validated
+  with nodeExists; unknown leaves are rejected with a config error.
+- hl-workspace-toggle-special could not CREATE a missing special
+  workspace (resolve-only); it now prefixes special: and creates on
+  demand, matching upstream's dispatcher.
+Also fixed en route: docs (binds.md kbd examples showed a pair form; the
+  functions return a list of tokens), and the harness gained KEEP=1 to
+  preserve the workdir for debugging.
+
+== TOGGLE SETTERS + RENAMES (implemented 2026-09-18) ==
+Setters added: (hl-window-fullscreen-set! W #t/#f) via a new true-set C++
+  action (fullscreenWindow with FSMODE_NONE/MAXIMIZED/FULLSCREEN — the
+  toggle exits when already in the mode, so a set! mapped onto it would
+  invert), (hl-window-maximized-set!), (hl-window-pinned-set!),
+  (hl-window-pseudo-set!), (hl-group-set! W #t/#f — membership-checked via
+  grouping().group(), no-op when already in state),
+  (hl-monitor-special-workspace-set! MON WS-or-#f — creates the special
+  workspace when missing, #f closes; per-monitor, matching Lua's
+  mon:set_special_workspace).
+Toggles renamed (explicit -toggle!): hl-window-fullscreen-toggle!,
+  hl-window-maximize-toggle!, hl-window-pin-toggle!,
+  hl-window-pseudo-toggle!, hl-group-toggle!,
+  hl-workspace-special-toggle! (was hl-workspace-toggle-special).
+Renamed per the set! convention: hl-window-move-to-workspace ->
+  hl-window-workspace-set!; hl-workspace-move-to-monitor ->
+  hl-workspace-monitor-set!.
+Wiki updated (dispatchers, scheme-utilities, submaps, dwindle,
+  using-hyprctl, code-snippets).
+
+== MUTATING-API NAMING REVIEW (list for Chris to consider) ==
+Scheme convention: mutating APIs end with !. Already conforming:
+  all *-set! above, hl-state-set!, hl-rule-set-enabled,
+  hl-timer-set-enabled, hl-timer-set-timeout, hl-window-set-prop.
+Toggle-named (conforming after the renames): the *-toggle! six.
+Mutating APIs with PLAIN names — candidates for !, grouped:
+- window lifecycle/actions: hl-window-close, hl-window-kill,
+  hl-window-signal, hl-window-focus, hl-window-move-dir, hl-window-move-px,
+  hl-window-swap-dir, hl-window-swap-next, hl-window-swap-with,
+  hl-window-center, hl-window-cycle, hl-window-zorder, hl-window-tag,
+  hl-window-clear-tags, hl-window-resize, hl-window-toggle-swallow,
+  hl-window-deny-from-group, hl-window-into-group,
+  hl-window-out-of-group, hl-window-into-or-create-group
+- groups: hl-group-cycle, hl-group-index, hl-group-move-window,
+  hl-group-lock, hl-group-lock-active
+- workspaces/monitors: hl-workspace-rename, hl-workspace-swap-monitors,
+  hl-workspace-rule, hl-monitor
+- focus: hl-focus-workspace, hl-focus-monitor, hl-focus-direction,
+  hl-focus-last, hl-focus-urgent
+- config authoring: hl-config, hl-window-rule, hl-layer-rule,
+  hl-workspace-rule, hl-curve, hl-animation, hl-permission
+- session: hl-enter-submap, hl-exit-submap, hl-reload-config, hl-exit
+- misc: hl-notify, hl-cursor-move, hl-cursor-corner, hl-pass,
+  hl-send-shortcut, hl-send-key-state, hl-event, hl-global,
+  hl-force-idle, hl-force-renderer-reload, hl-release-input-capture,
+  hl-exec, hl-exec-raw, hl-exec-with-rules, hl-mouse
+Note: verbs like close/kill/focus arguably read as commands, not
+  mutations — where ! lands is a taste line (e.g. Scheme's own set!
+  marks BINDING mutation; display mutates ports without !). Chris's call.
+
+== VISIBILITY=HIDDEN BUG (root-caused + fixed 2026-09-19) ==
+The Makefile compiled the plugin with -fvisibility=hidden. Inline global
+  variables in Hyprland headers (g_pEventLoopManager, g_pTrackpadGestures,
+  ...) then compiled as HIDDEN LOCAL copies inside the .so: the plugin read
+  its own never-assigned copy (g_pEventLoopManager was always NULL, el=0x0)
+  instead of the compositor's. Effects: the socket1 "scheme" command was
+  silently skipped on config-load-time plugin init (the `if (sock())` guard
+  failed), timers registered into a dead event-loop copy (hl-after/hl-repeat
+  returned ids but could never fire), gestures likewise. Everything reached
+  through accessor FUNCTIONS (Event::bus(), IPC::Socket1::sock(),
+  Keybinds::mgr(), Animation::mgr()) always worked — which masked the bug
+  for weeks. Fixed by dropping -fvisibility=hidden from CXXFLAGS: inline
+  variables now compile as GNU-unique symbols (nm class u) merged with the
+  executable's. t-api now also VERIFIES a timer actually fires.
+Debug-log affordances added: registerIpc entry log, handler-entry log
+  (both temporary; keep or remove later), tests/run.sh KEEP=1 to preserve
+  the compositor workdir for post-mortems.
+OLD MYSTERY EXPLAINED: the "deferred doLater variant never fired its
+  callback" comment at the socket registration — doLater went to the dead
+  event-loop copy. The 10/10 suites passed because no test verified that a
+  timer or bind actually FIRED — only that registration returned ids.
+
+== REMAINING SMALL GAPS ==
+Every toggle API should also have an explicit set form taking a boolean
+  (the hl-window-workspace-set! convention). Already settable:
+  hl-window-float (toggle/on/off), hl-group-lock/lock-active (toggle/on/
+  off), hl-dpms (on/off), hl-timer-set-enabled. Toggle-only, needing set
+  forms: hl-window-fullscreen, hl-window-maximize, hl-window-pseudo,
+  hl-window-pin, hl-group-toggle, hl-workspace-toggle-special (open/close
+  instead of toggle) — C++ act variants mostly exist (pin-act, float-act,
+  pseudo and fullscreen-toggle already take an action int), so this is
+  mostly Scheme wrapper surface plus naming.
+
 == REMAINING SMALL GAPS ==
 - Monitor set_special (upstream mon:set_special_workspace) — we only
   have toggle_special; an explicit set (open/close, not toggle) is a

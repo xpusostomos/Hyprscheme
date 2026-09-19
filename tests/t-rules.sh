@@ -1,6 +1,6 @@
 # window rules: registration, effect, handle toggle
-$SCHEME '(hl-window-rule "float-check" (quote ((match . ((class . "^rule-check$"))) (float . #t))))' >/dev/null || { echo "rule registration failed"; exit 1; }
-$SCHEME '(hl-exec "foot -a rule-check")' >/dev/null
+$SCHEME '(hl-window-rule-add! "float-check" (quote ((match . ((class . "^rule-check$"))) (float . #t))))' >/dev/null || { echo "rule registration failed"; exit 1; }
+$SCHEME '(hl-exec-shell! "foot -a rule-check")' >/dev/null
 for _ in $(seq 1 20); do
   $HYP clients -j > /tmp/hs-clients-rules.json 2>/dev/null
   python3 - <<'EOF' && break || true
@@ -23,9 +23,9 @@ raise SystemExit("rule-check window not found")
 EOF
 
 # disable the rule, new window must not float
-$SCHEME '(define rule-check2 (hl-window-rule "float-check2" (quote ((match . ((class . "^rule-check2$"))) (float . #t)))))' >/dev/null
+$SCHEME '(define rule-check2 (hl-window-rule-add! "float-check2" (quote ((match . ((class . "^rule-check2$"))) (float . #t)))))' >/dev/null
 $SCHEME '(hl-rule-set-enabled rule-check2 #f)' >/dev/null
-$SCHEME '(hl-exec "foot -a rule-check2")' >/dev/null
+$SCHEME '(hl-exec-shell! "foot -a rule-check2")' >/dev/null
 sleep 1
 $HYP clients -j > /tmp/hs-clients-rules2.json
 python3 - <<'EOF' || exit 1

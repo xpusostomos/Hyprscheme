@@ -1,27 +1,43 @@
 #include "SchemeManager.hpp"
 #include "SchemeLayout.hpp"
+#include "SchemeInternals.hpp"
+
+#include <scheme.h>
 
 #include <src/debug/log/Logger.hpp>
 #include <src/debug/crash/CrashReporter.hpp>
 #include <src/event/EventBus.hpp>
 #include <src/helpers/memory/Memory.hpp>
+#include <src/helpers/math/Direction.hpp>
+#include <src/input/Keys.hpp>
+#include <src/ipc/s1/S1.hpp>
+#include <src/ipc/s2/S2.hpp>
 #include <src/keybinds/Manager.hpp>
 #include <src/keybinds/InputState.hpp>
-#include <xkbcommon/xkbcommon.h>
-// g_pEventLoopManager is an inline variable: each DSO gets its own copy
-// unless references can preempt to the executable's exported (GNU_UNIQUE)
-// instance. -fvisibility=hidden would bind us to a private, forever-null
-// copy — the loop manager is only reachable through unification.
-#pragma GCC visibility push(default)
 #include <src/managers/eventLoop/EventLoopManager.hpp>
-#pragma GCC visibility pop
 #include <src/managers/eventLoop/EventLoopTimer.hpp>
-#include <src/desktop/state/FocusState.hpp>
-#include <src/desktop/state/WindowState.hpp>
-#include <src/desktop/view/window/Window.hpp>
 #include <src/managers/fullscreen/FullscreenController.hpp>
 #include <src/managers/fullscreen/FullscreenTypes.hpp>
+#include <src/managers/input/InputManager.hpp>
 #include <src/pointer/PointerManager.hpp>
+#include <src/desktop/state/FocusState.hpp>
+#include <src/desktop/state/WindowState.hpp>
+#include <src/desktop/state/ViewState.hpp>
+#include <src/desktop/history/WindowHistoryTracker.hpp>
+#include <src/desktop/history/WorkspaceHistoryTracker.hpp>
+#include <src/desktop/view/window/Window.hpp>
+#include <src/desktop/view/window/WindowGroupMembership.hpp>
+#include <src/desktop/reserved/ReservedArea.hpp>
+#include <src/desktop/rule/Engine.hpp>
+#include <src/desktop/rule/Rule.hpp>
+#include <src/desktop/rule/RuleWithEffects.hpp>
+#include <src/desktop/rule/layerRule/LayerRule.hpp>
+#include <src/desktop/rule/layerRule/LayerRuleApplicator.hpp>
+#include <src/desktop/view/LayerSurface.hpp>
+#include <src/notification/Notification.hpp>
+#include <src/notification/NotificationOverlay.hpp>
+#include <src/managers/input/trackpad/TrackpadGestures.hpp>
+#include <src/managers/input/trackpad/gestures/ITrackpadGesture.hpp>
 #include <src/state/MonitorState.hpp>
 #include <src/state/WorkspaceState.hpp>
 #include <src/state/workspace/Resolver.hpp>
@@ -29,9 +45,8 @@
 #include <src/workspace/RegularWorkspace.hpp>
 #include <src/workspace/query/Query.hpp>
 #include <src/layout/supplementary/WorkspaceAlgoMatcher.hpp>
-#include <src/config/shared/actions/ConfigActions.hpp>
-#include <src/helpers/math/Direction.hpp>
-#include <src/input/Keys.hpp>
+#include <src/layout/space/Space.hpp>
+#include <src/layout/algorithm/Algorithm.hpp>
 #include <src/config/ConfigManager.hpp>
 #include <src/config/lua/ConfigManager.hpp>
 #include <src/config/lua/types/LuaConfigValue.hpp>
@@ -40,67 +55,30 @@
 #include <src/config/lua/types/LuaConfigFloat.hpp>
 #include <src/config/lua/types/LuaConfigInt.hpp>
 #include <src/config/lua/types/LuaConfigString.hpp>
+#include <src/config/shared/actions/ConfigActions.hpp>
+#include <src/config/shared/animation/AnimationTree.hpp>
 #include <src/config/shared/monitor/Parser.hpp>
 #include <src/config/shared/monitor/MonitorRuleManager.hpp>
-#include <src/config/shared/animation/AnimationTree.hpp>
-#include <src/animation/AnimationManager.hpp>
-#include <src/managers/permissions/DynamicPermissionManager.hpp>
-#include <src/desktop/rule/Engine.hpp>
-#include <src/desktop/rule/Rule.hpp>
-#include <src/desktop/rule/windowRule/WindowRule.hpp>
-#include <src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp>
-#include <src/desktop/rule/layerRule/LayerRule.hpp>
-#include <src/desktop/rule/layerRule/LayerRuleEffectContainer.hpp>
 #include <src/config/shared/workspace/WorkspaceRule.hpp>
 #include <src/config/shared/workspace/WorkspaceRuleManager.hpp>
-#include <src/desktop/history/WindowHistoryTracker.hpp>
-#include <src/desktop/history/WorkspaceHistoryTracker.hpp>
-#include <src/desktop/state/ViewQuery.hpp>
-#include <src/desktop/state/ViewState.hpp>
-#include <src/layout/algorithm/Algorithm.hpp>
-#include <src/layout/algorithm/TiledAlgorithm.hpp>
-#include <src/desktop/view/LayerSurface.hpp>
-#include <src/notification/NotificationOverlay.hpp>
-// g_pTrackpadGestures is an inline variable — GNU_UNIQUE unification needed
-#pragma GCC visibility push(default)
-#include <src/managers/input/trackpad/TrackpadGestures.hpp>
-#pragma GCC visibility pop
-#include <src/managers/input/trackpad/gestures/ITrackpadGesture.hpp>
-#include <atomic>
-#include <thread>
-// g_pPluginSystem is an inline variable — same GNU_UNIQUE unification
-// requirement as g_pEventLoopManager (see the pragma at the top).
-#pragma GCC visibility push(default)
-#include <src/plugins/PluginSystem.hpp>
-#pragma GCC visibility pop
-#include <src/config/ConfigValue.hpp>
-#include <src/ipc/s1/S1.hpp>
-
-#include <unordered_map>
 #include <src/config/supplementary/executor/Executor.hpp>
-
-#include <hyprutils/os/FileDescriptor.hpp>
-
+#include <src/animation/AnimationManager.hpp>
+#include <src/pointer/PointerManager.hpp>
+#include <src/plugins/PluginSystem.hpp>
+#include <xkbcommon/xkbcommon.h>
 #include <sys/inotify.h>
-#include <fcntl.h>
 #include <unistd.h>
-
-#include <cstring>
 #include <dlfcn.h>
-#include <filesystem>
+#include <cstring>
 #include <regex>
+#include <format>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <unordered_map>
 #include <vector>
 
-
-extern "C" {
-#include <scheme.h>
-#include <lua.h>
-#include <lauxlib.h>
-}
-
-
+using namespace Config::Scheme::Internals;
 using namespace Hyprutils::OS;
 using Hyprutils::OS::CFileDescriptor;
 
@@ -123,59 +101,6 @@ using Hyprutils::OS::CFileDescriptor;
     per-generation lua_State). Machinery variables the config may set!
     (hl--watchdog-ms) are read through the generation copy so overrides
     reach them; hl--state is the one deliberate cross-generation bridge.
-
-    After a successful bootstrap the scripting API is:
-
-        (hl-bind '("SUPER" "SHIFT" "T") (lambda () ...))  -> id | error
-        (hl-bind (kbd "C-M-t") thunk)                     -> id | error
-        (hl-bind "SUPER" "T" thunk 'release #t 'description "d") -> id | error
-            options: release repeat locked non-consuming long-press
-                     ignore-mods transparent description
-        (hl-exec "command")                           -> pid | -1
-        (hl-after ms (lambda () ...))                 -> id | error   (one-shot)
-        (hl-repeat ms (lambda () ...))                -> id | error   (until reload;
-                                                        a callback error stops it)
-        (hl-active-title)                             -> string | #f
-        (hl-workspaces)                               -> list of workspace handles
-        (hl-on-submap (lambda (name) ...))            -> id | error   (until reload)
-        (hl-active-window)                            -> window | #f
-        (hl-windows)                                  -> list of windows
-        (hl-window-title w)                           -> string | #f  (| #f = stale)
-        (hl-window-alive? w)                          -> bool
-        (hl-window-close w)                           -> bool
-        (hl-window-class w)                           -> string | #f
-        (hl-window-workspace w)                       -> workspace handle | #f
-        (hl-window-monitor w)                         -> monitor handle | #f
-        (hl-window-floating? w)                       -> bool
-        (hl-window-size w)                            -> (w . h) | #f
-        (hl-window-pid w)                             -> int | -1
-        (hl-window-focus w) / (hl-window-float w)     -> bool
-        (hl-window-move-to-workspace w "name")        -> bool (creates missing
-                                                        workspaces on w's monitor)
-        (hl-window-fullscreen w) / (hl-window-maximize w) -> bool (toggles)
-        (hl-window-fullscreen-mode w)                 -> 0 none | 1 max | 2 full
-        (hl-window-hidden? w) / (hl-window-pinned? w) / (hl-window-x11? w) -> bool
-        (hl-window-initial-class w) / (hl-window-initial-title w) -> string | #f
-        (hl-monitors)                                 -> list of monitor handles
-        (hl-on-window-open (lambda (w) ...))          -> id | error   (w = handle)
-        (hl-on-window-close (lambda (w) ...))         -> id | error   (w = handle)
-        (hl-on-workspace-active (lambda (ws) ...))    -> id | error   (ws = handle)
-        (hl-window=? a b)                             -> bool (same window)
-        (hl-unbind id)                                -> bool
-        (hl-current-submap)                           -> string
-        (hl-cursor-pos)                               -> (x . y) | #f
-        (hl-define-layout "name" (lambda (count W H windows) ...))
-                                                      -> id | error
-            pure-function layout: returns one (x y w h) list per window;
-            windows[i] is the handle for box i (queries on it work during
-            the callback). coordinates within the work area. selected via
-            `layout = scheme:name`. on error -> default grid for the
-            generation. Watchdog: callbacks/eval exceeding hl--watchdog-ms are abandoned (see prelude).
-        (hl-submap "name" (lambda () ...binds...))    -> submap scope
-        (hl-enter-submap "name") / (hl-exit-submap)   -> bool (switch active)
-        (hl-state-set! 'key value)                    -> value
-        (hl-state-ref 'key [default])                 -> value | default | #f
-        (hl-state-keys)                               -> list of keys
 */
 
 static constexpr const char* SCHEME_PRELUDE = R"scm(
@@ -188,7 +113,6 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
 ;; environment). hl--reset installs a fresh copy per generation so user
 ;; definitions from previous generations cannot leak into new ones.
 (define hl--generation #f)
-
 
 (define (hl--report e)
   (display "[scheme] error: " (current-error-port))
@@ -540,12 +464,13 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
       (lambda () (c-hl-set-submap-ctx prev-name prev-reset)))))
 
 ;; switch the active submap ("" or "reset" returns to the default)
-(define (hl-enter-submap name)
+(define (hl-submap-activate! name)
   (= 0 (c-hl-enter-submap name)))
 
-(define (hl-exit-submap)
+(define (hl-submap-exit!)
   (= 0 (c-hl-enter-submap "")))
 (define c-hl-window-fullscreen-toggle (foreign-procedure "hl-scheme-window-fullscreen-toggle" (int int) int))
+(define c-hl-window-fullscreen-set (foreign-procedure "hl-scheme-window-fullscreen-set" (int int) int))
 (define c-hl-window-fullscreen-mode (foreign-procedure "hl-scheme-window-fullscreen-mode" (int) int))
 (define c-hl-window-hidden (foreign-procedure "hl-scheme-window-hidden" (int) int))
 (define c-hl-window-pinned (foreign-procedure "hl-scheme-window-pinned" (int) int))
@@ -577,6 +502,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-window-clear-tags (foreign-procedure "hl-scheme-window-clear-tags" (int) int))
 (define c-hl-toggle-swallow (foreign-procedure "hl-scheme-toggle-swallow" () int))
 (define c-hl-group-toggle (foreign-procedure "hl-scheme-group-toggle" (int) int))
+(define c-hl-group-set (foreign-procedure "hl-scheme-group-set" (int int) int))
+(define c-hl-monitor-set-special (foreign-procedure "hl-scheme-monitor-set-special" (string string) int))
 (define c-hl-group-cycle (foreign-procedure "hl-scheme-group-cycle" (int int) int))
 (define c-hl-group-index (foreign-procedure "hl-scheme-group-index" (int int) int))
 (define c-hl-group-move-window (foreign-procedure "hl-scheme-group-move-window" (int int) int))
@@ -600,8 +527,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-global (foreign-procedure "hl-scheme-global" (string) int))
 (define c-hl-event (foreign-procedure "hl-scheme-event" (string) int))
 (define c-hl-pass (foreign-procedure "hl-scheme-pass" (int) int))
-(define c-hl-send-shortcut (foreign-procedure "hl-scheme-send-shortcut" (int int int) int))
-(define c-hl-send-key-state (foreign-procedure "hl-scheme-send-key-state" (int int int int) int))
+(define c-hl-send-shortcut (foreign-procedure "hl-scheme-send-shortcut" (string string int) int))
+(define c-hl-send-key-state (foreign-procedure "hl-scheme-send-key-state" (string string int int) int))
 (define c-hl-mouse (foreign-procedure "hl-scheme-mouse" (string) int))
 (define c-hl-release-input-capture (foreign-procedure "hl-scheme-release-input-capture" () int))
 (define c-hl-window-fullscreen-state (foreign-procedure "hl-scheme-window-fullscreen-state" (int int int int) int))
@@ -661,12 +588,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-version (foreign-procedure "hl-version" () scheme-object))
 (define c-hl-windows-from (foreign-procedure "hl-windows-from" (string) scheme-object))
 (define c-hl-window-fullscreen-handler (foreign-procedure "hl-window-fullscreen-handler" (int) scheme-object))
-(define c-hl-notify (foreign-procedure "hl-notify" (string double string string double) scheme-object))
+(define c-hl-notify (foreign-procedure "hl-notify!" (string double string string double) scheme-object))
 (define c-hl-timer-set-enabled (foreign-procedure "hl-timer-set-enabled" (double int) int))
 (define c-hl-timer-enabled (foreign-procedure "hl-timer-enabled" (double) int))
 (define c-hl-timer-set-timeout (foreign-procedure "hl-timer-set-timeout" (double double) int))
-(define c-hl-exec-raw (foreign-procedure "hl-exec-raw" (string) int))
-(define c-hl-exec-with-rules (foreign-procedure "hl-exec-with-rules" (string) int))
+(define c-hl-exec-raw (foreign-procedure "hl-exec!" (string) int))
+(define c-hl-exec-with-rules (foreign-procedure "hl-exec-shell-with-rules!" (string) int))
 (define c-hl-gesture (foreign-procedure "hl-scheme-gesture" (int string int string double int) scheme-object))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
@@ -764,8 +691,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (if (and (pair? (car args)) (string? (car (car args))) (> (length (car args)) 1))
       ;; list form: (kbd/hl-kbd result) thunk . opts — pass the list directly
       (apply hl--bind-impl (car args) (cdr args))
-      ;; two-string form: mods key thunk . opts → build the list
-      (apply hl--bind-impl (list (car args) (cadr args)) (cddr args))))
+      ;; two-string form: mods key thunk . opts → build the token list; an
+      ;; empty mods string contributes NO token (an empty token would be
+      ;; rejected as an unknown key — every modless bind, e.g. inside
+      ;; submaps, goes through this path)
+      (apply hl--bind-impl (if (string=? (car args) "")
+                               (list (cadr args))
+                               (list (car args) (cadr args)))
+             (cddr args))))
 
 ;; ---- key specification helpers -----------------------------------------------
 ;; (kbd "C-M-a")      — emacs syntax → (mods . key) pair for hl-bind
@@ -825,7 +758,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   ;; e.g. "SUPER+SHIFT+Q" → ("SUPER" "SHIFT" "Q")
   (map hl--trim (hl--split-string spec #\+)))
 
-(define (hl-exec cmd)
+(define (hl-exec-shell! cmd)
   (c-hl-exec cmd))
 
 (define (hl-after ms thunk)
@@ -932,7 +865,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-alive? w)
   (= 1 (c-hl-window-alive (hl-window-id w))))
 
-(define (hl-window-close w)
+(define (hl-window-close! w)
   (= 0 (c-hl-window-close (hl-window-id w))))
 
 (define (hl-window-class w)
@@ -962,14 +895,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-pid w)
   (c-hl-window-pid (hl-window-id w)))
 
-(define (hl-window-focus w)
+(define (hl-window-focus! w)
   (= 0 (c-hl-window-focus (hl-window-id w))))
 
 ;; act: 'toggle (default), 'on, 'off
 (define (hl-window-float w . opt)
   (= 0 (c-hl-window-float-act (hl--wid w) (hl--togact (if (null? opt) 'toggle (car opt))))))
 
-(define (hl-window-move-to-workspace w ws)
+(define (hl-window-workspace-set! w ws)
   (= 0 (c-hl-window-move-to-workspace (hl--wid w) (hl--ws-arg ws))))
 
 ;; ---- actions: navigation and geometry --------------------------------------
@@ -977,36 +910,36 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; a handle or #f (= active window). Action results: #t on success, #f on
 ;; rejection (message in the compositor log).
 
-(define (hl-focus-workspace ws)
+(define (hl-workspace-focus! ws)
   (= 0 (c-hl-focus-workspace (hl--ws-arg ws))))
 
-(define (hl-focus-direction dir)
+(define (hl-focus-direction-set! dir)
   (= 0 (c-hl-focus-direction (hl--dir dir))))
 
-(define (hl-focus-monitor mon)
+(define (hl-monitor-focus! mon)
   (= 0 (c-hl-focus-monitor (hl--mon-arg mon))))
 
-(define (hl-focus-last)
+(define (hl-focus-last!)
   (= 0 (c-hl-focus-last)))
 
-(define (hl-focus-urgent)
+(define (hl-focus-urgent!)
   (= 0 (c-hl-focus-urgent)))
 
-(define (hl-window-move-dir w dir)
+(define (hl-window-move-direction! w dir)
   (= 0 (c-hl-window-move-direction (hl--wid w) (hl--dir dir))))
 
-(define (hl-window-swap-dir w dir)
+(define (hl-window-swap-direction! w dir)
   (= 0 (c-hl-window-swap-direction (hl--wid w) (hl--dir dir))))
 
 ;; prev: 'prev or #t swaps backwards
-(define (hl-window-swap-next w . opt)
+(define (hl-window-swap-next! w . opt)
   (= 0 (c-hl-window-swap-next (hl--wid w) (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 (if (car opt) 1 0))))))
 
-(define (hl-window-swap-with w other)
+(define (hl-window-swap-with! w other)
   (= 0 (c-hl-window-swap-with (hl--wid w) (hl-window-id other))))
 
 ;; opts: 'prev, 'tiled, 'floating (combinable symbols)
-(define (hl-window-cycle . opt)
+(define (hl-window-cycle! . opt)
   (let loop ((rest opt) (next 1) (filter 0))
     (cond ((null? rest)
            (= 0 (c-hl-window-cycle -1 next filter)))
@@ -1015,146 +948,160 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
           ((eq? (car rest) 'floating) (loop (cdr rest) next 2))
           (else (loop (cdr rest) next filter)))))
 
-(define (hl-window-center w)
+(define (hl-window-center! w)
   (= 0 (c-hl-window-center (hl--wid w))))
 
 ;; absolute by default; 'relative (or 'rel) makes the deltas relative
-(define (hl-window-resize w width height . opt)
+(define (hl-window-size-set! w width height . opt)
   (= 0 (c-hl-window-resize-px (hl--wid w) (exact->inexact width) (exact->inexact height)
          (if (null? opt) 0 (if (memq (car opt) '(relative rel)) 1 0)))))
 
-(define (hl-window-move-px w x y . opt)
+(define (hl-window-move-xy! w x y . opt)
   (= 0 (c-hl-window-move-px (hl--wid w) (exact->inexact x) (exact->inexact y)
          (if (null? opt) 0 (if (memq (car opt) '(relative rel)) 1 0)))))
 
-(define (hl-window-pin w . opt)
-  (= 0 (c-hl-window-pin-act (hl--wid w) (hl--togact (if (null? opt) 'toggle (car opt))))))
+(define (hl-window-pin-toggle! w)
+  (= 0 (c-hl-window-pin-act (hl--wid w) (hl--togact 'toggle))))
 
-(define (hl-window-pseudo w . opt)
-  (= 0 (c-hl-window-pseudo (hl--wid w) (hl--togact (if (null? opt) 'toggle (car opt))))))
+(define (hl-window-pinned-set! w on?)
+  (= 0 (c-hl-window-pin-act (hl--wid w) (hl--togact (if on? 'on 'off)))))
 
-(define (hl-window-kill w)
+(define (hl-window-pseudo-toggle! w)
+  (= 0 (c-hl-window-pseudo (hl--wid w) (hl--togact 'toggle))))
+
+(define (hl-window-pseudo-set! w on?)
+  (= 0 (c-hl-window-pseudo (hl--wid w) (hl--togact (if on? 'on 'off)))))
+
+(define (hl-window-kill! w)
   (= 0 (c-hl-window-kill (hl--wid w))))
 
-(define (hl-window-signal w sig)
+(define (hl-window-signal! w sig)
   (= 0 (c-hl-window-signal (hl--wid w) sig)))
 
 ;; mode: "up" | "down" | "top" | "bottom" (alterZOrder mode string)
-(define (hl-window-zorder w mode)
+(define (hl-window-zorder-set! w mode)
   (= 0 (c-hl-window-zorder (hl--wid w) (hl--str mode))))
 
-(define (hl-window-set-prop w prop val)
+(define (hl-window-prop-set! w prop val)
   (= 0 (c-hl-window-set-prop (hl--wid w) (hl--str prop) (hl--str val))))
 
-(define (hl-window-tag w tag)
+(define (hl-window-tag-add! w tag)
   (= 0 (c-hl-window-tag (hl--wid w) (hl--str tag))))
 
-(define (hl-window-clear-tags w)
+(define (hl-window-tags-clear! w)
   (= 0 (c-hl-window-clear-tags (hl--wid w))))
 
-(define (hl-window-toggle-swallow)
+(define (hl-window-swallow-toggle!)
   (= 0 (c-hl-toggle-swallow)))
 
 ;; ---- actions: groups --------------------------------------------------------
 
-(define (hl-group-toggle w)
+(define (hl-group-toggle! w)
   (= 0 (c-hl-group-toggle (hl--wid w))))
 
-(define (hl-group-cycle w . opt)
+(define (hl-group-set! w on?)
+  (= 0 (c-hl-group-set (hl--wid w) (if on? 1 0))))
+
+(define (hl-group-cycle! w . opt)
   (= 0 (c-hl-group-cycle (hl--wid w) (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 0)))))
 
-(define (hl-group-index w index)
+(define (hl-group-window-active! w index)
   (= 0 (c-hl-group-index (hl--wid w) index)))
 
-(define (hl-group-move-window w . opt)
+(define (hl-group-window-move-next! w . opt)
   (= 0 (c-hl-group-move-window (hl--wid w) (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 0)))))
 
 ;; act: 'toggle/'on/'off
-(define (hl-group-lock act)
+(define (hl-group-lock! act)
   (= 0 (c-hl-group-lock (hl--togact act))))
 
-(define (hl-group-lock-active act)
+(define (hl-group-lock-active! act)
   (= 0 (c-hl-group-lock-active (hl--togact act))))
 
-(define (hl-window-into-group w dir)
+(define (hl-window-group-move-in! w dir)
   (= 0 (c-hl-window-into-group (hl--wid w) (hl--dir dir))))
 
-(define (hl-window-out-of-group w dir)
+(define (hl-window-group-move-out! w dir)
   (= 0 (c-hl-window-out-of-group (hl--wid w) (hl--dir dir))))
 
-(define (hl-window-into-or-create-group w dir)
+(define (hl-window-group-move-in-or-create! w dir)
   (= 0 (c-hl-window-into-or-create-group (hl--wid w) (hl--dir dir))))
 
-(define (hl-window-deny-from-group w . opt)
+(define (hl-window-deny-from-group! w . opt)
   (= 0 (c-hl-window-deny-from-group (hl--wid w)
          (hl--togact (if (null? opt) 'toggle (car opt))))))
 
 ;; ---- actions: workspaces and monitors ---------------------------------------
 
-(define (hl-workspace-rename old new)
+(define (hl-workspace-name-set! old new)
   (= 0 (c-hl-workspace-rename (hl--ws-arg old) (hl--str new))))
 
-(define (hl-workspace-move-to-monitor ws mon)
+(define (hl-workspace-monitor-set! ws mon)
   (= 0 (c-hl-workspace-move-monitor (hl--ws-arg ws) (hl--mon-arg mon))))
 
-(define (hl-workspace-toggle-special ws)
+(define (hl-workspace-special-toggle! ws)
   (= 0 (c-hl-workspace-toggle-special (hl--ws-arg ws))))
 
-(define (hl-workspace-swap-monitors mon1 mon2)
+;; explicit set: opens WS (a special workspace name or handle, created when
+;; missing) on MON; #f closes whatever special workspace is open there
+(define (hl-monitor-special-workspace-set! mon ws)
+  (= 0 (c-hl-monitor-set-special (hl--mon-arg mon) (if ws (hl--ws-arg ws) ""))))
+
+(define (hl-monitor-swap! mon1 mon2)
   (= 0 (c-hl-workspace-swap-monitors (hl--mon-arg mon1) (hl--mon-arg mon2))))
 
 ;; change a numbered workspace's ID (upstream validates: must be > 0, not in
 ;; use, and only NUMBERED workspaces can be re-IDed — named/special cannot)
-(define (hl-workspace-change-id ws new-id)
+(define (hl-workspace-id-set! ws new-id)
   (= 0 (c-hl-workspace-change-id (hl--ws-arg ws) (exact->inexact new-id))))
 
 ;; ---- actions: cursor and misc -----------------------------------------------
 
-(define (hl-cursor-move x y)
+(define (hl-cursor-move! x y)
   (= 0 (c-hl-cursor-move (exact->inexact x) (exact->inexact y))))
 
-(define (hl-cursor-corner w corner)
+(define (hl-cursor-move-to-corner! w corner)
   (= 0 (c-hl-cursor-corner (hl--wid w) corner)))
 
 ;; DANGER: quits Hyprland
-(define (hl-exit)
+(define (hl-exit!)
   (= 0 (c-hl-exit)))
 
-(define (hl-reload-config)
+(define (hl-config-reload!)
   (= 0 (c-hl-reload-config)))
 
-(define (hl-force-renderer-reload)
+(define (hl-force-renderer-reload!)
   (= 0 (c-hl-force-renderer-reload)))
 
 ;; act: 'toggle/'on/'off; mon: #f (all) or a monitor handle/name
 (define (hl-dpms act . mon)
   (= 0 (c-hl-dpms (hl--togact act) (if (null? mon) "" (hl--mon-arg (car mon))))))
 
-(define (hl-force-idle seconds)
+(define (hl-force-idle! seconds)
   (= 0 (c-hl-force-idle (exact->inexact seconds))))
 
-(define (hl-global action)
+(define (hl-global! action)
   (= 0 (c-hl-global (hl--str action))))
 
-(define (hl-event data)
+(define (hl-event! data)
   (= 0 (c-hl-event (hl--str data))))
 
-(define (hl-pass w)
+(define (hl-window-pass-shortcut! w)
   (= 0 (c-hl-pass (hl--wid w))))
 
 ;; mods: mask int (SHIFT 1 CAPS 2 CTRL 4 ALT 8 MOD2 16 MOD3 32 META 64 MOD5 128)
 ;; key: xkb keycode
-(define (hl-send-shortcut mods key . w)
+(define (hl-window-send-shortcut! mods key . w)
   (= 0 (c-hl-send-shortcut mods key (if (null? w) -1 (hl--wid (car w))))))
 
-(define (hl-send-key-state mods key state . w)
+(define (hl-window-send-key-state! mods key state . w)
   (= 0 (c-hl-send-key-state mods key state (if (null? w) -1 (hl--wid (car w))))))
 
 ;; interactive drag/resize for mouse binds: (hl-mouse "drag") / (hl-mouse "resize")
 (define (hl-mouse action)
   (= 0 (c-hl-mouse (hl--str action))))
 
-(define (hl-release-input-capture)
+(define (hl-release-input-capture!)
   (= 0 (c-hl-release-input-capture)))
 
 ;; send a message to the active workspace's layout (see custom-layouts)
@@ -1167,12 +1114,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; array), or alist (hash table, e.g. '((top . 10) (bottom . 10))).
 ;; writes propagate like a runtime hl.config — the affected subsystems
 ;; refresh immediately.
-(define (hl-config key val)
+(define (hl-config-add! key val)
   (c-hl-config-begin)
   (hl--push-val val)
   (if (= 0 (c-hl-config-set (hl--str key)))
       #t
-      (errorf 'hl-config "~a" (c-hl-config-last-error))))
+      (errorf 'hl-config-add! "~a" (c-hl-config-last-error))))
 
 (define (hl--push-val v)
   (cond ((number? v) (c-hl-config-push-num (exact->inexact v)))
@@ -1194,7 +1141,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
              (hl--push-val (car rest))
              (c-hl-config-tbl-seti i)
              (loop (cdr rest) (+ i 1)))))
-        (else (errorf 'hl-config "unsupported value ~s" v))))
+        (else (errorf 'hl-config-add! "unsupported value ~s" v))))
 
 (define (hl-config-get key)
   (let ((s (c-hl-config-get (hl--str key))))
@@ -1208,9 +1155,9 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; config string form). Returns a rule handle for hl-rule-set-enabled /
 ;; hl-rule-enabled?. Anonymous rules (name #f) are re-created on each
 ;; config reload; named rules are reused across calls.
-;;   (hl-window-rule "term" '((match . ((class . "foot"))) (float . #t)
+;;   (hl-window-rule-add! "term" '((match . ((class . "foot"))) (float . #t)
 ;;                            (opacity . "0.8") (workspace . "3")))
-;;   (hl-window-rule #f '((match . ((class . "(?i)games"))) (monitor . "DP-1")))
+;;   (hl-window-rule-add! #f '((match . ((class . "(?i)games"))) (monitor . "DP-1")))
 ;; match properties: class title initial_class initial_title floating tag
 ;;   xwayland fullscreen pinned focus group modal on_workspace content
 ;;   namespace exec_token exec_pid ...
@@ -1265,17 +1212,17 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                                     (errorf what "~a" (c-hl-config-last-error)))))))))
                 (else (errorf what "spec must be an alist")))))))
 
-(define (hl-window-rule name spec)
+(define (hl-window-rule-add! name spec)
   (let ((spec2 (if name (let ((kv (assq 'name spec)))
                           (if kv spec (cons (cons 'name name) spec)))
                   spec)))
-    (hl--window-rule-mk spec2 c-hl-window-rule-begin c-hl-window-rule-effect c-hl-window-rule-commit 'hl-window-rule)))
+    (hl--window-rule-mk spec2 c-hl-window-rule-begin c-hl-window-rule-effect c-hl-window-rule-commit 'hl-window-rule-add!)))
 
-(define (hl-layer-rule name spec)
+(define (hl-layer-rule-add! name spec)
   (let ((spec2 (if name (let ((kv (assq 'name spec)))
                           (if kv spec (cons (cons 'name name) spec)))
                   spec)))
-    (hl--window-rule-mk spec2 c-hl-layer-rule-begin c-hl-layer-rule-effect c-hl-layer-rule-commit 'hl-layer-rule)))
+    (hl--window-rule-mk spec2 c-hl-layer-rule-begin c-hl-layer-rule-effect c-hl-layer-rule-commit 'hl-layer-rule-add!)))
 
 (define (hl-rule-set-enabled rule enabled)
   (if (= 0 (c-hl-rule-set-enabled (exact->inexact (hl-rule-id rule)) (if enabled 1 0)))
@@ -1285,19 +1232,19 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-rule-enabled? rule)
   (= 1 (c-hl-rule-enabled (exact->inexact (hl-rule-id rule)))))
 
-;; workspace rules: (hl-workspace-rule "3" '((monitor . "DP-1") (layout . "master")))
+;; workspace rules: (hl-workspace-rule-add! "3" '((monitor . "DP-1") (layout . "master")))
 ;; fields: monitor default persistent gaps_in gaps_out float_gaps border_size
 ;;   no_border no_rounding decorate no_shadow on_created_empty default_name
 ;;   layout animation layout_opts
-(define (hl-workspace-rule ws spec)
+(define (hl-workspace-rule-add! ws spec)
   (let ((enabled (hl--aopt spec 'enabled #t)))
     (if (not (= 0 (c-hl-workspace-rule-begin (hl--ws-arg ws) (if enabled 1 0))))
-        (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))
+        (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))
         (let loop ((rest spec))
           (cond ((null? rest)
                  (if (= 0 (c-hl-workspace-rule-commit))
                      #t
-                     (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                     (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                 ((pair? (car rest))
                  (let* ((kv (car rest))
                         (k  (hl--str (car kv)))
@@ -1310,31 +1257,31 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                                   ((pair? (car o))
                                    (let ((sv (hl--rule-spec-value (cdr (car o)))))
                                      (if (not sv)
-                                         (errorf 'hl-workspace-rule "bad layout_opts value")
+                                         (errorf 'hl-workspace-rule-add! "bad layout_opts value")
                                          (if (= 0 (c-hl-workspace-rule-layout-opt (hl--str (caar o)) sv))
                                              (oloop (cdr o))
-                                             (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))))
-                                  (else (errorf 'hl-workspace-rule "layout_opts must be an alist")))))
+                                             (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))))
+                                  (else (errorf 'hl-workspace-rule-add! "layout_opts must be an alist")))))
                          ((string? v)
                           (if (= 0 (c-hl-workspace-rule-str k v))
                               (loop (cdr rest))
-                              (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                              (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                          ((number? v)
                           (if (= 0 (c-hl-workspace-rule-num k (exact->inexact v)))
                               (loop (cdr rest))
-                              (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                              (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                          ((boolean? v)
                           (if (= 0 (c-hl-workspace-rule-bool k (if v 1 0)))
                               (loop (cdr rest))
-                              (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
+                              (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                          ((pair? v)
                           (c-hl-config-begin)
                           (hl--push-val v)
                           (if (= 0 (c-hl-workspace-rule-gap k))
                               (loop (cdr rest))
-                              (errorf 'hl-workspace-rule "~a" (c-hl-config-last-error))))
-                         (else (errorf 'hl-workspace-rule "unsupported value for ~a" k)))))
-                (else (errorf 'hl-workspace-rule "spec must be an alist")))))))
+                              (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
+                         (else (errorf 'hl-workspace-rule-add! "unsupported value for ~a" k)))))
+                (else (errorf 'hl-workspace-rule-add! "spec must be an alist")))))))
 
 ;; ---- queries ------------------------------------------------------------------
 ;; selectors use the config selector syntax: "class:^foot$", "title:foo",
@@ -1595,11 +1542,11 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (c-hl-window-fullscreen-handler (hl--wid w)))
 
 ;; ---- notifications ------------------------------------------------------------
-;; (hl-notify "text" 5000) or with options:
-;;   (hl-notify "text" 5000 '((icon . "info") (color . "0x80FF80FF") (font-size . 13)))
+;; (hl-notify! "text" 5000) or with options:
+;;   (hl-notify! "text" 5000 '((icon . "info") (color . "0x80FF80FF") (font-size . 13)))
 ;; icons: none warn info hint error/err confused/question ok
 ;; color: 0xAARRGGBB hex string; 0 color = default for the icon
-(define (hl-notify text duration . opts)
+(define (hl-notify! text duration . opts)
   (let ((alist (if (and (not (null? opts)) (pair? (car opts)) (pair? (caar opts))) (car opts) '())))
     (let ((s (c-hl-notify (hl--str text) (exact->inexact duration)
                           (hl--str (hl--aopt alist 'icon "none"))
@@ -1621,11 +1568,11 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
       (errorf 'hl-timer-set-timeout "timeout must be >= 1ms")))
 
 ;; ---- exec variants ----------------------------------------------------------------
-;; (hl-exec-raw "cmd") — no shell; the string is execvp'd (space-split)
-;; (hl-exec-with-rules "[float size 800 500] mygame") — classic exec rules
-(define (hl-exec-raw cmd)
+;; (hl-exec! "cmd") — no shell; the string is execvp'd (space-split)
+;; (hl-exec-shell-with-rules! "[float size 800 500] mygame") — classic exec rules
+(define (hl-exec! cmd)
   (> (c-hl-exec-raw cmd) 0))
-(define (hl-exec-with-rules cmd)
+(define (hl-exec-shell-with-rules! cmd)
   (> (c-hl-exec-with-rules cmd) 0))
 
 ;; ---- gestures ----------------------------------------------------------------------
@@ -1704,20 +1651,20 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                        (else (errorf 'hl-monitor "unsupported value for ~a" f)))))
               (else (errorf 'hl-monitor "fields must be alist pairs"))))))
 
-;; (hl-curve "mycurve" 'bezier 0.25 0.1 0.25 1.0)
-;; (hl-curve "myspring" 'spring 250 25 1)
-(define (hl-curve name type . vals)
+;; (hl-curve-add! "mycurve" 'bezier 0.25 0.1 0.25 1.0)
+;; (hl-curve-add! "myspring" 'spring 250 25 1)
+(define (hl-curve-add! name type . vals)
   (let* ((t  (if (eq? type 'spring) 1 0))
          (vs (append (map exact->inexact vals) (list 0 0 0 0))))
     (if (= 0 (c-hl-curve-add (hl--str name) t
                              (list-ref vs 0) (list-ref vs 1) (list-ref vs 2) (list-ref vs 3)))
         #t
-        (errorf 'hl-curve "~a" (c-hl-config-last-error)))))
+        (errorf 'hl-curve-add! "~a" (c-hl-config-last-error)))))
 
-;; (hl-animation "windowsIn" '((enabled . #t) (speed . 8) (curve . "mycurve") (style . "popin 80%")))
-;; speed defaults to 8; declare curves with hl-curve first (or use builtins
+;; (hl-animation-add! "windowsIn" '((enabled . #t) (speed . 8) (curve . "mycurve") (style . "popin 80%")))
+;; speed defaults to 8; declare curves with hl-curve-add! first (or use builtins
 ;; like "default"); styles are the animation style strings (popin, slide, ...)
-(define (hl-animation leaf alist)
+(define (hl-animation-add! leaf alist)
   (let* ((enabled (hl--aopt alist 'enabled #t))
          (speed   (hl--aopt alist 'speed 8))
          (curve   (hl--aopt alist 'curve ""))
@@ -1725,15 +1672,15 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (= 0 (c-hl-animation-set (hl--str leaf) (if enabled 1 0)
                                  (exact->inexact speed) (hl--str curve) (hl--str style)))
         #t
-        (errorf 'hl-animation "~a" (c-hl-config-last-error)))))
+        (errorf 'hl-animation-add! "~a" (c-hl-config-last-error)))))
 
-;; (hl-permission "/usr/bin/grim" 'screencopy 'allow)
+;; (hl-permission-add! "/usr/bin/grim" 'screencopy 'allow)
 ;; only takes effect at first launch — permission rules require a
 ;; compositor restart (same as the lua config)
-(define (hl-permission binary type mode)
+(define (hl-permission-add! binary type mode)
   (if (= 0 (c-hl-permission-add binary (hl--str type) (hl--str mode)))
       #t
-      (errorf 'hl-permission "~a" (c-hl-config-last-error))))
+      (errorf 'hl-permission-add! "~a" (c-hl-config-last-error))))
 
 
 ;; decode "b|n|s|t" + payload lines into a scheme value
@@ -1755,11 +1702,19 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; toggles; modes mirror Fullscreen::eFullscreenMode (1 maximized, 2 fullscreen)
 ;; optional second arg = mode (default 2); (hl-window-fullscreen w 1) maximizes
-(define (hl-window-fullscreen w . opt)
-  (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) (if (null? opt) 2 (car opt)))))
+;; mode-aware toggle: mode 2 = fullscreen, 1 = maximized
+(define (hl-window-fullscreen-toggle! w . mode)
+  (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) (if (null? mode) 2 (car mode)))))
 
-(define (hl-window-maximize w)
+;; explicit set: #t fullscreens, #f restores
+(define (hl-window-fullscreen-set! w on?)
+  (= 0 (c-hl-window-fullscreen-set (hl--wid w) (if on? 2 0))))
+
+(define (hl-window-maximize-toggle! w)
   (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) 1)))
+
+(define (hl-window-maximized-set! w on?)
+  (= 0 (c-hl-window-fullscreen-set (hl--wid w) (if on? 1 0))))
 
 ;; explicit state: (internal-mode client-mode layout-aware?) — modes 0/1/2
 (define (hl-window-fullscreen-state w internal client . layout-aware)
@@ -2616,6 +2571,18 @@ namespace Config::Scheme {
 
     // toggles the given fullscreen mode (FSMODE_FULLSCREEN=2, FSMODE_MAXIMIZED=1),
     // mirroring the toggle logic in Lua's dsp_fullscreenWindowWithAction
+    // true set: 0 = none, 1 = maximized, 2 = fullscreen — regardless of the
+    // current state (the toggle above exits when already in the mode)
+    static int hlSchemeWindowFullscreenSet(int id, int modeRaw) {
+        if (!g_up)
+            return -1;
+        const auto window = actionWindow(id).value_or(nullptr);
+        if (!window)
+            return -1;
+        const auto mode = sc<Fullscreen::eFullscreenMode>(modeRaw);
+        return Config::Actions::fullscreenWindow(mode, false, window) ? 0 : -2;
+    }
+
     static int hlSchemeWindowFullscreenToggle(int id, int modeRaw) {
         if (!g_up)
             return -1;
@@ -2855,6 +2822,19 @@ namespace Config::Scheme {
         return actionResult("group-toggle", Config::Actions::toggleGroup(actionWindow(id)));
     }
 
+    // explicit set: a no-op when the window is already in the requested
+    // state (group() is null iff the window is not a member of a group)
+    static int hlSchemeGroupSet(int id, int on) {
+        if (!g_up)
+            return -1;
+        const auto w = actionWindow(id).value_or(nullptr);
+        if (!w)
+            return -1;
+        if ((w->grouping().group() != nullptr) == (on != 0))
+            return 0;
+        return actionResult("group-set", Config::Actions::toggleGroup(w));
+    }
+
     static int hlSchemeGroupCycle(int id, int prev) {
         if (!g_up)
             return -1;
@@ -2932,14 +2912,50 @@ namespace Config::Scheme {
         return actionResult("workspace-move-to-monitor", Config::Actions::moveToMonitor(ws, mon));
     }
 
+    // create-or-find a special workspace by (prefixed) selector
+    static PHLWORKSPACE specialWorkspaceFromName(const std::string& wsName, const PHLMONITOR& mon) {
+        std::string sel = wsName;
+        if (!sel.starts_with("special:"))
+            sel = "special:" + sel;
+        auto ws = workspaceFromName(sel.c_str());
+        if (!ws) {
+            const auto target = State::Workspace::resolver()->getWorkspaceTargetFromString(sel);
+            if (!target.valid())
+                return nullptr;
+            ws = State::Workspace::state()->create(target, mon);
+        }
+        return ws;
+    }
+
+    // explicit set: opens the special workspace on the monitor (creating it
+    // when missing); an empty name closes whatever is open there
+    static int hlSchemeMonitorSetSpecial(const char* monSel, const char* wsName) {
+        if (!g_up)
+            return -1;
+        const auto mon = State::monitorState()->query().configString(monSel ? monSel : "").run();
+        if (!mon)
+            return -1;
+        PHLWORKSPACE ws = nullptr;
+        if (wsName && *wsName) {
+            ws = specialWorkspaceFromName(wsName, mon);
+            if (!ws)
+                return -1;
+        }
+        mon->setSpecialWorkspace(ws, true);
+        return 0;
+    }
+
     static int hlSchemeWorkspaceToggleSpecial(const char* wsName) {
         if (!g_up)
             return -1;
-        const auto ws = workspaceFromName(wsName);
-        if (!ws) {
-            LOG(Log::ERR, "[scheme] workspace-toggle-special: no workspace named {}", wsName ? wsName : "");
+        // a toggle must CREATE the special workspace when it does not exist
+        // yet (upstream's dispatcher takes a bare name and creates on
+        // demand) — resolving only would make first use impossible
+        if (!wsName || !*wsName)
             return -1;
-        }
+        const auto ws = specialWorkspaceFromName(wsName, Desktop::focusState()->monitor());
+        if (!ws)
+            return -1;
         return actionResult("workspace-toggle-special", Config::Actions::toggleSpecial(ws));
     }
 
@@ -3023,16 +3039,26 @@ namespace Config::Scheme {
         return actionResult("pass", Config::Actions::pass(actionWindow(id)));
     }
 
-    static int hlSchemeSendShortcut(int mask, int key, int id) {
+    static Input::ModifierMask gestureMods(const char* mods); // defined below
+
+    // mods/key arrive as the same strings binds take (e.g. "SUPER" "F10");
+    // resolve to mask + keysym here so the Scheme surface stays string-based
+    static int hlSchemeSendShortcut(const char* mods, const char* key, int id) {
         if (!g_up)
             return -1;
-        return actionResult("send-shortcut", Config::Actions::pass(Input::ModifierMask(sc<Input::eKeyboardModifiers>(mask)), sc<uint32_t>(key), actionWindow(id)));
+        const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
+        if (sym == 0)
+            return -1;
+        return actionResult("send-shortcut", Config::Actions::pass(gestureMods(mods), sc<uint32_t>(sym), actionWindow(id)));
     }
 
-    static int hlSchemeSendKeyState(int mask, int key, int state, int id) {
+    static int hlSchemeSendKeyState(const char* mods, const char* key, int state, int id) {
         if (!g_up)
             return -1;
-        return actionResult("send-key-state", Config::Actions::sendKeyState(Input::ModifierMask(sc<Input::eKeyboardModifiers>(mask)), sc<uint32_t>(key), sc<uint32_t>(state), actionWindow(id)));
+        const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
+        if (sym == 0)
+            return -1;
+        return actionResult("send-key-state", Config::Actions::sendKeyState(gestureMods(mods), sc<uint32_t>(sym), sc<uint32_t>(state), actionWindow(id)));
     }
 
     static int hlSchemeMouse(const char* action) {
@@ -3095,7 +3121,7 @@ namespace Config::Scheme {
         return g_configScratch;
     }
 
-    // clears the scratch stack: once at the start of each hl-config value
+    // clears the scratch stack: once at the start of each hl-config-add! value
     static int hlConfigBegin() {
         if (!g_up)
             return -1;
@@ -3424,14 +3450,14 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
         if (!name || !*name) {
-            g_configError = "hl-curve: name required";
+            g_configError = "hl-curve-add!: name required";
             return -1;
         }
         if (type == 0)
             Animation::mgr()->addBezierWithName(name, Vector2D{a, b}, Vector2D{c, d});
         else if (type == 1) {
             if (a <= 0.5F || b <= 0.5F || c <= 0.5F) {
-                g_configError = "hl-curve: spring params must be >= 0.5";
+                g_configError = "hl-curve-add!: spring params must be >= 0.5";
                 return -1;
             }
             Hyprutils::Animation::SSpringCurve curve;
@@ -3440,7 +3466,7 @@ namespace Config::Scheme {
             curve.mass      = sc<float>(c);
             Animation::mgr()->addSpringWithName(name, curve);
         } else {
-            g_configError = "hl-curve: unknown type";
+            g_configError = "hl-curve-add!: unknown type";
             return -1;
         }
         return 0;
@@ -3450,13 +3476,19 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
         if (!leaf || !*leaf) {
-            g_configError = "hl-animation: leaf required";
+            g_configError = "hl-animation-add!: leaf required";
+            return -1;
+        }
+        // an unknown leaf would be accepted here and crash the config
+        // re-apply on the next reload — validate against the tree
+        if (!Config::animationTree()->nodeExists(leaf)) {
+            g_configError = "hl-animation-add!: unknown animation leaf '" + std::string(leaf) + "'";
             return -1;
         }
         const std::string cv = curve ? curve : "";
         const std::string sv = style ? style : "";
         if (!cv.empty() && !Animation::mgr()->bezierExists(cv) && !Animation::mgr()->springExists(cv)) {
-            g_configError = "hl-animation: curve '" + cv + "' is not defined (declare it with hl-curve)";
+            g_configError = "hl-animation-add!: curve '" + cv + "' is not defined (declare it with hl-curve-add!)";
             return -1;
         }
         if (!sv.empty()) {
@@ -3478,11 +3510,11 @@ namespace Config::Scheme {
             return -1;
         auto* mgr = sc<Lua::CConfigManager*>(Config::mgr().get());
         if (!mgr || !mgr->isFirstLaunch()) {
-            g_configError = "hl-permission: permission rules only take effect at startup; set them in your config and restart";
+            g_configError = "hl-permission-add!: permission rules only take effect at startup; set them in your config and restart";
             return -1;
         }
         if (!g_pDynamicPermissionManager) {
-            g_configError = "hl-permission: permission manager unavailable";
+            g_configError = "hl-permission-add!: permission manager unavailable";
             return -1;
         }
         const std::string           t = typeStr ? typeStr : "";
@@ -3506,7 +3538,7 @@ namespace Config::Scheme {
         else if (m == "deny")
             mode = PERMISSION_RULE_ALLOW_MODE_DENY;
         if (type == PERMISSION_TYPE_UNKNOWN || mode == PERMISSION_RULE_ALLOW_MODE_UNKNOWN) {
-            g_configError = "hl-permission: unknown type '" + t + "' or mode '" + m + "'";
+            g_configError = "hl-permission-add!: unknown type '" + t + "' or mode '" + m + "'";
             return -1;
         }
         g_pDynamicPermissionManager->addConfigPermissionRule(binary ? binary : "", type, mode);
@@ -3678,7 +3710,7 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
         if (!ws || !*ws) {
-            g_configError = "hl-workspace-rule: workspace selector required";
+            g_configError = "hl-workspace-rule-add!: workspace selector required";
             return -1;
         }
         g_curWorkspaceRule = Config::CWorkspaceRule{};
@@ -4356,7 +4388,7 @@ namespace Config::Scheme {
             try {
                 col = CHyprColor(std::stoull(cs.starts_with("0x") || cs.starts_with("0X") ? cs.substr(2) : cs, nullptr, 16));
             } catch (...) {
-                g_configError = "hl-notify: bad color (expected 0xAARRGGBB)";
+                g_configError = "hl-notify!: bad color (expected 0xAARRGGBB)";
                 return Sfalse;
             }
         }
@@ -4826,10 +4858,15 @@ namespace Config::Scheme {
 
     static std::string writeSchemeFile(const char* name, const char* content) {
         const char* runtime = getenv("XDG_RUNTIME_DIR");
-        const auto  path   = std::filesystem::path(runtime ? runtime : "/tmp") / name;
+        // unique per process: two compositor instances sharing XDG_RUNTIME_DIR
+        // would otherwise race on the same file mid-read
+        const auto  path = std::filesystem::path(runtime ? runtime : "/tmp") /
+            (std::string(name) + "." + std::to_string(getpid()));
 
-        std::ofstream out(path);
-        out << content;
+        std::ofstream out(path, std::ios::binary);
+        // explicit length: content is a char* and would stop at an embedded NUL
+        out.write(content, std::strlen(content));
+        out.close();
 
         return path.string();
     }
@@ -4869,9 +4906,43 @@ namespace Config::Scheme {
         abort();
     }
 
+    static SP<IPC::Socket1::SCommand> g_schemeIpcCommand;
+    static Hyprutils::Signal::CHyprSignalListener g_ipcReadyListener;
+
+    // hyprctl scheme '<forms>' — evaluate scheme in the compositor. The
+    // registration is deferred to the ready event when the plugin loads
+    // during the EARLY config load (before STAGE_LATE creates Socket1) —
+    // a silent `if (sock())` skip here once cost a whole debugging day.
+    static void registerIpc() {
+        if (g_schemeIpcCommand)
+            return;
+        if (!g_pEventLoopManager || !IPC::Socket1::sock()) {
+            // a dedicated static, NOT g_lifecycleListeners: the vector
+            // reallocates on growth, destroying RAII listeners mid-flight
+            if (!g_ipcReadyListener)
+                g_ipcReadyListener = Event::bus()->m_events.ready.listen([] { registerIpc(); });
+            return;
+        }
+        g_schemeIpcCommand = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
+            .name    = "scheme",
+            .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+            .handler = [](const IPC::Socket1::SRequest& req) {
+                auto code = req.command.substr(req.command.find_first_of(' ') + 1);
+                watchdogEnter("eval");
+                const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                watchdogExit();
+                std::string out;
+                if (Sstringp(r)) {
+                    for (iptr i = 0; i < Sstring_length(r); ++i)
+                        out += (char)Sstring_ref(r, i);
+                }
+                return IPC::Socket1::SResponse(out);
+            }});
+        LOG(Log::INFO, "[scheme] ipc command registered");
+    }
+
     // teardown for plugin unload: everything pointing into this .so must be
     // unregistered before hyprpm dlcloses it
-    static SP<IPC::Socket1::SCommand> g_schemeIpcCommand;
     static Hyprutils::Signal::CHyprSignalListener g_reloadListener;
 
     void shutdown() {
@@ -4879,6 +4950,7 @@ namespace Config::Scheme {
             IPC::Socket1::sock()->unregisterCommand(g_schemeIpcCommand);
             g_schemeIpcCommand.reset();
         }
+        g_ipcReadyListener.reset();
         g_reloadListener.reset();
         g_lifecycleListeners.clear();
         Layouts::clear();
@@ -4935,6 +5007,7 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-monitor-event-listen", (void*)hlSchemeMonitorListen);
         Sregister_symbol("hl-scheme-workspace-change-id", (void*)hlWorkspaceChangeId);
         Sregister_symbol("hl-scheme-window-fullscreen-toggle", (void*)hlSchemeWindowFullscreenToggle);
+        Sregister_symbol("hl-scheme-window-fullscreen-set", (void*)hlSchemeWindowFullscreenSet);
         Sregister_symbol("hl-scheme-window-fullscreen-mode", (void*)hlSchemeWindowFullscreenMode);
         Sregister_symbol("hl-scheme-focus-workspace", (void*)hlSchemeFocusWorkspace);
         Sregister_symbol("hl-scheme-window-float-act", (void*)hlSchemeWindowFloatAct);
@@ -4960,6 +5033,8 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-window-clear-tags", (void*)hlSchemeWindowClearTags);
         Sregister_symbol("hl-scheme-toggle-swallow", (void*)hlSchemeToggleSwallow);
         Sregister_symbol("hl-scheme-group-toggle", (void*)hlSchemeGroupToggle);
+        Sregister_symbol("hl-scheme-group-set", (void*)hlSchemeGroupSet);
+        Sregister_symbol("hl-scheme-monitor-set-special", (void*)hlSchemeMonitorSetSpecial);
         Sregister_symbol("hl-scheme-group-cycle", (void*)hlSchemeGroupCycle);
         Sregister_symbol("hl-scheme-group-index", (void*)hlSchemeGroupIndex);
         Sregister_symbol("hl-scheme-group-move-window", (void*)hlSchemeGroupMoveWindow);
@@ -5087,12 +5162,12 @@ namespace Config::Scheme {
         Sregister_symbol("hl-monitor-same", (void*)hlMonitorSame);
         Sregister_symbol("hl-monitor-selector", (void*)hlMonitorSelector);
         Sregister_symbol("hl-window-fullscreen-handler", (void*)hlWindowFullscreenHandler);
-        Sregister_symbol("hl-notify", (void*)hlNotify);
+        Sregister_symbol("hl-notify!", (void*)hlNotify);
         Sregister_symbol("hl-timer-set-enabled", (void*)hlTimerSetEnabled);
         Sregister_symbol("hl-timer-enabled", (void*)hlTimerEnabled);
         Sregister_symbol("hl-timer-set-timeout", (void*)hlTimerSetTimeout);
-        Sregister_symbol("hl-exec-raw", (void*)hlSchemeExecRaw);
-        Sregister_symbol("hl-exec-with-rules", (void*)hlSchemeExecWithRules);
+        Sregister_symbol("hl-exec!", (void*)hlSchemeExecRaw);
+        Sregister_symbol("hl-exec-shell-with-rules!", (void*)hlSchemeExecWithRules);
         Sregister_symbol("hl-scheme-gesture", (void*)hlSchemeGesture);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
@@ -5154,23 +5229,7 @@ namespace Config::Scheme {
             // plumbing that shutdown() removed
             if (!attachInterp())
                 return;
-            if (g_pEventLoopManager && IPC::Socket1::sock()) {
-                g_schemeIpcCommand = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
-                    .name    = "scheme",
-                    .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
-                    .handler = [](const IPC::Socket1::SRequest& req) {
-                        auto code = req.command.substr(req.command.find_first_of(' ') + 1);
-                        watchdogEnter("eval");
-                        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
-                        watchdogExit();
-                        std::string out;
-                        if (Sstringp(r)) {
-                            for (iptr i = 0; i < Sstring_length(r); ++i)
-                                out += (char)Sstring_ref(r, i);
-                        }
-                        return IPC::Socket1::SResponse(out);
-                    }});
-            }
+            registerIpc();
             g_reloadListener = Event::bus()->m_events.config.reloaded.listen([] { reloadScheme(); });
             g_lifecycleListeners.emplace_back(Event::bus()->m_events.start.listen([] {
                 g_startSeen = true;
@@ -5243,22 +5302,7 @@ namespace Config::Scheme {
         // hyprctl scheme '<forms>' — evaluate scheme in the compositor.
         // direct registration is safe here: verified working (the deferred
         // doLater variant never fired its callback).
-        if (g_pEventLoopManager && IPC::Socket1::sock())
-            g_schemeIpcCommand = IPC::Socket1::sock()->registerCommand(IPC::Socket1::SCommand{
-                .name    = "scheme",
-                .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
-                .handler = [](const IPC::Socket1::SRequest& req) {
-                    auto code = req.command.substr(req.command.find_first_of(' ') + 1);
-                    watchdogEnter("eval");
-                        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
-                        watchdogExit();
-                    std::string out;
-                    if (Sstringp(r)) {
-                        for (iptr i = 0; i < Sstring_length(r); ++i)
-                            out += (char)Sstring_ref(r, i);
-                    }
-                    return IPC::Socket1::SResponse(out);
-                }});
+        registerIpc();
         // watch the file for edits (skipped during --verify: no event loop yet)
         if (g_pEventLoopManager)
             setupWatch();
