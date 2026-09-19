@@ -5,4 +5,4 @@
 ;; exist until it is loaded).
 (hl-state-set! 'harness 'loaded)
 
-(hl-bind "SUPER" "Q" (lambda () (hl-exec "foot")))
+(hl-bind (kbd "s-q") (lambda () (hl-exec "foot")))

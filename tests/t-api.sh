@@ -238,18 +238,26 @@ idok '(hl-define-layout "api-layout" (lambda (count W H wins) (quote ())))'
 noerr '(hl-layout-msg "noop")'
 
 # ---- submaps ----------------------------------------------------------------
-idok '(hl-submap "api-sub" (lambda () (hl-bind "" "g" (lambda () #f))))'
+idok '(hl-submap "api-sub" (lambda () (hl-bind (kbd "g") (lambda () #f))))'
 ok '(hl-submap-activate! "api-sub")'
 val '(hl-current-submap)' '"api-sub"'
 ok '(hl-submap-exit!)'
 val '(hl-current-submap)' '""'
 
 # ---- binds ------------------------------------------------------------------
-idok '(hl-bind "SUPER" "F13" (lambda () #f))'
-idok '(hl-bind (kbd "C-M-F15") (lambda () #f))'
-idok '(hl-bind "SUPER" "F16" (lambda () #f) (quote release) #t (quote description) "api")'
-ok '(let ((b (hl-bind "SUPER" "F18" (lambda () #f)))) (hl-unbind b))'
-ok '(let ((b (hl-bind "SUPER" "F19" (lambda () #f)))) b (hl-unbind-key "SUPER F19"))'
+idok '(hl-bind (kbd "s-<F13>") (lambda () #f))'
+idok '(hl-bind (kbd "C-M-<F15>") (lambda () #f))'
+idok '(hl-bind (kbd "s-<F16>") (lambda () #f) (quote release) #t (quote description) "api")'
+ok '(let ((b (hl-bind (kbd "s-<F18>") (lambda () #f)))) (hl-unbind b))'
+ok '(let ((b (hl-bind (kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key "SUPER F19"))'
+# function keys use emacs' bracketed notation; Hyprland matches key names
+# case-insensitively, so a lowercase emacs spelling resolves the same keysym
+ok '(let ((b (hl-bind (kbd "<f24>") (lambda () #f)))) b (hl-unbind-key "f24"))'
+# modless + literal forms of the explicit token list (regression: hl-bind
+# used to auto-dispatch a two-string shorthand; the LIST is the only form)
+idok '(hl-bind (kbd "<F20>") (lambda () #f))'
+idok "(hl-bind (quote (\"SUPER\" \"F21\")) (lambda () #f))"
+idok '(hl-bind (hl-kbd "SUPER+F22") (lambda () #f))'
 
 # ---- timers -----------------------------------------------------------------
 idok '(hl-after 5000 (lambda () #f))'

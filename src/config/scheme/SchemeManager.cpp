@@ -684,21 +684,17 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         (errorf 'hl-bind "bind ~a rejected, see compositor log" tokens)
         (hl--register id thunk))))
 
-;; hl-bind dispatches on the first argument:
-;;   (hl-bind '("CTRL" "ALT" "a") THUNK . OPTS)  — a list of key tokens (from kbd/hl-kbd)
-;;   (hl-bind MODS KEY THUNK . OPTS)             — two strings
-(define (hl-bind . args)
-  (if (and (pair? (car args)) (string? (car (car args))) (> (length (car args)) 1))
-      ;; list form: (kbd/hl-kbd result) thunk . opts — pass the list directly
-      (apply hl--bind-impl (car args) (cdr args))
-      ;; two-string form: mods key thunk . opts → build the token list; an
-      ;; empty mods string contributes NO token (an empty token would be
-      ;; rejected as an unknown key — every modless bind, e.g. inside
-      ;; submaps, goes through this path)
-      (apply hl--bind-impl (if (string=? (car args) "")
-                               (list (cadr args))
-                               (list (car args) (cadr args)))
-             (cddr args))))
+;; hl-bind is the one way to register a bind: TOKENS is a list of key
+;; tokens — the modifiers first, then the key. Build it with a helper:
+;;   (hl-bind (kbd "C-M-a") THUNK . OPTS)        — emacs syntax
+;;   (hl-bind (hl-kbd "SUPER+A") THUNK . OPTS)   — hyprland syntax
+;; or write the list out literally:
+;;   (hl-bind '("SUPER" "Q") THUNK . OPTS)
+;; A modless key is still a list: (kbd "g") → ("g"). There is no
+;; two-string shorthand in the core API — define your own wrapper on top
+;; if you want one (see the wiki, binds).
+(define (hl-bind tokens thunk . opts)
+  (apply hl--bind-impl tokens thunk opts))
 
 ;; ---- key specification helpers -----------------------------------------------
 ;; (kbd "C-M-a")      — emacs syntax → (mods . key) pair for hl-bind

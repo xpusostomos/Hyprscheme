@@ -195,6 +195,24 @@ dispatchers.md RESTRUCTURED to Scheme-first: every Lua dispatcher table
   Scheme-equivalents note beneath each; all naming is current
   (! convention, *-toggle!, *-set!, *-add!, *-rule-add!, *-action!).
 
+== HL-BIND LIST-ONLY API (implemented + verified 2026-09-19) ==
+hl-bind dropped the runtime shape-dispatch: the ONLY calling convention
+  is (hl-bind TOKENS THUNK . OPTS) where TOKENS is a list of key tokens
+  (mods first, key last). kbd/hl-kbd build the list; users who want the
+  old two-string shorthand define it on top (binds.md shows a wrapper).
+  The list-form edge case (kbd "C-M-a") that the length>1 heuristic put
+  through the two-string branch is gone with the branch. t-api.sh covers
+  the literal list, kbd single-key and bracketed-key forms.
+Tests use emacs-canonical function-key spelling (kbd "s-<F16>");
+  verified against Hyprland's XKB_KEYSYM_CASE_INSENSITIVE resolution —
+  "<f16>" and "F16" bind the same keysym (src/keybinds/Key.cpp).
+Docs (binds, submaps, bind-flags, code-snippets, device-*, layouts,
+  dispatchers, scheme-utilities, naming-conventions) swept to the list
+  form; kbd examples corrected to the actual token lists (they showed
+  (mods . key) pairs and claimed <f1> -> "F1"; the token is "f1").
+Bounded-value APIs document the schemey form only: directions are
+  'left/'right/'up/'down (strings still parse, undocumented).
+
 == REMAINING SMALL GAPS ==
 Every toggle API should also have an explicit set form taking a boolean
   (the hl-window-workspace-set! convention). Already settable:
