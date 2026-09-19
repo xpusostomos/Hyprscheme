@@ -22,6 +22,8 @@
 #include <src/pointer/PointerManager.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/desktop/state/WindowState.hpp>
+#include <src/desktop/view/Group.hpp>
+#include <src/desktop/view/window/WindowPresentation.hpp>
 #include <src/desktop/state/ViewState.hpp>
 #include <src/desktop/history/WindowHistoryTracker.hpp>
 #include <src/desktop/history/WorkspaceHistoryTracker.hpp>
@@ -474,6 +476,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-window-fullscreen-mode (foreign-procedure "hl-scheme-window-fullscreen-mode" (int) int))
 (define c-hl-window-hidden (foreign-procedure "hl-scheme-window-hidden" (int) int))
 (define c-hl-window-pinned (foreign-procedure "hl-scheme-window-pinned" (int) int))
+(define c-hl-window-pseudo-query (foreign-procedure "hl-scheme-window-pseudo-query" (int) int))
+(define c-hl-window-maximized-query (foreign-procedure "hl-scheme-window-maximized-query" (int) int))
+(define c-hl-window-in-group (foreign-procedure "hl-scheme-window-in-group" (int) int))
+(define c-hl-window-group-denied (foreign-procedure "hl-scheme-window-group-denied" (int) int))
+(define c-hl-window-group-locked (foreign-procedure "hl-scheme-window-group-locked" (int) int))
+(define c-hl-groups-locked (foreign-procedure "hl-scheme-groups-locked" () int))
+(define c-hl-window-group-lock (foreign-procedure "hl-scheme-window-group-lock" (int int) int))
+(define c-hl-window-prop (foreign-procedure "hl-scheme-window-prop" (int string) scheme-object))
 (define c-hl-window-initial-class (foreign-procedure "hl-scheme-window-initial-class" (int) scheme-object))
 (define c-hl-window-initial-title (foreign-procedure "hl-scheme-window-initial-title" (int) scheme-object))
 
@@ -601,13 +611,10 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl--wid w)
   (if w (hl-window-id w) -1))
 
-(define (hl--togact a)
-  (case a
-    ((toggle) 0)
-    ((on enable) 1)
-    ((off disable) 2)
-    ((#f) 0)
-    (else (if (number? a) a 0))))
+;; optional-boolean convention shared by every toggle/set action:
+;; no argument → 0 (toggle), #t → 1 (on), #f → 2 (off)
+(define (hl--bool-act args)
+  (if (null? args) 0 (if (car args) 1 2)))
 
 (define (hl--dir d)
   (if (symbol? d) (symbol->string d) d))
@@ -635,7 +642,17 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if entry (cdr entry) #f)))
 
 ;; eBindFlags bits from src/keybinds/Bind.hpp
-(define (hl--bind-flags alist)
+;; option → eBindFlags bit, mirrored from upstream Keybinds/Bind.hpp
+;; (BIND_FLAG_* = 1 << n). Derived bits are added separately in hl--bind-flags:
+;; click/drag imply RELEASE, a device option implies DEVICE_INCLUSIVE, and the
+;; key name "catchall" implies CATCH_ALL (upstream LuaBindingsToplevel.cpp).
+(define hl--flag-bits
+  '((locked . 1) (release . 2) (repeat . 4) (long-press . 8)
+    (non-consuming . 16) (auto-consuming . 32) (transparent . 64)
+    (ignore-mods . 128) (dont-inhibit . 256) (click . 512) (drag . 1024)
+    (submap-universal . 2048) (allow-input-capture . 4096) (mouse . 32768)))
+
+(define (hl--bind-flags alist key)
   (let ((click (hl--opt alist 'click))
         (drag  (hl--opt alist 'drag))
         (devices (hl--opt alist 'devices)))
@@ -644,34 +661,17 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (when (and (hl--opt alist 'mouse)
                (or (hl--opt alist 'repeat) (hl--opt alist 'locked) (hl--opt alist 'release)))
       (errorf 'hl-bind "mouse is exclusive with repeat/locked/release"))
-    (+ (if (hl--opt alist 'release) 2 0)
-       (if (hl--opt alist 'repeat) 4 0)
-       (if (hl--opt alist 'locked) 1 0)
-       (if (hl--opt alist 'non-consuming) 16 0)
-       (if (hl--opt alist 'long-press) 8 0)
-       (if (hl--opt alist 'transparent) 64 0)
-       (if (hl--opt alist 'ignore-mods) 128 0)
-       (if (hl--opt alist 'mouse) 32768 0)
-       (if (or click drag) 2 0)              ; click/drag imply release
-       (if click 512 0)
-       (if drag 1024 0)
-       (if (hl--opt alist 'auto-consuming) 32 0)
-       (if (hl--opt alist 'dont-inhibit) 256 0)
-       (if (hl--opt alist 'submap-universal) 2048 0)
-       (if (hl--opt alist 'allow-input-capture) 4096 0)
-       ;; device-scoped binds default to INCLUSIVE (upstream semantics):
-       ;; with 'devices set and no explicit 'device-inclusive #f, the flag is on
-       (if (or (and devices (not (hl--opt alist 'device-inclusive)))
-               (hl--opt alist 'device-inclusive))
-           8192
-           0))))
+    (+ (if (or click drag) 2 0)                    ; click/drag imply release: upstream also sets BIND_FLAG_RELEASE for them
+       (if (or devices (hl--opt alist 'device-inclusive)) 8192 0)  ; device binds are inclusive by default, as upstream (device option present ⇒ inclusive)
+       (if (equal? key "catchall") 16384 0)      ; upstream: key "catchall" ⇒ BIND_FLAG_CATCH_ALL
+       (apply + (map (lambda (entry) (if (hl--opt alist (car entry)) (cdr entry) 0))
+                    hl--flag-bits)))))
 
 (define (hl--bind-impl tokens thunk . opts)
   (let* ((alist (hl--pairs opts))
          (key (car (reverse tokens)))
          (id (c-hl-bind tokens
-                         (+ (hl--bind-flags alist)
-                            (if (equal? key "catchall") 16384 0))
+                         (hl--bind-flags alist key)
                          (or (hl--opt alist 'description) "")
                          (let ((ds (hl--opt alist 'devices)))
                            (if (list? ds)
@@ -895,8 +895,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (= 0 (c-hl-window-focus (hl-window-id w))))
 
 ;; act: 'toggle (default), 'on, 'off
-(define (hl-window-float w . opt)
-  (= 0 (c-hl-window-float-act (hl--wid w) (hl--togact (if (null? opt) 'toggle (car opt))))))
+(define (hl-window-float-set! w . on?)
+  (= 0 (c-hl-window-float-act (hl--wid w) (hl--bool-act on?))))
 
 (define (hl-window-workspace-set! w ws)
   (= 0 (c-hl-window-move-to-workspace (hl--wid w) (hl--ws-arg ws))))
@@ -952,21 +952,15 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (= 0 (c-hl-window-resize-px (hl--wid w) (exact->inexact width) (exact->inexact height)
          (if (null? opt) 0 (if (memq (car opt) '(relative rel)) 1 0)))))
 
-(define (hl-window-move-xy! w x y . opt)
+(define (hl-window-position-set! w x y . opt)
   (= 0 (c-hl-window-move-px (hl--wid w) (exact->inexact x) (exact->inexact y)
          (if (null? opt) 0 (if (memq (car opt) '(relative rel)) 1 0)))))
 
-(define (hl-window-pin-toggle! w)
-  (= 0 (c-hl-window-pin-act (hl--wid w) (hl--togact 'toggle))))
+(define (hl-window-pinned-set! w . on?)
+  (= 0 (c-hl-window-pin-act (hl--wid w) (hl--bool-act on?))))
 
-(define (hl-window-pinned-set! w on?)
-  (= 0 (c-hl-window-pin-act (hl--wid w) (hl--togact (if on? 'on 'off)))))
-
-(define (hl-window-pseudo-toggle! w)
-  (= 0 (c-hl-window-pseudo (hl--wid w) (hl--togact 'toggle))))
-
-(define (hl-window-pseudo-set! w on?)
-  (= 0 (c-hl-window-pseudo (hl--wid w) (hl--togact (if on? 'on 'off)))))
+(define (hl-window-pseudo-set! w . on?)
+  (= 0 (c-hl-window-pseudo (hl--wid w) (hl--bool-act on?))))
 
 (define (hl-window-kill! w)
   (= 0 (c-hl-window-kill (hl--wid w))))
@@ -992,11 +986,15 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; ---- actions: groups --------------------------------------------------------
 
-(define (hl-group-toggle! w)
-  (= 0 (c-hl-group-toggle (hl--wid w))))
+;; W is a window (or #f for the active window); absent ON? → the dedicated
+;; C++ membership toggle, #t/#f → explicit set. Getter: (hl-window-group? w).
+(define (hl-window-group-set! w . on?)
+  (if (null? on?)
+      (= 0 (c-hl-group-toggle (hl--wid w)))
+      (= 0 (c-hl-group-set (hl--wid w) (if (car on?) 1 0)))))
 
-(define (hl-group-set! w on?)
-  (= 0 (c-hl-group-set (hl--wid w) (if on? 1 0))))
+(define (hl-window-group? w)
+  (= 1 (c-hl-window-in-group (hl-window-id w))))
 
 (define (hl-group-cycle! w . opt)
   (= 0 (c-hl-group-cycle (hl--wid w) (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 0)))))
@@ -1007,12 +1005,21 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-group-window-move-next! w . opt)
   (= 0 (c-hl-group-move-window (hl--wid w) (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 0)))))
 
-;; act: 'toggle/'on/'off
-(define (hl-group-lock! act)
-  (= 0 (c-hl-group-lock (hl--togact act))))
+;; GLOBAL group lock: locks all groups compositor-wide (upstream lockGroups —
+;; there is no window involved). Getter: (hl-groups-locked?).
+(define (hl-groups-lock-set! . on?)
+  (= 0 (c-hl-group-lock (hl--bool-act on?))))
 
-(define (hl-group-lock-active! act)
-  (= 0 (c-hl-group-lock-active (hl--togact act))))
+(define (hl-groups-locked?)
+  (= 1 (c-hl-groups-locked)))
+
+;; per-group lock: the group of window W (#f = active window); absent ON? →
+;; toggle, #t/#f → set. Getter: (hl-window-group-lock? w).
+(define (hl-window-group-lock-set! w . on?)
+  (= 0 (c-hl-window-group-lock (hl--wid w) (hl--bool-act on?))))
+
+(define (hl-window-group-lock? w)
+  (= 1 (c-hl-window-group-locked (hl-window-id w))))
 
 (define (hl-window-group-move-in! w dir)
   (= 0 (c-hl-window-into-group (hl--wid w) (hl--dir dir))))
@@ -1023,9 +1030,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-group-move-in-or-create! w dir)
   (= 0 (c-hl-window-into-or-create-group (hl--wid w) (hl--dir dir))))
 
-(define (hl-window-deny-from-group! w . opt)
-  (= 0 (c-hl-window-deny-from-group (hl--wid w)
-         (hl--togact (if (null? opt) 'toggle (car opt))))))
+(define (hl-window-deny-from-group-set! w . on?)
+  (= 0 (c-hl-window-deny-from-group (hl--wid w) (hl--bool-act on?))))
 
 ;; ---- actions: workspaces and monitors ---------------------------------------
 
@@ -1035,12 +1041,33 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-workspace-monitor-set! ws mon)
   (= 0 (c-hl-workspace-move-monitor (hl--ws-arg ws) (hl--mon-arg mon))))
 
-(define (hl-workspace-special-toggle! ws)
-  (= 0 (c-hl-workspace-toggle-special (hl--ws-arg ws))))
+(define (hl--special-name s)
+  ;; normalize a special-workspace name/selector to its bare name, so an
+  ;; open/close comparison survives a leading "special:" on either side
+  (if (and (> (string-length s) 8) (string=? (substring s 0 8) "special:"))
+      (substring s 8 (string-length s))
+      s))
 
-;; explicit set: opens WS (a special workspace name or handle, created when
-;; missing) on MON; #f closes whatever special workspace is open there
-(define (hl-monitor-special-workspace-set! mon ws)
+;; WS . ON? — absent toggles the named special workspace on the FOCUSED monitor
+;; (the C++ toggle creates it on demand); #t/#f force open/close through the
+;; same toggle when the focused monitor's active special workspace already
+;; equals/differs from the target.
+(define (hl-workspace-special-set! ws . on?)
+  (if (null? on?)
+      (= 0 (c-hl-workspace-toggle-special (hl--ws-arg ws)))
+      (let* ((mon (hl-active-monitor))
+             (active (and mon (hl-monitor-active-special-workspace mon)))
+             (cur (and active (hl--special-name (hl-workspace-name active))))
+             (target (hl--special-name (hl--ws-arg ws))))
+        (if (eqv? (car on?) (and cur (string=? cur target)))
+            0
+            (= 0 (c-hl-workspace-toggle-special (hl--ws-arg ws)))))))
+
+;; explicit monitor-scoped set: opens WS (a special workspace name or handle,
+;; created when missing) on MON; #f closes whatever special workspace is open
+;; there. The workspace must be named — a closed monitor keeps no record of its
+;; last special workspace, so there is no toggling needing no argument.
+(define (hl-monitor-workspace-special-set! mon ws)
   (= 0 (c-hl-monitor-set-special (hl--mon-arg mon) (if ws (hl--ws-arg ws) ""))))
 
 (define (hl-monitor-swap! mon1 mon2)
@@ -1070,8 +1097,10 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (= 0 (c-hl-force-renderer-reload)))
 
 ;; act: 'toggle/'on/'off; mon: #f (all) or a monitor handle/name
-(define (hl-dpms act . mon)
-  (= 0 (c-hl-dpms (hl--togact act) (if (null? mon) "" (hl--mon-arg (car mon))))))
+;; MON . ON? — MON is a monitor (or #f for all); absent meaning of ON? is
+;; toggle, #t on, #f off
+(define (hl-monitor-power-set! mon . on?)
+  (= 0 (c-hl-dpms (hl--bool-act on?) (if mon (hl--mon-arg mon) ""))))
 
 (define (hl-force-idle! seconds)
   (= 0 (c-hl-force-idle (exact->inexact seconds))))
@@ -1462,7 +1491,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-monitor-mode m)
   (c-hl-monitor-mode (hl-monitor-id m)))
 
-(define (hl-monitor-dpms? m)
+(define (hl-monitor-power? m)
   (eq? (c-hl-monitor-dpms (hl-monitor-id m)) #t))
 
 (define (hl-monitor-vrr? m)
@@ -1552,10 +1581,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; ---- timer handles --------------------------------------------------------------
 ;; hl-after/hl-repeat return timer ids; these control them afterwards
-(define (hl-timer-set-enabled id enabled)
-  (if (= 0 (c-hl-timer-set-enabled (exact->inexact id) (if enabled 1 0)))
+;; absent → toggle (via the enabled? query); #t/#f → explicit set
+(define (hl-timer-enabled-set! id . on?)
+  (if (= 0 (c-hl-timer-set-enabled (exact->inexact id)
+                                   (if (if (null? on?) (not (hl-timer-enabled? id)) (car on?)) 1 0)))
       #t
-      (errorf 'hl-timer-set-enabled "unknown timer")))
+      (errorf 'hl-timer-enabled-set! "unknown timer")))
 (define (hl-timer-enabled? id)
   (= 1 (c-hl-timer-enabled (exact->inexact id))))
 (define (hl-timer-set-timeout id ms)
@@ -1699,18 +1730,17 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; toggles; modes mirror Fullscreen::eFullscreenMode (1 maximized, 2 fullscreen)
 ;; optional second arg = mode (default 2); (hl-window-fullscreen w 1) maximizes
 ;; mode-aware toggle: mode 2 = fullscreen, 1 = maximized
-(define (hl-window-fullscreen-toggle! w . mode)
-  (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) (if (null? mode) 2 (car mode)))))
+;; absent → the dedicated C++ fullscreen toggle (fullscreen flavour);
+;; #t/#f → explicit set
+(define (hl-window-fullscreen-set! w . on?)
+  (if (null? on?)
+      (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) 2))
+      (= 0 (c-hl-window-fullscreen-set (hl--wid w) (if (car on?) 2 0)))))
 
-;; explicit set: #t fullscreens, #f restores
-(define (hl-window-fullscreen-set! w on?)
-  (= 0 (c-hl-window-fullscreen-set (hl--wid w) (if on? 2 0))))
-
-(define (hl-window-maximize-toggle! w)
-  (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) 1)))
-
-(define (hl-window-maximized-set! w on?)
-  (= 0 (c-hl-window-fullscreen-set (hl--wid w) (if on? 1 0))))
+(define (hl-window-maximized-set! w . on?)
+  (if (null? on?)
+      (= 0 (c-hl-window-fullscreen-toggle (hl--wid w) 1))
+      (= 0 (c-hl-window-fullscreen-set (hl--wid w) (if (car on?) 1 0)))))
 
 ;; explicit state: (internal-mode client-mode layout-aware?) — modes 0/1/2
 (define (hl-window-fullscreen-state w internal client . layout-aware)
@@ -1726,6 +1756,20 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 (define (hl-window-pinned? w)
   (= 1 (c-hl-window-pinned (hl-window-id w))))
+
+(define (hl-window-pseudo? w)
+  (= 1 (c-hl-window-pseudo-query (hl--wid w))))
+
+(define (hl-window-maximized? w)
+  (= 1 (c-hl-window-maximized-query (hl--wid w))))
+
+(define (hl-window-deny-from-group? w)
+  (= 1 (c-hl-window-group-denied (hl--wid w))))
+
+;; read back a dynamic window prop that hl-window-prop-set! writes: #t/#f for
+;; booleans, numbers for opacities and border/rounding, #f for unknown props
+(define (hl-window-prop w prop)
+  (c-hl-window-prop (hl--wid w) (hl--str prop)))
 
 (define (hl-window-initial-class w)
   (c-hl-window-initial-class (hl-window-id w)))
@@ -2620,6 +2664,140 @@ namespace Config::Scheme {
 
         const auto window = windowFromId(id);
         return (window && (window->m_state & Desktop::View::WINDOW_STATE_PINNED)) ? 1 : 0;
+    }
+
+    // ---- state queries for the toggle/set family -----------------------------
+    // Each pair (hl-window-*-set!) has a matching hl-window-*-? reading the
+    // effective state from the same source the setter writes.
+
+    // windowHandle: scheme ids 0+ map to registry windows, -1 to the focused
+    // window (same convention as actionWindow below)
+    static PHLWINDOW windowFromSchemeId(int id) {
+        return id >= 0 ? windowFromId(id) : Desktop::focusState()->window();
+    }
+
+    static int hlSchemeWindowPseudoQuery(int id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromSchemeId(id);
+        return (window && window->layoutTarget()->isPseudo()) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowMaximizedQuery(int id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromSchemeId(id);
+        return (window && Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_MAXIMIZED) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowInGroup(int id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromSchemeId(id);
+        return (window && window->grouping().group()) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowGroupDenied(int id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromSchemeId(id);
+        if (!window)
+            return 0;
+        const auto group = window->grouping().group();
+        return (group && group->denied()) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowGroupLocked(int id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromSchemeId(id);
+        if (!window)
+            return 0;
+        const auto group = window->grouping().group();
+        return (group && group->locked()) ? 1 : 0;
+    }
+
+    static int hlSchemeGroupsLocked() {
+        if (!g_up)
+            return 0;
+        return Desktop::windowState()->groupsLocked() ? 1 : 0;
+    }
+
+    // window-scoped group lock: toggle/set the lock on the group of the given
+    // window (id 0 → focused). Mirrors upstream lockActiveGroup with the
+    // target window explicit instead of always-focused.
+    static int hlSchemeWindowGroupLock(int id, int act) {
+        if (!g_up)
+            return -1;
+        const auto window = windowFromSchemeId(id);
+        if (!window)
+            return -1;
+        const auto group = window->grouping().group();
+        if (!group)
+            return -1;
+        switch (act) {
+            case 0: group->setLocked(!group->locked()); break;
+            case 1: group->setLocked(true); break;
+            default: group->setLocked(false); break;
+        }
+        window->presentation().refreshValues();
+        return 0;
+    }
+
+    // read back the dynamic window props setProp writes: effective values
+    // (defaults included), as #t/#f for booleans, numbers for opacities and
+    // border/rounding, and #f for unknown/unsupported prop names.
+    static ptr hlSchemeWindowPropGet(int id, const char* prop) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromSchemeId(id);
+        if (!window || !prop || !*prop)
+            return Sfalse;
+        const std::string p = prop;
+        auto&             A = *window->m_ruleApplicator;
+        if (p == "opacity")
+            return Sflonum(A.alpha().value().alpha);
+        if (p == "opacity_inactive")
+            return Sflonum(A.alphaInactive().value().alpha);
+        if (p == "opacity_fullscreen")
+            return Sflonum(A.alphaFullscreen().value().alpha);
+        if (p == "border_size")
+            return Sinteger(A.borderSize().value());
+        if (p == "rounding")
+            return Sinteger(A.rounding().value());
+#define HL_READ_BOOL(NAME, CNAME)  \
+    if (p == NAME)                 \
+        return A.CNAME().value() ? Strue : Sfalse;
+        HL_READ_BOOL("allows_input", allowsInput)
+        HL_READ_BOOL("decorate", decorate)
+        HL_READ_BOOL("focus_on_activate", focusOnActivate)
+        HL_READ_BOOL("keep_aspect_ratio", keepAspectRatio)
+        HL_READ_BOOL("nearest_neighbor", nearestNeighbor)
+        HL_READ_BOOL("no_anim", noAnim)
+        HL_READ_BOOL("no_blur", noBlur)
+        HL_READ_BOOL("no_dim", noDim)
+        HL_READ_BOOL("no_focus", noFocus)
+        HL_READ_BOOL("no_max_size", noMaxSize)
+        HL_READ_BOOL("no_shadow", noShadow)
+        HL_READ_BOOL("no_glow", noGlow)
+        HL_READ_BOOL("no_wobble", noWobble)
+        HL_READ_BOOL("no_shortcuts_inhibit", noShortcutsInhibit)
+        HL_READ_BOOL("opaque", opaque)
+        HL_READ_BOOL("dim_around", dimAround)
+        HL_READ_BOOL("force_rgbx", RGBX)
+        HL_READ_BOOL("sync_fullscreen", syncFullscreen)
+        HL_READ_BOOL("immediate", tearing)
+        HL_READ_BOOL("xray", xray)
+        HL_READ_BOOL("render_unfocused", renderUnfocused)
+        HL_READ_BOOL("no_follow_mouse", noFollowMouse)
+        HL_READ_BOOL("no_screen_share", noScreenShare)
+        HL_READ_BOOL("no_vrr", noVRR)
+        HL_READ_BOOL("no_auto_hdr", noAutoHDR)
+        HL_READ_BOOL("persistent_size", persistentSize)
+        HL_READ_BOOL("stay_focused", stayFocused)
+        HL_READ_BOOL("no_xdg_drags", noXdgDrags)
+#undef HL_READ_BOOL
+        return Sfalse;
     }
 
     // ---- actions: the dispatcher surface --------------------------------------
@@ -5167,6 +5345,14 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-gesture", (void*)hlSchemeGesture);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
+        Sregister_symbol("hl-scheme-window-pseudo-query", (void*)hlSchemeWindowPseudoQuery);
+        Sregister_symbol("hl-scheme-window-maximized-query", (void*)hlSchemeWindowMaximizedQuery);
+        Sregister_symbol("hl-scheme-window-in-group", (void*)hlSchemeWindowInGroup);
+        Sregister_symbol("hl-scheme-window-group-denied", (void*)hlSchemeWindowGroupDenied);
+        Sregister_symbol("hl-scheme-window-group-locked", (void*)hlSchemeWindowGroupLocked);
+        Sregister_symbol("hl-scheme-groups-locked", (void*)hlSchemeGroupsLocked);
+        Sregister_symbol("hl-scheme-window-group-lock", (void*)hlSchemeWindowGroupLock);
+        Sregister_symbol("hl-scheme-window-prop", (void*)hlSchemeWindowPropGet);
         Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
         Sregister_symbol("hl-scheme-window-initial-title", (void*)hlSchemeWindowInitialTitle);
         Sregister_symbol("hl-scheme-window-x11", (void*)hlSchemeWindowX11);

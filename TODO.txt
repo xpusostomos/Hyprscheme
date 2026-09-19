@@ -213,16 +213,64 @@ Docs (binds, submaps, bind-flags, code-snippets, device-*, layouts,
 Bounded-value APIs document the schemey form only: directions are
   'left/'right/'up/'down (strings still parse, undocumented).
 
+== SETTER/GETTER AUDIT + ROUND 2 (implemented + verified 10/10) ==
+Follow-up to the toggle/set normalization (2026-09-19), per audit:
+New getters (each pairs a -set! with a same-name ?-predicate):
+  - hl-window-pseudo? (window->layoutTarget()->isPseudo())
+  - hl-window-maximized? (fullscreen internal mode == FSMODE_MAXIMIZED)
+  - hl-window-group?    (window in a group; membership)
+  - hl-window-deny-from-group? (its group's denied() state — upstream
+    denyWindowFromGroup flips the group's denied flag)
+  - hl-window-group-lock? (its group's locked())
+  - hl-groups-locked?   (global groupsLocked(), windowState)
+Renames + scoping:
+  - hl-group-set! -> hl-window-group-set!  (window mandatory, #f=active)
+  - hl-group-lock-set! -> hl-groups-lock-set!  (GLOBAL all-groups switch —
+    upstream lockGroups; getter hl-groups-locked?)
+  - hl-group-lock-active-set! -> hl-window-group-lock-set!  (window-scoped,
+    new C++ hl-scheme-window-group-lock; upstream lockActiveGroup; getter
+    hl-window-group-lock?)
+  - hl-window-move-xy! -> hl-window-position-set!
+  - hl-monitor-dpms? -> hl-monitor-power?   (pairs hl-monitor-power-set!)
+hl-window-prop getter added: reads back setProp props as #t/#f / number for
+  opacity* (SAlphaValue), border_size, rounding, and the boolean family;
+  #f for unsupported (border colors not read back yet). New C++ needs the
+  Group.hpp / WindowPresentation.hpp includes (incomplete types otherwise).
+Also: the hl-window -set!/getter pairs are now consistent except
+  hl-workspace-id-set! vs hl-workspace-number (id/number naming) — left
+  as-is.
+
 == REMAINING SMALL GAPS ==
-Every toggle API should also have an explicit set form taking a boolean
-  (the hl-window-workspace-set! convention). Already settable:
-  hl-window-float (toggle/on/off), hl-group-lock/lock-active (toggle/on/
-  off), hl-dpms (on/off), hl-timer-set-enabled. Toggle-only, needing set
-  forms: hl-window-fullscreen, hl-window-maximize, hl-window-pseudo,
-  hl-window-pin, hl-group-toggle, hl-workspace-toggle-special (open/close
-  instead of toggle) — C++ act variants mostly exist (pin-act, float-act,
-  pseudo and fullscreen-toggle already take an action int), so this is
-  mostly Scheme wrapper surface plus naming.
+Binds: flat-option API cannot express upstream's device { inclusive = false }
+  (LuaBindingsToplevel.cpp:192 — inclusive defaults true, but explicit false
+  is honored upstream; our 'device-inclusive #f is indistinguishable from
+  absence). Device binds are always inclusive for now.
+Resolved 2026-09-19 — TOGGLE/SET NORMALIZATION (implemented + verified 10/10):
+The toggle/set surface is now ONE convention everywhere: **a `-set!`
+function whose last optional argument is a boolean — no argument =
+toggle, #t = on, #f = off**. A single helper (hl--bool-act) replaces the
+old hl--togact ('toggle/'on/'off symbols).
+  - Group 1 collapsed: pin/pseudo/fullscreen/maximize/membership →
+    hl-window-{pinned,pseudo,fullscreen,maximized}-set!, hl-group-set!
+    (each [window] [on?]); the dedicated C++ toggles are routed through
+    when the boolean is absent (per user: use the API toggle when it
+    exists, e.g. group-toggle, fullscreen-toggle).
+  - Group 2 act-symbols → optional booleans: hl-window-float-set!,
+    hl-window-deny-from-group-set!, hl-group-lock-set!,
+    hl-group-lock-active-set!, hl-timer-enabled-set! (timer's toggle uses
+    the hl-timer-enabled? query).
+  - hl-dpms → hl-monitor-power-set! MON [ON?] (monitor-or-#f first, then
+    the boolean — the two-optional-#f ambiguity is gone).
+  - hl-monitor-special-workspace-set! → hl-monitor-workspace-special-set!
+    (unchanged shape: MON plus a workspace-or-#f target; a monitor's closed
+    special workspace keeps no name, so there is no toggle form).
+  - hl-workspace-special-toggle! → hl-workspace-special-set! NAME [ON?]:
+    no arg uses the C++ toggle; #t/#f force open/close via that same toggle
+    when the focused monitor's active special workspace differs/equals
+    (verified with tests).
+  - hl-window-swallow-toggle! UNCHANGED: upstream exposes only a toggle on
+    the focused window's swallow controller (no setter, no state query), so
+    #t/#f cannot be expressed — kept as toggle!.
 
 == REMAINING SMALL GAPS ==
 - Monitor set_special (upstream mon:set_special_workspace) — we only
