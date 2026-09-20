@@ -23,6 +23,7 @@
 #include <src/desktop/state/FocusState.hpp>
 #include <src/desktop/state/WindowState.hpp>
 #include <src/desktop/view/Group.hpp>
+#include <src/desktop/view/LayerSurface.hpp>
 #include <src/desktop/view/window/WindowPresentation.hpp>
 #include <src/desktop/state/ViewState.hpp>
 #include <src/desktop/history/WindowHistoryTracker.hpp>
@@ -192,6 +193,19 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
         (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
                         (hl--guarded-run "callback" (cdr entry)))))
           (not (eq? result hl--wd-aborted))))))
+
+;; bind-callback fire: #f from the thunk DECLINES the key (upstream's
+;; ok=false auto-consuming protocol); errors and the watchdog also decline
+;; (upstream maps Lua callback errors to success=false, ConfigManager.cpp:
+;; 1418, so the two behave identically downstream). Anything else consumes.
+;; fireSchemeBind maps the result onto SBindResult{.success}.
+(define (hl--bind-fire id)
+  (let ((entry (assv id hl--binds)))
+    (if (not entry)
+        #f
+        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                        (hl--guarded-run "callback" (cdr entry)))))
+          (and (not (eq? result hl--wd-aborted)) (not (eq? result #f)))))))
 
 (define (hl--fire-str id arg)
   (let ((entry (assv id hl--binds)))
@@ -425,7 +439,10 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-window-minimize-listen (foreign-procedure "hl-scheme-window-minimize-listen" () int))
 (define c-hl-lifecycle-listen (foreign-procedure "hl-scheme-lifecycle-listen" (int) int))
 (define c-hl-config-reloaded-listen (foreign-procedure "hl-scheme-config-reloaded-listen" () int))
+(define c-hl-config-unload-listen (foreign-procedure "hl-scheme-config-unload-listen" () int))
 (define c-hl-config-props-refreshed-listen (foreign-procedure "hl-scheme-config-props-refreshed-listen" () int))
+(define c-hl-window-destroy-listen (foreign-procedure "hl-scheme-window-destroy-listen" () int))
+(define c-hl-layer-listen (foreign-procedure "hl-scheme-layer-listen" (int) int))
 (define c-hl-unbind (foreign-procedure "hl-scheme-unbind" (int) int))
 (define c-hl-unbind-key (foreign-procedure "hl-scheme-unbind-key" (string) int))
 (define c-hl-window-same (foreign-procedure "hl-scheme-window-same" (int int) int))
@@ -631,49 +648,82 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   id)
 
 ;; flat option list -> assoc list: ('release #t 'description "x")
-(define (hl--pairs l)
-  (cond
-    ((null? l) '())
-    ((null? (cdr l)) (errorf 'hl--pairs "odd option list"))
-    (else (cons (cons (car l) (cadr l)) (hl--pairs (cddr l))))))
+;; ---- plist helpers ----------------------------------------------------------
+;; The API's one convention for named fields: a flat "keyword" list
+;;   'release #t 'description "x"
+;; — the same shape Guile uses for #:keyword arguments. A MISSING value
+;; reports the DEFAULT; pass #!eof when absence must be told apart from an
+;; explicit #f (an option that was given the value #f).
 
-(define (hl--opt alist key)
-  (let ((entry (assq key alist)))
-    (if entry (cdr entry) #f)))
+(define (hl--plist-cdr l)
+  ;; (key value rest ...) → (value rest ...); a trailing bare KEY is an error
+  (let ((tail (cdr l)))
+    (if (null? tail)
+        (errorf 'hl--plist "odd plist: ~s" l)
+        tail)))
+
+(define (hl--plist-get pl key default)
+  (let loop ((l pl))
+    (if (null? l)
+        default
+        (let ((tail (hl--plist-cdr l)))
+          (if (eq? (car l) key)
+              (car tail)
+              (loop (cdr tail)))))))
+
+(define (hl--plist-has? pl key)
+  (let loop ((l pl))
+    (if (null? l)
+        #f
+        (let ((tail (hl--plist-cdr l)))
+          (if (eq? (car l) key) #t (loop (cdr tail)))))))
+
+(define (hl--plist-fold f seed pl)
+  (let loop ((l pl) (acc seed))
+    (if (null? l)
+        acc
+        (let ((tail (hl--plist-cdr l)))
+          (loop (cdr tail) (f (car l) (car tail) acc))))))
+
+;; map (k v ...) → (k (f k v) ...), consing a fresh plist
+(define (hl--plist-map f pl)
+  (let loop ((l pl))
+    (if (null? l)
+        '()
+        (let ((tail (hl--plist-cdr l)))
+          (cons (car l) (cons (f (car l) (car tail)) (loop (cdr tail))))))))
 
 ;; eBindFlags bits from src/keybinds/Bind.hpp
-;; option → eBindFlags bit, mirrored from upstream Keybinds/Bind.hpp
+;; option → eBindFlags bit, as a plist, mirrored from upstream Keybinds/Bind.hpp
 ;; (BIND_FLAG_* = 1 << n). Derived bits are added separately in hl--bind-flags:
 ;; click/drag imply RELEASE, a device option implies DEVICE_INCLUSIVE, and the
 ;; key name "catchall" implies CATCH_ALL (upstream LuaBindingsToplevel.cpp).
 (define hl--flag-bits
-  '((locked . 1) (release . 2) (repeat . 4) (long-press . 8)
-    (non-consuming . 16) (auto-consuming . 32) (transparent . 64)
-    (ignore-mods . 128) (dont-inhibit . 256) (click . 512) (drag . 1024)
-    (submap-universal . 2048) (allow-input-capture . 4096) (mouse . 32768)))
+  '(locked 1 release 2 repeat 4 long-press 8
+    non-consuming 16 auto-consuming 32 transparent 64
+    ignore-mods 128 dont-inhibit 256 click 512 drag 1024
+    submap-universal 2048 allow-input-capture 4096 mouse 32768))
 
-(define (hl--bind-flags alist key)
-  (let ((click (hl--opt alist 'click))
-        (drag  (hl--opt alist 'drag))
-        (devices (hl--opt alist 'devices)))
+(define (hl--bind-flags pl key)
+  (let ((click (hl--plist-get pl 'click #f))
+        (drag  (hl--plist-get pl 'drag #f))
+        (devices (hl--plist-get pl 'devices #f)))
     (when (and click drag)
       (errorf 'hl-bind "click and drag are exclusive"))
-    (when (and (hl--opt alist 'mouse)
-               (or (hl--opt alist 'repeat) (hl--opt alist 'locked) (hl--opt alist 'release)))
+    (when (and (hl--plist-get pl 'mouse #f)
+               (or (hl--plist-get pl 'repeat #f) (hl--plist-get pl 'locked #f) (hl--plist-get pl 'release #f)))
       (errorf 'hl-bind "mouse is exclusive with repeat/locked/release"))
     (+ (if (or click drag) 2 0)                    ; click/drag imply release: upstream also sets BIND_FLAG_RELEASE for them
-       (if (or devices (hl--opt alist 'device-inclusive)) 8192 0)  ; device binds are inclusive by default, as upstream (device option present ⇒ inclusive)
+       (if (or devices (hl--plist-get pl 'device-inclusive #f)) 8192 0)  ; device binds are inclusive by default, as upstream (device option present ⇒ inclusive)
        (if (equal? key "catchall") 16384 0)      ; upstream: key "catchall" ⇒ BIND_FLAG_CATCH_ALL
-       (apply + (map (lambda (entry) (if (hl--opt alist (car entry)) (cdr entry) 0))
-                    hl--flag-bits)))))
+       (hl--plist-fold (lambda (opt bit acc) (+ acc (if (hl--plist-get pl opt #f) bit 0))) 0 hl--flag-bits))))
 
 (define (hl--bind-impl tokens thunk . opts)
-  (let* ((alist (hl--pairs opts))
-         (key (car (reverse tokens)))
+  (let* ((key (car (reverse tokens)))
          (id (c-hl-bind tokens
-                         (hl--bind-flags alist key)
-                         (or (hl--opt alist 'description) "")
-                         (let ((ds (hl--opt alist 'devices)))
+                         (hl--bind-flags opts key)
+                         (hl--plist-get opts 'description "")
+                         (let ((ds (hl--plist-get opts 'devices #f)))
                            (if (list? ds)
                                (let loop ((rest ds) (acc ""))
                                  (cond ((null? rest) acc)
@@ -900,6 +950,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 (define (hl-window-workspace-set! w ws)
   (= 0 (c-hl-window-move-to-workspace (hl--wid w) (hl--ws-arg ws))))
+
+;; convenience: move a window to another monitor. upstream has no direct
+;; window→monitor dispatch — it moves to the target's ACTIVE workspace
+;; (LuaBindingsDispatchers.cpp:451-458), which this mirrors.
+(define (hl-window-monitor-set! w mon)
+  (hl-window-workspace-set! w (hl-monitor-active-workspace mon)))
 
 ;; ---- actions: navigation and geometry --------------------------------------
 ;; directions: "l"/"r"/"u"/"d" or 'left/'right/'up/'down. Window args accept
@@ -1158,6 +1214,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                      (hl--push-val (cdr kv))
                      (c-hl-config-tbl-set-hash))
                    v))
+        ((and (pair? v) (symbol? (car v)))
+         ;; plist → hash table (the API's nested named-fields form)
+         (c-hl-config-tbl-open 1)
+         (hl--plist-fold (lambda (k val _)
+                           (c-hl-config-tbl-key (hl--str k))
+                           (hl--push-val val)
+                           (c-hl-config-tbl-set-hash))
+                         0 v))
         ((list? v)
          ;; array table (e.g. a vec2 '(20 20))
          (c-hl-config-tbl-open 0)
@@ -1199,9 +1263,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         ((number? v) (number->string v))
         (else #f)))
 
-(define (hl--window-rule-mk spec begin-fn effect-fn commit-fn what)
-  (let ((name (hl--aopt spec 'name #f))
-        (enabled (hl--aopt spec 'enabled #t)))
+(define (hl--window-rule-mk name spec begin-fn effect-fn commit-fn what)
+  (let ((enabled (hl--plist-get spec 'enabled #t)))
     (if (not (= 0 (begin-fn (if name (hl--str name) "") (if enabled 1 0))))
         (errorf what "~a" (c-hl-config-last-error))
         (let loop ((rest spec))
@@ -1210,44 +1273,37 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                    (if (< id 0)
                        (errorf what "~a" (c-hl-config-last-error))
                        (make-hl-rule id))))
-                ((pair? (car rest))
-                 (let* ((kv (car rest))
-                        (k  (hl--str (car kv)))
-                        (v  (cdr kv)))
+                (else
+                 (let* ((tail (hl--plist-cdr rest))
+                        (k  (hl--str (car rest)))
+                        (v  (car tail)))
                    (cond ((equal? k "match")
                           (let mloop ((m v))
-                            (cond ((null? m) (loop (cdr rest)))
-                                  ((pair? (car m))
-                                   (let* ((mk (hl--str (caar m)))
-                                          (sv (hl--rule-spec-value (cdr (car m)))))
+                            (cond ((null? m) (loop (cdr tail)))
+                                  (else
+                                   (let* ((mtail (hl--plist-cdr m))
+                                          (mk (hl--str (car m)))
+                                          (sv (hl--rule-spec-value (car mtail))))
                                      (if (not sv)
                                          (errorf what "bad match value for ~a" mk)
                                          (if (= 0 (c-hl-rule-match mk sv))
-                                             (mloop (cdr m))
-                                             (errorf what "~a" (c-hl-config-last-error))))))
-                                  (else (errorf what "match must be an alist")))))
-                         ((member k (list "name" "enabled"))
-                          (loop (cdr rest)))
+                                             (mloop (cdr mtail))
+                                             (errorf what "~a" (c-hl-config-last-error)))))))))
+                         ((equal? k "enabled")
+                          (loop (cdr tail)))
                          (else
                           (let ((sv (hl--rule-spec-value v)))
                             (if (not sv)
                                 (errorf what "bad effect value for ~a" k)
                                 (if (= 0 (effect-fn k sv))
-                                    (loop (cdr rest))
-                                    (errorf what "~a" (c-hl-config-last-error)))))))))
-                (else (errorf what "spec must be an alist")))))))
+                                    (loop (cdr tail))
+                                    (errorf what "~a" (c-hl-config-last-error))))))))))))))
 
-(define (hl-window-rule-add! name spec)
-  (let ((spec2 (if name (let ((kv (assq 'name spec)))
-                          (if kv spec (cons (cons 'name name) spec)))
-                  spec)))
-    (hl--window-rule-mk spec2 c-hl-window-rule-begin c-hl-window-rule-effect c-hl-window-rule-commit 'hl-window-rule-add!)))
+(define (hl-window-rule-add! name . spec)
+  (hl--window-rule-mk name spec c-hl-window-rule-begin c-hl-window-rule-effect c-hl-window-rule-commit 'hl-window-rule-add!))
 
-(define (hl-layer-rule-add! name spec)
-  (let ((spec2 (if name (let ((kv (assq 'name spec)))
-                          (if kv spec (cons (cons 'name name) spec)))
-                  spec)))
-    (hl--window-rule-mk spec2 c-hl-layer-rule-begin c-hl-layer-rule-effect c-hl-layer-rule-commit 'hl-layer-rule-add!)))
+(define (hl-layer-rule-add! name . spec)
+  (hl--window-rule-mk name spec c-hl-layer-rule-begin c-hl-layer-rule-effect c-hl-layer-rule-commit 'hl-layer-rule-add!))
 
 (define (hl-rule-set-enabled rule enabled)
   (if (= 0 (c-hl-rule-set-enabled (exact->inexact (hl-rule-id rule)) (if enabled 1 0)))
@@ -1257,12 +1313,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-rule-enabled? rule)
   (= 1 (c-hl-rule-enabled (exact->inexact (hl-rule-id rule)))))
 
-;; workspace rules: (hl-workspace-rule-add! "3" '((monitor . "DP-1") (layout . "master")))
+;; workspace rules: (hl-workspace-rule-add! "3" 'monitor "DP-1" 'layout "master")
 ;; fields: monitor default persistent gaps_in gaps_out float_gaps border_size
 ;;   no_border no_rounding decorate no_shadow on_created_empty default_name
 ;;   layout animation layout_opts
-(define (hl-workspace-rule-add! ws spec)
-  (let ((enabled (hl--aopt spec 'enabled #t)))
+(define (hl-workspace-rule-add! ws . spec)
+  (let ((enabled (hl--plist-get spec 'enabled #t)))
     (if (not (= 0 (c-hl-workspace-rule-begin (hl--ws-arg ws) (if enabled 1 0))))
         (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))
         (let loop ((rest spec))
@@ -1270,43 +1326,42 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                  (if (= 0 (c-hl-workspace-rule-commit))
                      #t
                      (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
-                ((pair? (car rest))
-                 (let* ((kv (car rest))
-                        (k  (hl--str (car kv)))
-                        (v  (cdr kv)))
+                (else
+                 (let* ((tail (hl--plist-cdr rest))
+                        (k  (hl--str (car rest)))
+                        (v  (car tail)))
                    (cond ((member k (list "workspace" "enabled"))
-                          (loop (cdr rest)))
+                          (loop (cdr tail)))
                          ((equal? k "layout_opts")
                           (let oloop ((o v))
-                            (cond ((null? o) (loop (cdr rest)))
-                                  ((pair? (car o))
-                                   (let ((sv (hl--rule-spec-value (cdr (car o)))))
+                            (cond ((null? o) (loop (cdr tail)))
+                                  (else
+                                   (let* ((otail (hl--plist-cdr o))
+                                          (sv (hl--rule-spec-value (car otail))))
                                      (if (not sv)
                                          (errorf 'hl-workspace-rule-add! "bad layout_opts value")
-                                         (if (= 0 (c-hl-workspace-rule-layout-opt (hl--str (caar o)) sv))
-                                             (oloop (cdr o))
-                                             (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))))
-                                  (else (errorf 'hl-workspace-rule-add! "layout_opts must be an alist")))))
+                                         (if (= 0 (c-hl-workspace-rule-layout-opt (hl--str (car o)) sv))
+                                             (oloop (cdr otail))
+                                             (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error)))))))))
                          ((string? v)
                           (if (= 0 (c-hl-workspace-rule-str k v))
-                              (loop (cdr rest))
+                              (loop (cdr tail))
                               (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                          ((number? v)
                           (if (= 0 (c-hl-workspace-rule-num k (exact->inexact v)))
-                              (loop (cdr rest))
+                              (loop (cdr tail))
                               (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                          ((boolean? v)
                           (if (= 0 (c-hl-workspace-rule-bool k (if v 1 0)))
-                              (loop (cdr rest))
+                              (loop (cdr tail))
                               (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                          ((pair? v)
                           (c-hl-config-begin)
                           (hl--push-val v)
                           (if (= 0 (c-hl-workspace-rule-gap k))
-                              (loop (cdr rest))
+                              (loop (cdr tail))
                               (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
-                         (else (errorf 'hl-workspace-rule-add! "unsupported value for ~a" k)))))
-                (else (errorf 'hl-workspace-rule-add! "spec must be an alist")))))))
+                         (else (errorf 'hl-workspace-rule-add! "unsupported value for ~a" k))))))))))
 
 ;; ---- queries ------------------------------------------------------------------
 ;; selectors use the config selector syntax: "class:^foot$", "title:foo",
@@ -1572,12 +1627,11 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; icons: none warn info hint error/err confused/question ok
 ;; color: 0xAARRGGBB hex string; 0 color = default for the icon
 (define (hl-notify! text duration . opts)
-  (let ((alist (if (and (not (null? opts)) (pair? (car opts)) (pair? (caar opts))) (car opts) '())))
-    (let ((s (c-hl-notify (hl--str text) (exact->inexact duration)
-                          (hl--str (hl--aopt alist 'icon "none"))
-                          (hl--str (hl--aopt alist 'color "0"))
-                          (exact->inexact (hl--aopt alist 'font-size 13)))))
-      (if s #t #f))))
+  (let ((s (c-hl-notify (hl--str text) (exact->inexact duration)
+                        (hl--str (hl--plist-get opts 'icon "none"))
+                        (hl--str (hl--plist-get opts 'color "0"))
+                        (exact->inexact (hl--plist-get opts 'font-size 13)))))
+    (if s #t #f)))
 
 ;; ---- timer handles --------------------------------------------------------------
 ;; hl-after/hl-repeat return timer ids; these control them afterwards
@@ -1608,28 +1662,26 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; live variant: (hl-gesture-live 3 "swipe" on-begin on-update on-end ...) —
 ;; on-update receives (dx dy scale) as a 3-list.
 (define (hl-gesture fingers direction thunk . opts)
-  (let ((alist (if (and (not (null? opts)) (pair? (car opts)) (pair? (caar opts))) (car opts) '())))
-    (let ((s (c-hl-gesture fingers (hl--str direction) 0
-                           (hl--str (hl--aopt alist 'mods ""))
-                           (exact->inexact (hl--aopt alist 'scale 1.0))
-                           (if (hl--aopt alist 'disable-inhibit #f) 1 0))))
-      (if (not s)
-          (errorf 'hl-gesture "~a" (c-hl-config-last-error))
-          (hl--register (string->number s) thunk)))))
+  (let ((s (c-hl-gesture fingers (hl--str direction) 0
+                         (hl--str (hl--plist-get opts 'mods ""))
+                         (exact->inexact (hl--plist-get opts 'scale 1.0))
+                         (if (hl--plist-get opts 'disable-inhibit #f) 1 0))))
+    (if (not s)
+        (errorf 'hl-gesture "~a" (c-hl-config-last-error))
+        (hl--register (string->number s) thunk))))
 
 (define (hl-gesture-live fingers direction on-begin on-update on-end . opts)
-  (let ((alist (if (and (not (null? opts)) (pair? (car opts)) (pair? (caar opts))) (car opts) '())))
-    (let ((s (c-hl-gesture fingers (hl--str direction) 1
-                           (hl--str (hl--aopt alist 'mods ""))
-                           (exact->inexact (hl--aopt alist 'scale 1.0))
-                           (if (hl--aopt alist 'disable-inhibit #f) 1 0))))
-      (if (not s)
-          (errorf 'hl-gesture "~a" (c-hl-config-last-error))
-          (let ((ids (map string->number (hl--split-lines s))))
-            (hl--register (car ids) on-begin)
-            (hl--register (cadr ids) (lambda (payload) (apply on-update (map string->number (hl--split-lines payload)))))
-            (hl--register (caddr ids) on-end)
-            #t)))))
+  (let ((s (c-hl-gesture fingers (hl--str direction) 1
+                         (hl--str (hl--plist-get opts 'mods ""))
+                         (exact->inexact (hl--plist-get opts 'scale 1.0))
+                         (if (hl--plist-get opts 'disable-inhibit #f) 1 0))))
+    (if (not s)
+        (errorf 'hl-gesture "~a" (c-hl-config-last-error))
+        (let ((ids (map string->number (hl--split-lines s))))
+          (hl--register (car ids) on-begin)
+          (hl--register (cadr ids) (lambda (payload) (apply on-update (map string->number (hl--split-lines payload)))))
+          (hl--register (caddr ids) on-end)
+          #t))))
 
 ;; ---- monitors, curves, animations, permissions ------------------------------
 
@@ -1641,11 +1693,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;;   sdrbrightness sdrsaturation sdr_min_luminance sdr_max_luminance
 ;;   min_luminance max_luminance max_avg_luminance
 ;; gap fields (alist): reserved / reserved_area ; bool: disabled
-(define (hl--aopt alist key default)
-  (let ((kv (assq key alist)))
-    (if kv (cdr kv) default)))
-
-(define (hl-monitor-rule-add! output fields)
+(define (hl-monitor-rule-add! output . fields)
   (if (not (= 0 (c-hl-monitor-begin (hl--mon-arg output))))
       (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))
       (let loop ((rest fields))
@@ -1653,30 +1701,29 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                (if (= 0 (c-hl-monitor-commit))
                    #t
                    (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
-              ((pair? (car rest))
-               (let* ((kv (car rest))
-                      (f  (hl--str (car kv)))
-                      (v  (cdr kv)))
+              (else
+               (let* ((tail (hl--plist-cdr rest))
+                      (f  (hl--str (car rest)))
+                      (v  (car tail)))
                  (cond ((string? v)
                         (if (= 0 (c-hl-monitor-field-str f v))
-                            (loop (cdr rest))
+                            (loop (cdr tail))
                             (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
                        ((number? v)
                         (if (= 0 (c-hl-monitor-field-num f (exact->inexact v)))
-                            (loop (cdr rest))
+                            (loop (cdr tail))
                             (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
                        ((boolean? v)
                         (if (= 0 (c-hl-monitor-field-bool f (if v 1 0)))
-                            (loop (cdr rest))
+                            (loop (cdr tail))
                             (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
                        ((pair? v)
                         (c-hl-config-begin)
                         (hl--push-val v)
                         (if (= 0 (c-hl-monitor-field-gap f))
-                            (loop (cdr rest))
+                            (loop (cdr tail))
                             (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))))
-                       (else (errorf 'hl-monitor-rule-add! "unsupported value for ~a" f)))))
-              (else (errorf 'hl-monitor-rule-add! "fields must be alist pairs"))))))
+                       (else (errorf 'hl-monitor-rule-add! "unsupported value for ~a" f)))))))))
 
 ;; (hl-curve-add! "mycurve" 'bezier 0.25 0.1 0.25 1.0)
 ;; (hl-curve-add! "myspring" 'spring 250 25 1)
@@ -1688,14 +1735,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         #t
         (errorf 'hl-curve-add! "~a" (c-hl-config-last-error)))))
 
-;; (hl-animation-add! "windowsIn" '((enabled . #t) (speed . 8) (curve . "mycurve") (style . "popin 80%")))
+;; (hl-animation-add! "windowsIn" 'enabled #t 'speed 8 'curve "mycurve" 'style "popin 80%")
 ;; speed defaults to 8; declare curves with hl-curve-add! first (or use builtins
 ;; like "default"); styles are the animation style strings (popin, slide, ...)
-(define (hl-animation-add! leaf alist)
-  (let* ((enabled (hl--aopt alist 'enabled #t))
-         (speed   (hl--aopt alist 'speed 8))
-         (curve   (hl--aopt alist 'curve ""))
-         (style   (hl--aopt alist 'style "")))
+(define (hl-animation-add! leaf . opts)
+  (let* ((enabled (hl--plist-get opts 'enabled #t))
+         (speed   (hl--plist-get opts 'speed 8))
+         (curve   (hl--plist-get opts 'curve ""))
+         (style   (hl--plist-get opts 'style "")))
     (if (= 0 (c-hl-animation-set (hl--str leaf) (if enabled 1 0)
                                  (exact->inexact speed) (hl--str curve) (hl--str style)))
         #t
@@ -1864,6 +1911,34 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((id (c-hl-config-reloaded-listen)))
     (if (< id 0)
         (errorf 'hl-on-config-reloaded "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+;; fires BEFORE a config reload (upstream config.unload → config.preReload)
+(define (hl-on-config-unload handler)
+  (let ((id (c-hl-config-unload-listen)))
+    (if (< id 0)
+        (errorf 'hl-on-config-unload "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+;; zero-argument callback — upstream delivers nil for window.destroy (the bus
+;; event is a weak ref; identity belongs to hl-on-window-close)
+(define (hl-on-window-destroy handler)
+  (let ((id (c-hl-window-destroy-listen)))
+    (if (< id 0)
+        (errorf 'hl-on-window-destroy "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+;; layer callbacks receive the layer's namespace string
+(define (hl-on-layer-open handler)
+  (let ((id (c-hl-layer-listen 0)))
+    (if (< id 0)
+        (errorf 'hl-on-layer-open "listener rejected, see compositor log")
+        (hl--register id handler))))
+
+(define (hl-on-layer-close handler)
+  (let ((id (c-hl-layer-listen 1)))
+    (if (< id 0)
+        (errorf 'hl-on-layer-close "listener rejected, see compositor log")
         (hl--register id handler))))
 
 ;; handler signature: (lambda (scheduled?) ...) — #t when the prop refresh ran
@@ -2095,10 +2170,11 @@ namespace Config::Scheme {
             return {.success = false, .error = "scheme interpreter not initialized"};
 
         watchdogEnter("bind callback");
-        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--fire")), Sinteger(id));
+        // hl--bind-fire: #f = declined (thunk returned #f, or error/watchdog)
+        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--bind-fire")), Sinteger(id));
         watchdogExit();
         if (r == Sfalse)
-            return {.success = false, .error = "scheme keybind callback failed"};
+            return {.success = false, .error = "scheme keybind callback declined"};
         return {};
     }
 
@@ -4882,6 +4958,40 @@ namespace Config::Scheme {
         return id;
     }
 
+    // config.preReload — upstream maps config.unload onto it
+    static int hlSchemeConfigUnloadListen() {
+        if (!g_up)
+            return -1;
+
+        const int id = g_nextBindId++;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.preReload.listen([id] { fireScheme(id); }));
+        return id;
+    }
+
+    // window.destroy: zero-argument callback (upstream delivers nil — the bus
+    // event is Event<PHLWINDOWREF>; identity belongs to hl-on-window-close)
+    static int hlSchemeWindowDestroyListen() {
+        if (!g_up)
+            return -1;
+
+        const int id = g_nextBindId++;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.window.destroy.listen([id](PHLWINDOWREF) { fireScheme(id); }));
+        return id;
+    }
+
+    // layer.opened / layer.closed — callbacks receive the layer's namespace
+    static int hlSchemeLayerListen(int which) {
+        if (!g_up)
+            return -1;
+
+        const int id = g_nextBindId++;
+        if (which == 0)
+            g_windowEventListeners.emplace_back(Event::bus()->m_events.layer.opened.listen([id](PHLLS ls) { if (g_up && ls) fireSchemeStr(id, ls->m_namespace); }));
+        else
+            g_windowEventListeners.emplace_back(Event::bus()->m_events.layer.closed.listen([id](PHLLS ls) { if (g_up && ls) fireSchemeStr(id, ls->m_namespace); }));
+        return id;
+    }
+
     // handler receives #t when the prop refresh ran as scheduled, #f when it
     // was executed prematurely
     static int hlSchemePropsRefreshedListen() {
@@ -5170,7 +5280,10 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-window-minimize-listen", (void*)hlSchemeWindowMinimizeListen);
         Sregister_symbol("hl-scheme-lifecycle-listen", (void*)hlSchemeLifecycleListen);
         Sregister_symbol("hl-scheme-config-reloaded-listen", (void*)hlSchemeConfigReloadedListen);
+        Sregister_symbol("hl-scheme-config-unload-listen", (void*)hlSchemeConfigUnloadListen);
         Sregister_symbol("hl-scheme-config-props-refreshed-listen", (void*)hlSchemePropsRefreshedListen);
+        Sregister_symbol("hl-scheme-window-destroy-listen", (void*)hlSchemeWindowDestroyListen);
+        Sregister_symbol("hl-scheme-layer-listen", (void*)hlSchemeLayerListen);
         Sregister_symbol("hl-scheme-unbind", (void*)hlSchemeUnbind);
         Sregister_symbol("hl-scheme-unbind-key", (void*)hlSchemeUnbindKey);
         Sregister_symbol("hl-scheme-window-same", (void*)hlSchemeWindowSame);
