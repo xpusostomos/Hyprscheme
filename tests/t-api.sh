@@ -196,7 +196,7 @@ ok '(string? (hl-monitor-mode am))'
 ok '(boolean? (hl-monitor-power? am))'
 ok '(boolean? (hl-monitor-vrr? am))'
 ok '(boolean? (hl-monitor-10bit? am))'
-ok '(let ((r (hl-monitor-reserved am))) (and (list? r) (pair? (assq (quote top) r))))'
+ok '(let ((r (hl-monitor-reserved am))) (and (pair? r) (eq? (car r) (quote top))))'
 noerr '(hl-monitor-mirror-of am)'
 noerr '(hl-monitor-active-workspace am)'
 noerr '(hl-monitor-active-special-workspace am)'
@@ -207,6 +207,18 @@ ok '(hl-monitor-rule-add! (hl-monitor-name am) (quote reserved) (quote (top 0)))
 # ---- config -----------------------------------------------------------------
 ok '(hl-config-add! "general:gaps_in" 5)'
 noerr '(hl-config-get "general:gaps_in")'
+
+# ---- devices (per-device config — upstream hl.device parity) -----------------
+ok '(hl-device-add! "api-input" (quote enabled) #t)'
+ok '(hl-device-add! "api-input" (quote natural_scroll) #t (quote sensitivity) 0.6)'
+ok '(hl-device-add! "api-input" (quote region_position) (quote (10 20)))'
+ok '(hl-device-add! "api-input" (quote repeat_rate) 25)'
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" (quote bogus_field) #t))))')
+[[ "$bad_device" == *"bogus_field"* ]] || { echo "FAIL: unknown device field not rejected => [$bad_device]"; FAILED=1; }
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" (quote natural_scroll) "yes"))))')
+[[ "$bad_device" == *"#t or #f"* ]] || { echo "FAIL: bad device type not rejected => [$bad_device]"; FAILED=1; }
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" (quote sensitivity) 5))))')
+[[ "$bad_device" == *"range"* ]] || { echo "FAIL: out-of-range device value not rejected => [$bad_device]"; FAILED=1; }
 
 # ---- cursor -----------------------------------------------------------------
 noerr '(hl-cursor-pos)'
@@ -261,7 +273,7 @@ ok '(boolean? (hl-rule-enabled? api-layer-rule))'
 ok '(hl-rule-set-enabled api-layer-rule #f)'
 
 # ---- layouts ----------------------------------------------------------------
-idok '(hl-define-layout "api-layout" (lambda (count W H wins) (quote ())))'
+idok '(hl-layout-add! "api-layout" (quote recalculate) (lambda (count W H wins) (quote ())))'
 noerr '(hl-layout-msg "noop")'
 
 # ---- submaps ----------------------------------------------------------------

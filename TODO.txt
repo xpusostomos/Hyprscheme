@@ -266,6 +266,31 @@ Still alist-shaped, by design (DATA, not options): hl-config-add! value
 Tests + wiki swept (rules, window/workspace/monitor/layer-rule pages,
   code-snippets, animations, notifications, layout pages, monitors*).
 
+== MARSHALLING PURGE (implemented + verified 10/10, 2026-09-20) ==
+Every place that shoveled MULTIPLE data objects into a newline/spaced STRING
+across the FFI now builds proper Scheme data, rooted with Chez's Slock_object
+(GC runs at allocation points; objects pinned while stitching, released with
+no allocation in between, FFI return/call re-roots). The Scheme side no
+longer parses strings; hl--split-lines and hl--unmarshal are deleted.
+  - collections: hl-windows/-workspaces/-monitors and workspace-windows /
+    windows-from return real lists of handle ids (schemeIntList).
+  - hl-window-size / hl-cursor-pos return dotted pairs (w . h) / (x . y).
+  - submap context returns a (name . reset) pair.
+  - gestures: registration returns ids (list / single id); the live update
+    fires a proper (dx dy scale) numeric list via the new hl--fire-list.
+  - hl-layers returns ((monitor . namespace) ...); hl-loaded-plugins a list.
+  - hl-config-get returns the value natively (bool/number/string, tables as
+    PLISTS — keys symbolified, integral numbers exact) — mirrors the plist
+    form hl-config-add! accepts. hl-monitor-reserved likewise a plist.
+  - layout events: dispatchLayoutEvent builds a real (count W H id... [dx
+    dy corner]) list; window-open/close pass native ids; the recalculate/
+    resize consumers destructure the list instead of splitting a string.
+    (The boxes return path was ALREADY proper list-of-lists.)
+  - hl-define-layout spec is now a PLIST of callbacks ('recalculate fn
+    'resize fn ...); hl--layout-event looks up callbacks via hl--plist-get.
+Helpers: schemeIntList + marshRoot/marshRelease (pinning + release), shared
+  conceptually with SchemeLayout.cpp's local copy.
+
 == REMAINING SMALL GAPS ==
 Binds: flat-option API cannot express upstream's device { inclusive = false }
   (LuaBindingsToplevel.cpp:192 — inclusive defaults true, but explicit false
@@ -379,9 +404,13 @@ RESOLVED (2026-09-19 batch): config.unload (→ preReload) and
   upstream nil parity.
 
 == DEVICES ==
-Per-device CONFIG API (hl-device NAME OPTS) — sensitivity, enabled,
-  keybinds, tags, tablet output binding. Per-device BINDS exist.
-  Confirmed absent from the plugin.
+RESOLVED 2026-09-20: per-device CONFIG API lands as (hl-device-add! NAME .
+  FIELDS) — upstream hl.device parity (write-only; no device read side, no
+  per-field unset). Own DEVICE_FIELDS mirror + CDeviceValue (an
+  ILuaConfigValue impl) feeding m_deviceConfigs; validation rejects unknown
+  fields / bad types / out-of-range; REFRESH_INPUT_DEVICES applies live.
+  Docs: device-config.md (full field table) + devices.md + sidebar. Tests in
+  t-api. Per-device BINDS remain (device-binds-per-device).
 
 == GESTURES ==
 Live gesture payload enrichment — data exists upstream, we drop it:

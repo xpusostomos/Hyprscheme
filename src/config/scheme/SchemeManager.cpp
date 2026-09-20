@@ -65,6 +65,8 @@
 #include <src/config/shared/workspace/WorkspaceRule.hpp>
 #include <src/config/shared/workspace/WorkspaceRuleManager.hpp>
 #include <src/config/supplementary/executor/Executor.hpp>
+#include <src/config/supplementary/propRefresher/PropRefresher.hpp>
+#include <src/config/lua/types/LuaConfigValue.hpp>
 #include <src/animation/AnimationManager.hpp>
 #include <src/pointer/PointerManager.hpp>
 #include <src/plugins/PluginSystem.hpp>
@@ -193,6 +195,15 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
         (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
                         (hl--guarded-run "callback" (cdr entry)))))
           (not (eq? result hl--wd-aborted))))))
+
+;; numeric-list payloads (live gesture updates): the handler is applied to the
+;; elements of the list (e.g. (lambda (dx dy scale) ...))
+(define (hl--fire-list id lst)
+  (let ((entry (assv id hl--binds)))
+    (if entry
+        (guard (e (#t (begin (hl--report e) #f)))
+          (hl--guarded-run "callback" (lambda () (apply (cdr entry) lst))))
+        #f)))
 
 ;; bind-callback fire: #f from the thunk DECLINES the key (upstream's
 ;; ok=false auto-consuming protocol); errors and the watchdog also decline
@@ -327,19 +338,12 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
           "watchdog: eval abandoned (see the compositor log)"
           (format "~s" result)))))
 
-;; layout callbacks: spec = "count\nW\nH\n<handle-id per target>"
-;; (kept to 2 foreign args; Scall passes at most 3). the fn receives
-;; (count W H windows) where windows[i] is the handle for box i (a handle
-;; whose id 0 means "not a window" — every query on it returns #f).
+;; layout callbacks: spec = a single recalculate fn, or a plist of callbacks
+;; (recalculate . fn) (resize . fn) (window-open . fn) (window-close . fn)
+;; (layout-msg . fn). recalculate/resize receive (count W H windows) where
+;; windows[i] is the handle for box i (a handle whose id 0 means "not a
+;; window" — every query on it returns #f), plus (dx dy corner) for resize.
 ;; fn returns list of (x y w h), or #f on error.
-(define (hl--split-lines s)
-  (let loop ((i 0) (start 0) (acc '()))
-    (cond
-      ((>= i (string-length s))
-       (reverse (cons (substring s start i) acc)))
-      ((char=? (string-ref s i) #\newline)
-       (loop (+ i 1) (+ i 1) (cons (substring s start i) acc)))
-      (else (loop (+ i 1) start acc)))))
 
 (define (hl--split-string str char)
   (let loop ((i 0) (start 0) (acc '()))
@@ -369,7 +373,7 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
           ((and (< s e) (char-whitespace? (string-ref str (- e 1)))) (loop s (- e 1)))
           (else (substring str s e)))))
 
-;; layout event dispatch. a layout provider is an alist of callbacks:
+;; layout event dispatch. a layout provider is a PLIST of callbacks:
 ;;   ((recalculate . fn) (resize . fn) (window-open . fn) (window-close . fn))
 ;; recalculate/resize fn: (count W H windows [dx dy corner]) -> ((x y w h) ...)
 ;; window callbacks: (window) -> ignored. #f when absent or on error.
@@ -381,34 +385,38 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
         (guard (e (#t (hl--report e)))
           (cond
             ((equal? event "window-open")
-             (let ((cb (assq 'window-open cbs)))
-               (if cb ((cdr cb) (make-hl-window (string->number payload))) #f)))
+             (let ((cb (hl--plist-get cbs 'window-open #f)))
+               (if cb (cb (make-hl-window payload)) #f)))
             ((equal? event "window-close")
-             (let ((cb (assq 'window-close cbs)))
-               (if cb ((cdr cb) (make-hl-window (string->number payload))) #f)))
+             (let ((cb (hl--plist-get cbs 'window-close #f)))
+               (if cb (cb (make-hl-window payload)) #f)))
             ((equal? event "layout-msg")
-             (let ((cb (assq 'layout-msg cbs)))
+             (let ((cb (hl--plist-get cbs 'layout-msg #f)))
                (if (not cb)
                    ""
-                   (let ((r ((cdr cb) payload)))
+                   (let ((r (cb payload)))
                      (cond ((not r) "rejected")
                            ((string? r) r)
                            (else ""))))))
             (else
-             (let* ((parts (hl--split-lines payload))
-                    (count (string->number (list-ref parts 0)))
-                    (W     (string->number (list-ref parts 1)))
-                    (H     (string->number (list-ref parts 2))))
+             ;; payload is a real list: (count W H id... [dx dy corner] for resize)
+             (let* ((count (car payload))
+                    (W     (cadr payload))
+                    (H     (caddr payload))
+                    (tail  (cdddr payload)))
                (if (equal? event "resize")
-                   (let* ((dx     (string->number (list-ref parts 3)))
-                          (dy     (string->number (list-ref parts 4)))
-                          (corner (string->number (list-ref parts 5)))
-                          (wins   (map make-hl-window (map string->number (list-tail parts 6))))
-                          (cb     (or (assq 'resize cbs) (assq 'recalculate cbs))))
-                     (if cb (apply (cdr cb) (list count W H wins dx dy corner)) #f))
-                   (let ((wins (map make-hl-window (map string->number (list-tail parts 3))))
-                         (cb   (assq 'recalculate cbs)))
-                     (if cb ((cdr cb) count W H wins) #f))))))))))
+                   (let* ((n    (length tail))
+                          (cb   (or (hl--plist-get cbs 'resize #f) (hl--plist-get cbs 'recalculate #f))))
+                     (if cb
+                         (apply cb
+                                (list count W H
+                                      (map make-hl-window (list-head tail (- n 3)))
+                                      (list-ref tail (- n 3))
+                                      (list-ref tail (- n 2))
+                                      (list-ref tail (- n 1))))
+                         #f))
+                   (let ((cb (hl--plist-get cbs 'recalculate #f)))
+                     (if cb (cb count W H (map make-hl-window tail)) #f))))))))))
 )scm";
 
 static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
@@ -452,19 +460,28 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-monitor-event-listen (foreign-procedure "hl-scheme-monitor-event-listen" (int) int))
 (define c-hl-workspace-event-listen (foreign-procedure "hl-scheme-workspace-event-listen" (int) int))
 (define c-hl-workspace-change-id (foreign-procedure "hl-scheme-workspace-change-id" (string double) int))
-(define c-hl-define-layout (foreign-procedure "hl-scheme-define-layout" (string) int))
+(define c-hl-layout-add (foreign-procedure "hl-scheme-layout-add" (string) int))
 
 ;; pure-function layout; see SchemeLayout.hpp for the contract
-;; spec is a single recalculate fn, or an alist of callbacks:
-;;   ((recalculate . fn) (resize . fn) (window-open . fn) (window-close . fn))
+;; spec is a single recalculate fn, or a PLIST of callbacks:
+;;   'recalculate fn 'resize fn 'window-open fn 'window-close fn
 ;; resize fn: (count W H windows dx dy corner) -> boxes; when absent a resize
 ;; falls back to the recalculate fn. state: keep it in a closure around fn.
-(define (hl-define-layout name spec)
-  (let* ((prov (if (procedure? spec) (list (cons 'recalculate spec)) spec))
-         (id   (c-hl-define-layout name)))
+;; spec is a single recalculate procedure, or a PLIST of callbacks:
+;; (hl-layout-add! "name" 'recalculate fn 'resize fn 'layout-msg fn)
+;; layouts are registered in the compositor's global registry (mutation,
+;; hence ! and -add!). SPEC is a PLIST of callbacks — every callback is
+;; named explicitly: 'recalculate LAMBDA 'resize LAMBDA ... There is no
+;; shorthand that guesses a bare lambda's role.
+(define (hl-layout-add! name . spec)
+  (when (or (null? spec) (and (pair? spec) (procedure? (car spec))))
+    (errorf 'hl-layout-add!
+            "the callbacks must be named, e.g. (hl-layout-add! ~s 'recalculate LAMBDA ...)"
+            name))
+  (let ((id (c-hl-layout-add name)))
     (if (< id 0)
-        (errorf 'hl-define-layout "layout ~a rejected, see compositor log" name)
-        (hl--register id prov))))
+        (errorf 'hl-layout-add! "layout ~a rejected, see compositor log" name)
+        (hl--register id spec))))
 
 (define c-hl-get-submap-ctx (foreign-procedure "hl-scheme-get-submap-ctx" () scheme-object))
 (define c-hl-set-submap-ctx (foreign-procedure "hl-scheme-set-submap-ctx" (string string) void))
@@ -474,9 +491,9 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; names the submap returned to on exit. the submap exists only if fn
 ;; registers at least one bind.
 (define (hl-submap name fn . reset)
-  (let* ((ctx        (hl--split-lines (c-hl-get-submap-ctx)))
-         (prev-name  (list-ref ctx 0))
-         (prev-reset (list-ref ctx 1)))
+  (let* ((ctx        (c-hl-get-submap-ctx))
+         (prev-name  (car ctx))
+         (prev-reset (cdr ctx)))
     (dynamic-wind
       (lambda () (c-hl-set-submap-ctx name (if (null? reset) "" (car reset))))
       (lambda () (fn))
@@ -824,13 +841,11 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (c-hl-active-title))
 
 ;; collections are marshalled as one newline-joined string and split here
-;; (hl--split-lines lives in the prelude), so all list building happens
-;; under Scheme's GC (no raw ptrs across calls)
 (define (hl-workspaces)
-  (let ((joined (c-hl-workspace-names)))
-    (if (eq? joined #f)
+  (let ((ids (c-hl-workspace-names)))
+    (if (eq? ids #f)
         '()
-        (map make-hl-workspace (map string->number (hl--split-lines joined))))))
+        (map make-hl-workspace ids))))
 
 (define (hl-on-submap thunk)
   (let ((id (c-hl-submap-listen)))
@@ -900,10 +915,10 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (< id 0) #f (make-hl-window id))))
 
 (define (hl-windows)
-  (let ((joined (c-hl-window-ids)))
-    (if (eq? joined #f)
+  (let ((ids (c-hl-window-ids)))
+    (if (eq? ids #f)
         '()
-        (map make-hl-window (map string->number (hl--split-lines joined))))))
+        (map make-hl-window ids))))
 
 (define (hl-window-title w)
   (c-hl-window-title (hl-window-id w)))
@@ -932,11 +947,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; => (width . height), or #f when stale
 (define (hl-window-size w)
-  (let ((s (c-hl-window-size (hl-window-id w))))
-    (if (eq? s #f)
-        #f
-        (let ((wh (map string->number (hl--split-lines s))))
-          (cons (car wh) (cadr wh))))))
+  (c-hl-window-size (hl-window-id w)))   ; (width . height), or #f
 
 (define (hl-window-pid w)
   (c-hl-window-pid (hl-window-id w)))
@@ -1192,7 +1203,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; ---- config -----------------------------------------------------------------
 ;; set/get config options from scheme. keys accept "general:gaps_in" or
 ;; "general.gaps_in". values: number, string, boolean, list (vec2-style
-;; array), or alist (hash table, e.g. '((top . 10) (bottom . 10))).
+;; array), or a PLIST for tables (e.g. '(top 10 bottom 10)).
 ;; writes propagate like a runtime hl.config — the affected subsystems
 ;; refresh immediately.
 (define (hl-config-add! key val)
@@ -1206,14 +1217,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (cond ((number? v) (c-hl-config-push-num (exact->inexact v)))
         ((boolean? v) (c-hl-config-push-bool (if v 1 0)))
         ((string? v) (c-hl-config-push-str v))
-        ((and (pair? v) (pair? (car v)))
-         ;; alist → hash table
-         (c-hl-config-tbl-open 1)
-         (for-each (lambda (kv)
-                     (c-hl-config-tbl-key (hl--str (car kv)))
-                     (hl--push-val (cdr kv))
-                     (c-hl-config-tbl-set-hash))
-                   v))
         ((and (pair? v) (symbol? (car v)))
          ;; plist → hash table (the API's nested named-fields form)
          (c-hl-config-tbl-open 1)
@@ -1222,7 +1225,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                            (hl--push-val val)
                            (c-hl-config-tbl-set-hash))
                          0 v))
-        ((list? v)
+        ((and (list? v) (or (null? v) (not (pair? (car v)))))
          ;; array table (e.g. a vec2 '(20 20))
          (c-hl-config-tbl-open 0)
          (let loop ((rest v) (i 1))
@@ -1233,13 +1236,20 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         (else (errorf 'hl-config-add! "unsupported value ~s" v))))
 
 (define (hl-config-get key)
-  (let ((s (c-hl-config-get (hl--str key))))
-    (if (not s)
-        #f
-        (hl--unmarshal (hl--split-lines s)))))
+  (c-hl-config-get (hl--str key)))   ; #t/#f, number, string, or a plist for tables
+
+(define c-hl-device-add (foreign-procedure "hl-scheme-device-add" (string scheme-object) int))
+
+;; per-device input config: NAME + a spread plist of fields. Write-only
+;; (upstream hl.device parity — no device read side, no per-field unset);
+;; validated against the field table and applied to the live device.
+(define (hl-device-add! name . fields)
+  (if (= 0 (c-hl-device-add (hl--str name) fields))
+      #t
+      (errorf 'hl-device-add! "~a" (c-hl-config-last-error))))
 
 ;; ---- rules -------------------------------------------------------------------
-;; window/layer rules: an alist with 'match (an alist of property → value),
+;; window/layer rules: a plist with 'match (a plist of property → value),
 ;; optional 'name and 'enabled, and every other key being an EFFECT (its
 ;; config string form). Returns a rule handle for hl-rule-set-enabled /
 ;; hl-rule-enabled?. Anonymous rules (name #f) are re-created on each
@@ -1416,7 +1426,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((s (c-hl-workspace-windows (hl--ws-arg ws))))
     (if (not s)
         '()
-        (map make-hl-window (map string->number (hl--split-lines s))))))
+        (map make-hl-window s))))
 
 ;; ---- workspace/monitor handle getters ---------------------------------------
 ;; every getter takes a handle; a stale or dead handle yields #f from every
@@ -1555,18 +1565,9 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-monitor-10bit? m)
   (eq? (c-hl-monitor-10bit (hl-monitor-id m)) #t))
 
-;; reserved area as an alist: ((top . n) (left . n) (right . n) (bottom . n))
+;; reserved area as a plist: (top n left n right n bottom n)
 (define (hl-monitor-reserved m)
-  (let ((s (c-hl-monitor-reserved (hl-monitor-id m))))
-    (if (not s)
-        #f
-        (let loop ((rest (hl--split-lines s)) (acc '()))
-          (if (or (null? rest) (null? (cdr rest)))
-              (reverse acc)
-              (loop (cddr rest)
-                    (cons (cons (string->symbol (car rest))
-                                (string->number (cadr rest)))
-                          acc)))))))
+  (c-hl-monitor-reserved (hl-monitor-id m)))
 
 ;; the monitor this one mirrors, as a handle; #f when not a mirror
 (define (hl-monitor-mirror-of m)
@@ -1591,21 +1592,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; => list of (monitor . namespace) pairs
 (define (hl-layers)
-  (let ((s (c-hl-layers)))
-    (if (not s)
-        '()
-        (let loop ((rest (hl--split-lines s)) (acc '()))
-          (if (or (null? rest) (null? (cdr rest)))
-              (reverse acc)
-              (loop (cddr rest) (cons (cons (car rest) (cadr rest)) acc)))))))
+  (or (c-hl-layers) '()))   ; ((monitor . namespace) ...)
 
 ;; key by keysym name: (hl-is-key-down "Return")
 (define (hl-is-key-down key)
   (= 1 (c-hl-is-key-down key)))
 
 (define (hl-loaded-plugins)
-  (let ((s (c-hl-loaded-plugins)))
-    (if s (hl--split-lines s) '())))
+  (or (c-hl-loaded-plugins) '()))
 
 (define (hl-version)
   (c-hl-version))
@@ -1615,7 +1609,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((s (c-hl-windows-from (hl--str sel))))
     (if (not s)
         '()
-        (map make-hl-window (map string->number (hl--split-lines s))))))
+        (map make-hl-window s))))
 
 ;; which fullscreen handler a window uses (string)
 (define (hl-window-fullscreen-handler w)
@@ -1662,24 +1656,26 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; live variant: (hl-gesture-live 3 "swipe" on-begin on-update on-end ...) —
 ;; on-update receives (dx dy scale) as a 3-list.
 (define (hl-gesture fingers direction thunk . opts)
-  (let ((s (c-hl-gesture fingers (hl--str direction) 0
-                         (hl--str (hl--plist-get opts 'mods ""))
-                         (exact->inexact (hl--plist-get opts 'scale 1.0))
-                         (if (hl--plist-get opts 'disable-inhibit #f) 1 0))))
-    (if (not s)
+  (let ((id (c-hl-gesture fingers (hl--str direction) 0
+                          (hl--str (hl--plist-get opts 'mods ""))
+                          (exact->inexact (hl--plist-get opts 'scale 1.0))
+                          (if (hl--plist-get opts 'disable-inhibit #f) 1 0))))
+    (if (not id)
         (errorf 'hl-gesture "~a" (c-hl-config-last-error))
-        (hl--register (string->number s) thunk))))
+        (hl--register id thunk))))
 
 (define (hl-gesture-live fingers direction on-begin on-update on-end . opts)
-  (let ((s (c-hl-gesture fingers (hl--str direction) 1
-                         (hl--str (hl--plist-get opts 'mods ""))
-                         (exact->inexact (hl--plist-get opts 'scale 1.0))
-                         (if (hl--plist-get opts 'disable-inhibit #f) 1 0))))
-    (if (not s)
+  (let ((ids (c-hl-gesture fingers (hl--str direction) 1
+                           (hl--str (hl--plist-get opts 'mods ""))
+                           (exact->inexact (hl--plist-get opts 'scale 1.0))
+                           (if (hl--plist-get opts 'disable-inhibit #f) 1 0))))
+    (if (not ids)
         (errorf 'hl-gesture "~a" (c-hl-config-last-error))
-        (let ((ids (map string->number (hl--split-lines s))))
+        ;; ids = (begin-id update-id end-id); the update callback receives the
+        ;; live payload as a proper numeric list (dx dy scale)
+        (begin
           (hl--register (car ids) on-begin)
-          (hl--register (cadr ids) (lambda (payload) (apply on-update (map string->number (hl--split-lines payload)))))
+          (hl--register (cadr ids) on-update)
           (hl--register (caddr ids) on-end)
           #t))))
 
@@ -1692,7 +1688,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; numeric fields: transform bitdepth vrr supports_wide_color supports_hdr
 ;;   sdrbrightness sdrsaturation sdr_min_luminance sdr_max_luminance
 ;;   min_luminance max_luminance max_avg_luminance
-;; gap fields (alist): reserved / reserved_area ; bool: disabled
+;; gap fields (plist): reserved / reserved_area ; bool: disabled
 (define (hl-monitor-rule-add! output . fields)
   (if (not (= 0 (c-hl-monitor-begin (hl--mon-arg output))))
       (errorf 'hl-monitor-rule-add! "~a" (c-hl-config-last-error))
@@ -1757,23 +1753,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
       (errorf 'hl-permission-add! "~a" (c-hl-config-last-error))))
 
 
-;; decode "b|n|s|t" + payload lines into a scheme value
-(define (hl--unmarshal lines)
-  (case (string->symbol (car lines))
-    ((b) (string=? (cadr lines) "1"))
-    ((n) (string->number (cadr lines)))
-    ((s) (cadr lines))
-    ((t)
-     (let loop ((rest (cdr lines)) (acc '()))
-       (cond ((null? rest) (reverse acc))
-             ((null? (cdr rest)) (reverse acc)) ; malformed tail
-             (else
-              (let ((k (car rest)) (v (cadr rest)))
-                (let ((k2 (if (let ((n (string->number k))) n) (string->number k) (string->symbol k)))
-                      (v2 (or (string->number v) v)))
-                  (loop (cddr rest) (cons (cons k2 v2) acc))))))))
-    (else #f)))
-
 ;; toggles; modes mirror Fullscreen::eFullscreenMode (1 maximized, 2 fullscreen)
 ;; optional second arg = mode (default 2); (hl-window-fullscreen w 1) maximizes
 ;; mode-aware toggle: mode 2 = fullscreen, 1 = maximized
@@ -1828,10 +1807,10 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (= 1 (c-hl-window-x11 (hl-window-id w))))
 
 (define (hl-monitors)
-  (let ((joined (c-hl-monitor-names)))
-    (if (eq? joined #f)
+  (let ((ids (c-hl-monitor-names)))
+    (if (eq? ids #f)
         '()
-        (map make-hl-monitor (map string->number (hl--split-lines joined))))))
+        (map make-hl-monitor ids))))
 
 (define (hl--window-listen which handler)
   (let ((id (c-hl-window-event-listen which)))
@@ -1968,11 +1947,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; => (x . y), or #f
 (define (hl-cursor-pos)
-  (let ((s (c-hl-cursor-pos)))
-    (if (eq? s #f)
-        #f
-        (let ((xy (map string->number (hl--split-lines s))))
-          (cons (car xy) (cadr xy))))))
+  (c-hl-cursor-pos))   ; (x . y), or #f
 
 (define (hl-on-workspace-active handler)
   (let ((id (c-hl-workspace-active-listen)))
@@ -2050,21 +2025,22 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; their generation — the state survives, the resources do not.
 (define hl--state '())
 
+;; cross-reload state: an internal PLIST. a re-set keeps the original position.
 (define (hl-state-set! k v)
-  (let ((entry (assq k hl--state)))
-    (if entry
-        (set-cdr! entry v)
-        (set! hl--state (cons (cons k v) hl--state))))
+  (define (put l)
+    (cond ((null? l) (list k v))
+          ((eq? (car l) k) (append (list k v) (cddr l)))
+          (else (cons (car l) (cons (cadr l) (put (cddr l)))))))
+  (set! hl--state (put hl--state))
   v)
 
 (define (hl-state-ref k . default)
-  (let ((entry (assq k hl--state)))
-    (if entry
-        (cdr entry)
-        (if (null? default) #f (car default)))))
+  (let ((v (hl--plist-get hl--state k #!eof)))
+    (if (eq? v #!eof) (if (null? default) #f (car default)) v)))
 
 (define (hl-state-keys)
-  (map car hl--state))
+  (let loop ((l hl--state) (acc '()))
+    (if (null? l) (reverse acc) (loop (cddr l) (cons (car l) acc)))))
 
 (set! hl--ready #t)
 )scm";
@@ -2179,6 +2155,55 @@ namespace Config::Scheme {
     }
 
     // fires a handler registered for id with no payload; errors contained
+    // numeric payloads (e.g. live gesture update): a real list of numbers
+    static ptr schemeIntList(const std::vector<int>& vals) {
+        if (vals.empty())
+            return Snil;
+        ptr l = Snil;
+        for (auto it = vals.rbegin(); it != vals.rend(); ++it) {
+            l = Scons(Sinteger(*it), l);
+            Slock_object(l);
+        }
+        for (ptr p = l; Spairp(p); p = Scdr(p))
+            Sunlock_object(p);
+        return l;
+    }
+
+    // record+pin every heap object a call creates; release all when the value
+    // is built (a moving GC can then never invalidate a pointer mid-build).
+    static void marshRoot(ptr p, std::vector<ptr>& roots) {
+        Slock_object(p);
+        roots.push_back(p);
+    }
+    static void marshRelease(std::vector<ptr>& roots) {
+        for (auto it = roots.rbegin(); it != roots.rend(); ++it)
+            Sunlock_object(*it);
+    }
+
+    static void fireSchemeNums(int id, const std::vector<double>& vals) {
+        if (!g_up)
+            return;
+
+        std::vector<ptr> elems;
+        std::vector<ptr> roots;
+        elems.reserve(vals.size());
+        for (auto v : vals) {
+            ptr f = Sflonum(v);
+            marshRoot(f, roots);
+            elems.push_back(f);
+        }
+        // build the list, pin cells, then release everything just before the call
+        ptr l = Snil;
+        for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
+            l = Scons(*it, l);
+            marshRoot(l, roots);
+        }
+        marshRelease(roots);
+        watchdogEnter("handler");
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-list")), Sinteger(id), l);
+        watchdogExit();
+    }
+
     static void fireScheme(int id) {
         if (!g_up)
             return;
@@ -2188,7 +2213,7 @@ namespace Config::Scheme {
     }
 
     // called from Scheme via foreign-procedure; flags are raw eBindFlags bits,
-    // assembled Scheme-side from the options alist
+    // assembled Scheme-side from the options plist
     static int hlSchemeBind(ptr tokens, int flags, const char* desc, const char* devices) {
         if (!g_up)
             return -1;
@@ -2439,26 +2464,31 @@ namespace Config::Scheme {
 
     // called from Scheme via foreign-procedure: newline-joined workspace
     // display names, or #f. split on the Scheme side.
+    // ---- FFI marshalling: proper scheme data, no newline-string shovelling ----
+    // Chez's GC runs at allocation points (Scons/Sstring allocate), and its
+    // moving collector relocates heap objects. Building a list from C must
+    // therefore root the objects held across allocations. Sinteger is an
+    // immediate (immune); cons cells and strings/flonums are heap objects and
+    // get Slock_object-pinned until the value is complete. Releasing just
+    // before the return is safe: nothing allocates in between, and the FFI
+    // return re-roots the result.
+
     static ptr hlSchemeWorkspaceNames() {
         if (!g_up)
             return Sfalse;
 
-        std::string joined;
+        // proper scheme data: a real list of ids, not a newline-joined string.
+        // (Sinteger is an immediate — only the cons cells need rooting.)
+        std::vector<int> ids;
         for (const auto& wsRef : State::Workspace::state()->workspaces()) {
             const auto ws = wsRef.lock();
             if (!ws)
                 continue;
-            const int id = g_nextWorkspaceId++;
-            g_workspaces.emplace(id, wsRef);
-            if (!joined.empty())
-                joined += '\n';
-            joined += std::to_string(id);
+            ids.push_back(g_nextWorkspaceId++);
+            g_workspaces.emplace(ids.back(), wsRef);
         }
 
-        if (joined.empty())
-            return Sfalse;
-
-        return Sstring_utf8(joined.c_str(), joined.size());
+        return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
     // called from Scheme via foreign-procedure: subscribe to submap changes
@@ -2506,23 +2536,16 @@ namespace Config::Scheme {
         if (!g_up)
             return Sfalse;
 
-        std::string joined;
+        std::vector<int> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!w->mapped())
                 continue;
-
-            if (!joined.empty())
-                joined += '\n';
-
             const int id = g_nextWindowId++;
             g_windows.emplace(id, PHLWINDOWREF(w));
-            joined += std::to_string(id);
+            ids.push_back(id);
         }
 
-        if (joined.empty())
-            return Sfalse;
-
-        return Sstring_utf8(joined.c_str(), joined.size());
+        return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
     static ptr hlSchemeWindowTitle(int id) {
@@ -2621,8 +2644,7 @@ namespace Config::Scheme {
             return Sfalse;
 
         const auto sz = window->size(Desktop::View::IGeometric::GEOMETRIC_GOAL);
-        const auto s  = std::to_string((int)sz.x) + "\n" + std::to_string((int)sz.y);
-        return Sstring_utf8(s.c_str(), s.size());
+        return Scons(Sinteger((int)sz.x), Sinteger((int)sz.y));   // (w . h)
     }
 
     static int hlSchemeWindowPid(int id) {
@@ -3460,6 +3482,240 @@ namespace Config::Scheme {
 
     // read side: marshal the value back as an encoded string
     // "b\n0|1" | "n\n<num>" | "s\n<str>" | "t\n(key\nvalue\n)*" ; #f = unknown
+
+    // ---- per-device config (upstream hl.device parity) -----------------------
+    // Lua's hl.device({ name, ... }) writes per-device input overrides;
+    // mirrored here as (hl-device-add! NAME . FIELDS). Write-only by parity:
+    // Lua exposes no device read/get, and a stored field cannot be unset
+    // (insert-or-assign only).
+
+    enum class eDeviceKind : uint8_t { BOOL, INT, FLOAT, STRING, VEC2 };
+
+    struct SDeviceField {
+        const char* name;
+        eDeviceKind kind;
+        double      lo, hi; // bounds for INT/FLOAT (unused otherwise)
+    };
+
+    // mirrored from DEVICE_FIELDS (LuaBindingsConfigRules.cpp)
+    static const SDeviceField DEVICE_FIELDS[] = {
+        {"sensitivity", eDeviceKind::FLOAT, -1, 1},      {"accel_profile", eDeviceKind::STRING, 0, 0},
+        {"rotation", eDeviceKind::INT, 0, 359},          {"kb_file", eDeviceKind::STRING, 0, 0},
+        {"kb_layout", eDeviceKind::STRING, 0, 0},        {"kb_variant", eDeviceKind::STRING, 0, 0},
+        {"kb_options", eDeviceKind::STRING, 0, 0},       {"kb_rules", eDeviceKind::STRING, 0, 0},
+        {"kb_model", eDeviceKind::STRING, 0, 0},         {"repeat_rate", eDeviceKind::INT, 0, 200},
+        {"repeat_delay", eDeviceKind::INT, 0, 2000},     {"natural_scroll", eDeviceKind::BOOL, 0, 0},
+        {"tap_button_map", eDeviceKind::STRING, 0, 0},   {"numlock_by_default", eDeviceKind::BOOL, 0, 0},
+        {"resolve_binds_by_sym", eDeviceKind::BOOL, 0, 0}, {"disable_while_typing", eDeviceKind::BOOL, 0, 0},
+        {"clickfinger_behavior", eDeviceKind::BOOL, 0, 0}, {"middle_button_emulation", eDeviceKind::BOOL, 0, 0},
+        {"tap_to_click", eDeviceKind::BOOL, 0, 0},       {"tap_and_drag", eDeviceKind::BOOL, 0, 0},
+        {"drag_lock", eDeviceKind::INT, 0, 2},           {"left_handed", eDeviceKind::BOOL, 0, 0},
+        {"scroll_method", eDeviceKind::STRING, 0, 0},    {"scroll_button", eDeviceKind::INT, 0, 300},
+        {"scroll_button_lock", eDeviceKind::BOOL, 0, 0}, {"scroll_points", eDeviceKind::STRING, 0, 0},
+        {"scroll_factor", eDeviceKind::FLOAT, 0, 100},   {"transform", eDeviceKind::INT, 0, 0},
+        {"output", eDeviceKind::STRING, 0, 0},           {"enabled", eDeviceKind::BOOL, 0, 0},
+        {"region_position", eDeviceKind::VEC2, 0, 0},    {"absolute_region_position", eDeviceKind::BOOL, 0, 0},
+        {"region_size", eDeviceKind::VEC2, 0, 0},        {"relative_input", eDeviceKind::BOOL, 0, 0},
+        {"active_area_position", eDeviceKind::VEC2, 0, 0}, {"active_area_size", eDeviceKind::VEC2, 0, 0},
+        {"flip_x", eDeviceKind::BOOL, 0, 0},             {"flip_y", eDeviceKind::BOOL, 0, 0},
+        {"drag_3fg", eDeviceKind::INT, 0, 2},            {"keybinds", eDeviceKind::BOOL, 0, 0},
+        {"share_states", eDeviceKind::INT, 0, 2},        {"release_pressed_on_close", eDeviceKind::BOOL, 0, 0},
+        {"tags", eDeviceKind::STRING, 0, 0},
+    };
+
+    // minimal ILuaConfigValue holding one device value. parse/push are unused
+    // by the plugin (values arrive as scheme objects); the as* readbacks feed
+    // the input manager's getDeviceInt/Float/String.
+    class CDeviceValue : public Config::Lua::ILuaConfigValue {
+      public:
+        CDeviceValue(bool b) : m_kind(eDeviceKind::BOOL), m_bool(b) { m_bSetByUser = true; }
+        CDeviceValue(Config::INTEGER i) : m_kind(eDeviceKind::INT), m_int(i) { m_bSetByUser = true; }
+        CDeviceValue(Config::FLOAT f) : m_kind(eDeviceKind::FLOAT), m_fl(f) { m_bSetByUser = true; }
+        CDeviceValue(Config::STRING s) : m_kind(eDeviceKind::STRING), m_str(std::move(s)) { m_bSetByUser = true; }
+        CDeviceValue(Config::VEC2 v) : m_kind(eDeviceKind::VEC2), m_vec(v) { m_bSetByUser = true; }
+
+        virtual Config::Lua::SParseError parse(lua_State*) override { return {}; }
+        virtual const std::type_info*    underlying() override {
+            switch (m_kind) {
+                case eDeviceKind::BOOL: return &typeid(bool);
+                case eDeviceKind::INT: return &typeid(Config::INTEGER);
+                case eDeviceKind::FLOAT: return &typeid(Config::FLOAT);
+                case eDeviceKind::STRING: return &typeid(Config::STRING);
+                case eDeviceKind::VEC2: return &typeid(Config::VEC2);
+            }
+            return &typeid(Config::VEC2);
+        }
+        virtual void const* data() override {
+            switch (m_kind) {
+                case eDeviceKind::BOOL: return &m_bool;
+                case eDeviceKind::INT: return &m_int;
+                case eDeviceKind::FLOAT: return &m_fl;
+                case eDeviceKind::STRING: return &m_str;
+                case eDeviceKind::VEC2: return &m_vec;
+            }
+            return nullptr;
+        }
+        virtual std::string toString() override {
+            switch (m_kind) {
+                case eDeviceKind::BOOL: return m_bool ? "true" : "false";
+                case eDeviceKind::INT: return std::to_string(m_int);
+                case eDeviceKind::FLOAT: {
+                    char buf[64];
+                    snprintf(buf, sizeof buf, "%.17g", m_fl);
+                    return buf;
+                }
+                case eDeviceKind::STRING: return m_str;
+                case eDeviceKind::VEC2: return std::format("{} x {}", (int)m_vec.x, (int)m_vec.y);
+            }
+            return "";
+        }
+        virtual void push(lua_State* L) override {
+            switch (m_kind) {
+                case eDeviceKind::BOOL: lua_pushboolean(L, m_bool); break;
+                case eDeviceKind::INT: lua_pushinteger(L, m_int); break;
+                case eDeviceKind::FLOAT: lua_pushnumber(L, m_fl); break;
+                case eDeviceKind::STRING: lua_pushstring(L, m_str.c_str()); break;
+                case eDeviceKind::VEC2:
+                    lua_newtable(L);
+                    lua_pushnumber(L, m_vec.x); lua_rawseti(L, -2, 1);
+                    lua_pushnumber(L, m_vec.y); lua_rawseti(L, -2, 2);
+                    break;
+            }
+        }
+        virtual void reset() override { m_bSetByUser = false; }
+        virtual Config::INTEGER asInt() override {
+            switch (m_kind) {
+                case eDeviceKind::BOOL: return m_bool ? 1 : 0;
+                case eDeviceKind::INT: return m_int;
+                case eDeviceKind::FLOAT: return (Config::INTEGER)m_fl;
+                default: return 0;
+            }
+        }
+        virtual Config::FLOAT asFloat() override {
+            switch (m_kind) {
+                case eDeviceKind::FLOAT: return m_fl;
+                case eDeviceKind::INT: return (Config::FLOAT)m_int;
+                default: return 0.F;
+            }
+        }
+        virtual Config::VEC2 asVec2() override { return m_vec; }
+        virtual Config::STRING asString() override {
+            if (m_kind == eDeviceKind::STRING) return m_str;
+            return toString();
+        }
+
+      private:
+        eDeviceKind     m_kind = eDeviceKind::BOOL;
+        bool            m_bool = false;
+        Config::INTEGER m_int  = 0;
+        Config::FLOAT   m_fl   = 0.F;
+        Config::STRING  m_str;
+        Config::VEC2    m_vec{0, 0};
+    };
+
+    static std::string schemeDatumToStr(ptr p) {
+        if (Ssymbolp(p))
+            p = Ssymbol_to_string(p);
+        std::string s;
+        for (iptr i = 0; i < Sstring_length(p); ++i)
+            s += (char)Sstring_ref(p, i);
+        return s;
+    }
+
+    // coerce a scheme value to the field's kind; sets g_configError on failure
+    static std::optional<std::pair<std::string, UP<CDeviceValue>>> deviceValue(const SDeviceField& f, ptr v) {
+        auto fail = [&](const char* why) -> std::optional<std::pair<std::string, UP<CDeviceValue>>> {
+            g_configError = std::format("hl-device-add!: field '{}': {}", f.name, why);
+            return std::nullopt;
+        };
+
+        if (f.kind == eDeviceKind::BOOL) {
+            if (v == Strue) return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(true))};
+            if (v == Sfalse) return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(false))};
+            return fail("expected #t or #f");
+        }
+        if (f.kind == eDeviceKind::STRING) {
+            if (!Sstringp(v))
+                return fail("expected a string");
+            return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(schemeDatumToStr(v)))};
+        }
+        if (f.kind == eDeviceKind::INT || f.kind == eDeviceKind::FLOAT) {
+            double d = 0;
+            if (Sfixnump(v)) d = (double)Sfixnum_value(v);
+            else if (Sflonump(v)) d = Sflonum_value(v);
+            else return fail("expected a number");
+            if ((f.lo != 0 || f.hi != 0) && (d < f.lo || d > f.hi))
+                return fail(std::format("out of range [{:.0g}, {:.0g}]", f.lo, f.hi).c_str());
+            if (f.kind == eDeviceKind::INT)
+                return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue((Config::INTEGER)d))};
+            return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue((Config::FLOAT)d))};
+        }
+        // VEC2: (x . y) or (x y)
+        if (!Spairp(v))
+            return fail("expected a coordinate pair");
+        auto asNum = [](ptr p, double& out) -> bool {
+            if (Sfixnump(p)) { out = (double)Sfixnum_value(p); return true; }
+            if (Sflonump(p)) { out = Sflonum_value(p); return true; }
+            return false;
+        };
+        double x, y;
+        ptr    tail = Scdr(v);
+        if (Spairp(tail)) {
+            if (!asNum(Scar(tail), y)) return fail("expected a coordinate pair");
+        } else if (!asNum(tail, y))
+            return fail("expected a coordinate pair");
+        if (!asNum(Scar(v), x)) return fail("expected a coordinate pair");
+        return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(Config::VEC2(x, y)))};
+    }
+
+    // (hl-device-add! NAME . FIELDS)
+    static int hlSchemeDeviceAdd(const char* name, ptr fields) {
+        if (!g_up || !name || !*name) {
+            g_configError = "hl-device-add!: a device name is required";
+            return -1;
+        }
+        if (!Spairp(fields)) {
+            g_configError = "hl-device-add!: fields must be a plist, e.g. (hl-device-add! NAME 'enabled #t)";
+            return -1;
+        }
+
+        std::string dev = name;
+        std::replace(dev.begin(), dev.end(), ' ', '-');
+
+        // validate + coerce every field first: a bad field writes nothing
+        std::vector<std::pair<std::string, UP<CDeviceValue>>> values;
+        ptr l = fields;
+        while (Spairp(l)) {
+            if (!Spairp(Scdr(l))) {
+                g_configError = "hl-device-add!: odd plist of fields";
+                return -1;
+            }
+            const std::string key = schemeDatumToStr(Scar(l));
+            const SDeviceField* f  = nullptr;
+            for (const auto& F : DEVICE_FIELDS) {
+                if (key == F.name) { f = &F; break; }
+            }
+            if (!f) {
+                g_configError = std::format("hl-device-add!: unknown field '{}'", key);
+                return -1;
+            }
+            auto v = deviceValue(*f, Scar(Scdr(l)));
+            if (!v)
+                return -1;
+            values.emplace_back(std::move(*v));
+            l = Scdr(Scdr(l));
+        }
+
+        // Config::mgr() is the abstract interface; the device store lives on
+        // the concrete manager (same cast used elsewhere in this file)
+        auto* cmgr = sc<Config::Lua::CConfigManager*>(Config::mgr().get());
+        auto& cfg  = cmgr->m_deviceConfigs[dev];
+        for (auto& [k, val] : values)
+            cfg.values.insert_or_assign(std::move(k), std::move(val));
+
+        Config::Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_INPUT_DEVICES);
+        return 0;
+    }
     static ptr hlConfigGet(const char* key) {
         if (!g_up)
             return Sfalse;
@@ -3468,46 +3724,71 @@ namespace Config::Scheme {
             return Sfalse;
         lua_State* L = configScratch();
         val->push(L);
-        std::string out;
+
+        std::vector<ptr> roots;
+        ptr              result = Sfalse;
+
         switch (lua_type(L, -1)) {
-            case LUA_TNIL: lua_settop(L, 0); return Sfalse;
-            case LUA_TBOOLEAN: out = std::string("b\n") + (lua_toboolean(L, -1) ? "1" : "0"); break;
+            case LUA_TNIL: break;
+            case LUA_TBOOLEAN: result = lua_toboolean(L, -1) ? Strue : Sfalse; break;
             case LUA_TNUMBER: {
-                char buf[64];
-                snprintf(buf, sizeof buf, "n\n%.17g", lua_tonumber(L, -1));
-                out = buf;
+                const auto D = lua_tonumber(L, -1);
+                result       = (long long)D == D ? Sinteger((long long)D) : Sflonum(D);
                 break;
             }
-            case LUA_TSTRING: out = std::string("s\n") + lua_tostring(L, -1); break;
+            case LUA_TSTRING: {
+                const char* s = lua_tostring(L, -1);
+                result        = Sstring_utf8(s, strlen(s));
+                break;
+            }
             case LUA_TTABLE: {
-                out = "t\n";
+                // tables come back as a PLIST (key value key value ...) — the
+                // same shape hl-config-add! accepts going in
+                std::vector<ptr> elems;
                 lua_pushnil(L);
                 while (lua_next(L, -2) != 0) {
-                    std::string k, v;
-                    if (lua_type(L, -2) == LUA_TSTRING)
-                        k = lua_tostring(L, -2);
-                    else
-                        k = std::to_string((long long)lua_tointeger(L, -2));
+                    if (lua_type(L, -2) == LUA_TSTRING) {
+                        const char* k = lua_tostring(L, -2);
+                        ptr         keySym = Sstring_to_symbol(k);
+                        marshRoot(keySym, roots);
+                        elems.push_back(keySym);
+                    } else {
+                        elems.push_back(Sinteger(lua_tointeger(L, -2)));
+                    }
+
                     switch (lua_type(L, -1)) {
                         case LUA_TNUMBER: {
-                            char buf[64];
-                            snprintf(buf, sizeof buf, "%.17g", lua_tonumber(L, -1));
-                            v = buf;
+                            const auto D = lua_tonumber(L, -1);
+                            ptr         v = (long long)D == D ? Sinteger((long long)D) : Sflonum(D);
+                            marshRoot(v, roots);
+                            elems.push_back(v);
                             break;
                         }
-                        case LUA_TSTRING: v = lua_tostring(L, -1); break;
-                        case LUA_TBOOLEAN: v = lua_toboolean(L, -1) ? "1" : "0"; break;
-                        default: v = "?"; break;
+                        case LUA_TSTRING: {
+                            const char* s = lua_tostring(L, -1);
+                            ptr         v = Sstring_utf8(s, strlen(s));
+                            marshRoot(v, roots);
+                            elems.push_back(v);
+                            break;
+                        }
+                        case LUA_TBOOLEAN: elems.push_back(lua_toboolean(L, -1) ? Strue : Sfalse); break;
+                        default: break;
                     }
-                    out += k + "\n" + v + "\n";
                     lua_pop(L, 1);
+                }
+                result = Snil;
+                for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
+                    result = Scons(*it, result);
+                    marshRoot(result, roots);
                 }
                 break;
             }
-            default: lua_settop(L, 0); return Sfalse;
+            default: break;
         }
+
         lua_settop(L, 0);
-        return Sstring_utf8(out.c_str(), out.size());
+        marshRelease(roots);   // release just before returning; nothing allocates after
+        return result;
     }
 
     // ---- monitor rules ---------------------------------------------------------
@@ -4456,13 +4737,29 @@ namespace Config::Scheme {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_enabled10bit); });
     }
 
-    // reserved area as a k\nv\n-encoded map (schemed into an alist); all-zero
+    // reserved area; all-zero means unset
     // when nothing is reserved
     static ptr hlMonitorReserved(int id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr {
-            const auto& r = mon->m_reservedArea;
-            const auto  s = std::format("top\n{}\nleft\n{}\nright\n{}\nbottom\n{}\n", r.top(), r.left(), r.right(), r.bottom());
-            return Sstring_utf8(s.c_str(), s.size());
+            // a plist: (top n left n right n bottom n)
+            const auto&         r = mon->m_reservedArea;
+            std::vector<ptr>    roots;
+            std::vector<ptr>    elems;
+            const std::string   KEYS[] = {"top", "left", "right", "bottom"};
+            const int           VALUES[] = {r.top(), r.left(), r.right(), r.bottom()};
+            for (int i = 0; i < 4; ++i) {
+                ptr k = Sstring_to_symbol(KEYS[i].c_str());
+                marshRoot(k, roots);
+                elems.push_back(k);
+                elems.push_back(Sinteger(VALUES[i]));
+            }
+            ptr l = Snil;
+            for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
+                l = Scons(*it, l);
+                marshRoot(l, roots);
+            }
+            marshRelease(roots);
+            return l;
         });
     }
 
@@ -4519,39 +4816,47 @@ namespace Config::Scheme {
         const auto ws = workspaceFromSelector(sel ? sel : "");
         if (!ws)
             return Sfalse;
-        std::string joined;
+        std::vector<int> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!w->mapped() || w->m_workspace != ws)
                 continue;
-            const int id = g_nextWindowId++;
-            g_windows.emplace(id, PHLWINDOWREF(w));
-            if (!joined.empty())
-                joined += '\n';
-            joined += std::to_string(id);
+            ids.push_back(g_nextWindowId++);
+            g_windows.emplace(ids.back(), PHLWINDOWREF(w));
         }
-        if (joined.empty())
-            return Sfalse;
-        return Sstring_utf8(joined.c_str(), joined.size());
+        return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
     // layer surfaces as "monitor\nnamespace\n" pairs
     static ptr hlLayers() {
         if (!g_up)
             return Sfalse;
-        std::string out;
+        std::vector<ptr> roots;
+        std::vector<ptr> layers;
         for (const auto& mon : State::monitorState()->monitors()) {
             for (const auto& level : mon->m_layerSurfaceLayers) {
                 for (const auto& lsRef : level) {
                     const auto ls = lsRef.lock();
                     if (!ls)
                         continue;
-                    out += mon->m_name + "\n" + ls->m_namespace + "\n";
+                    ptr monName = Sstring_utf8(mon->m_name.c_str(), mon->m_name.size());
+                    marshRoot(monName, roots);
+                    ptr nsName = Sstring_utf8(ls->m_namespace.c_str(), ls->m_namespace.size());
+                    marshRoot(nsName, roots);
+                    ptr pair = Scons(monName, nsName);
+                    marshRoot(pair, roots);
+                    layers.push_back(pair);
                 }
             }
         }
-        if (out.empty())
+        if (layers.empty())
             return Sfalse;
-        return Sstring_utf8(out.c_str(), out.size());
+        ptr l = Snil;
+        for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
+            l = Scons(*it, l);
+            marshRoot(l, roots);
+        }
+        marshRelease(roots);
+        return l;   // ((monitor . namespace) ...)
     }
 
     static int hlIsKeyDown(const char* key) {
@@ -4566,15 +4871,22 @@ namespace Config::Scheme {
     static ptr hlLoadedPlugins() {
         if (!g_up || !g_pPluginSystem)
             return Sfalse;
-        std::string out;
+        std::vector<ptr> roots;
+        std::vector<ptr> names;
         for (const auto* plugin : g_pPluginSystem->getAllPlugins()) {
-            if (!out.empty())
-                out += '\n';
-            out += plugin->m_name;
+            ptr n = Sstring_utf8(plugin->m_name.c_str(), plugin->m_name.size());
+            marshRoot(n, roots);
+            names.push_back(n);
         }
-        if (out.empty())
+        if (names.empty())
             return Sfalse;
-        return Sstring_utf8(out.c_str(), out.size());
+        ptr l = Snil;
+        for (auto it = names.rbegin(); it != names.rend(); ++it) {
+            l = Scons(*it, l);
+            marshRoot(l, roots);
+        }
+        marshRelease(roots);
+        return l;   // ("plugin-a" "plugin-b" ...)
     }
 
     static ptr hlVersion() {
@@ -4586,19 +4898,14 @@ namespace Config::Scheme {
         if (!g_up)
             return Sfalse;
         const std::string selector = sel ? sel : "";
-        std::string       joined;
+        std::vector<int> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!windowMatchesSelector(w, selector))
                 continue;
-            const int id = g_nextWindowId++;
-            g_windows.emplace(id, PHLWINDOWREF(w));
-            if (!joined.empty())
-                joined += '\n';
-            joined += std::to_string(id);
+            ids.push_back(g_nextWindowId++);
+            g_windows.emplace(ids.back(), PHLWINDOWREF(w));
         }
-        if (joined.empty())
-            return Sfalse;
-        return Sstring_utf8(joined.c_str(), joined.size());
+        return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
     static ptr hlWindowFullscreenHandler(int id) {
@@ -4724,7 +5031,7 @@ namespace Config::Scheme {
                 dx = e.swipe->delta.x;
                 dy = e.swipe->delta.y;
             }
-            fireSchemeStr(m_updateId, std::format("{} {} {}", dx, dy, e.scale));
+            fireSchemeNums(m_updateId, {dx, dy, e.scale});   // (dx dy scale)
         }
         void  end(const STrackpadGestureEnd& e) override {
             if (m_endId >= 0)
@@ -4781,12 +5088,11 @@ namespace Config::Scheme {
             e = g_nextBindId++;
             g_pTrackpadGestures->addGesture(
                 makeUnique<CSchemeGesture>(-1, b, u, e), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
-            const auto ids = std::to_string(b) + "\n" + std::to_string(u) + "\n" + std::to_string(e);
-            return Sstring_utf8(ids.c_str(), ids.size());
+            return schemeIntList({b, u, e});   // (begin-id update-id end-id)
         }
         g_pTrackpadGestures->addGesture(makeUnique<CSchemeGesture>(a, -1, -1, -1), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale),
                                         disableInhibit != 0);
-        return Sstring_utf8(std::to_string(a).c_str(), std::to_string(a).size());
+        return Sinteger(a);
     }
 
 
@@ -4826,19 +5132,13 @@ namespace Config::Scheme {
         if (!g_up)
             return Sfalse;
 
-        std::string joined;
+        std::vector<int> ids;
         for (const auto& m : State::monitorState()->monitors()) {
-            const int id = g_nextMonitorId++;
-            g_monitors.emplace(id, PHLMONITORREF(m));
-            if (!joined.empty())
-                joined += '\n';
-            joined += std::to_string(id);
+            ids.push_back(g_nextMonitorId++);
+            g_monitors.emplace(ids.back(), PHLMONITORREF(m));
         }
 
-        if (joined.empty())
-            return Sfalse;
-
-        return Sstring_utf8(joined.c_str(), joined.size());
+        return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
     static int hlSchemeWindowEventListen(int which) {
@@ -5028,8 +5328,7 @@ namespace Config::Scheme {
             return Sfalse;
 
         const auto pos = Pointer::mgr()->untransformedPosition();
-        const auto s   = std::to_string((int)pos.x) + "\n" + std::to_string((int)pos.y);
-        return Sstring_utf8(s.c_str(), s.size());
+        return Scons(Sinteger((int)pos.x), Sinteger((int)pos.y));   // (x . y)
     }
 
     static int hlSchemeWorkspaceActiveListen() {
@@ -5363,6 +5662,7 @@ namespace Config::Scheme {
         Sregister_symbol("hl-config-set", (void*)hlConfigSet);
         Sregister_symbol("hl-config-last-error", (void*)hlConfigLastError);
         Sregister_symbol("hl-config-get", (void*)hlConfigGet);
+        Sregister_symbol("hl-scheme-device-add", (void*)hlSchemeDeviceAdd);
         Sregister_symbol("hl-monitor-begin", (void*)hlMonitorBegin);
         Sregister_symbol("hl-monitor-field-str", (void*)hlMonitorFieldStr);
         Sregister_symbol("hl-monitor-field-num", (void*)hlMonitorFieldNum);
@@ -5470,7 +5770,15 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-window-initial-title", (void*)hlSchemeWindowInitialTitle);
         Sregister_symbol("hl-scheme-window-x11", (void*)hlSchemeWindowX11);
         Sregister_symbol("hl-scheme-get-submap-ctx", (void*)+[]() -> ptr {
-            return Sstring_utf8((g_regSubmap + "\n" + g_regSubmapReset).c_str(), g_regSubmap.size() + 1 + g_regSubmapReset.size());
+            std::vector<ptr> roots;
+            ptr              name  = Sstring_utf8(g_regSubmap.c_str(), g_regSubmap.size());
+            marshRoot(name, roots);
+            ptr reset = Sstring_utf8(g_regSubmapReset.c_str(), g_regSubmapReset.size());
+            marshRoot(reset, roots);
+            ptr pair = Scons(name, reset);
+            marshRoot(pair, roots);
+            marshRelease(roots);
+            return pair;   // (name . reset)
         });
         Sregister_symbol("hl-scheme-set-submap-ctx", (void*)+[](const char* name, const char* reset) {
             g_regSubmap      = name ? name : "";

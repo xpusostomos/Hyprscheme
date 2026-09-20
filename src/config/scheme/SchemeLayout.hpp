@@ -56,7 +56,7 @@ namespace Config::Scheme::Layouts {
         void                             reportError(const std::string& message);
     };
 
-    // called once after the scheme heap is built: registers hl-scheme-define-layout
+    // called once after the scheme heap is built: registers hl-scheme-layout-add
     void registerSymbols();
     // called on config reload: deactivate + unregister all scheme layouts
     void clear();

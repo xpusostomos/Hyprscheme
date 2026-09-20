@@ -25,6 +25,22 @@ namespace Config::Scheme::Layouts {
     static std::vector<SP<SSchemeLayoutProvider>> g_layouts;
     static std::vector<Hyprutils::Signal::CHyprSignalListener> g_layoutEventListeners;
 
+    // FFI marshalling: build a real scheme list (the payload is all fixnums —
+    // only the cons cells are heap objects, pinned with Slock_object while
+    // stitching; see the marshalling notes in SchemeManager.cpp).
+    static ptr schemeIntList(const std::vector<int>& vals) {
+        if (vals.empty())
+            return Snil;
+        ptr l = Snil;
+        for (auto it = vals.rbegin(); it != vals.rend(); ++it) {
+            l = Scons(Sinteger(*it), l);
+            Slock_object(l);
+        }
+        for (ptr p = l; Spairp(p); p = Scdr(p))
+            Sunlock_object(p);
+        return l;
+    }
+
     static ptr dispatchLayoutEvent(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider, const std::string& event,
                                    const std::vector<SP<Layout::ITarget>>& targets, const Vector2D& delta = {}, int corner = 0);
     static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, ptr result);
@@ -36,7 +52,7 @@ namespace Config::Scheme::Layouts {
         const int id = Internals::g_nextWindowId++;
         Internals::g_windows.emplace(id, PHLWINDOWREF(window));
 
-        Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event")), Sinteger(provider->fnId), Sstring(event), Sstring(std::to_string(id).c_str()));
+        Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event")), Sinteger(provider->fnId), Sstring(event), Sinteger(id));
     }
 
     static std::string normalizeName(std::string name) {
@@ -46,7 +62,7 @@ namespace Config::Scheme::Layouts {
     }
 
     void registerSymbols() {
-        Sregister_symbol("hl-scheme-define-layout", (void*)+[](const char* name) -> int {
+        Sregister_symbol("hl-scheme-layout-add", (void*)+[](const char* name) -> int {
             if (!Internals::g_up || !name || !*name)
                 return -1;
 
@@ -242,21 +258,25 @@ namespace Config::Scheme::Layouts {
 
         const auto AREA = space->workArea();
 
-        std::string payload = std::to_string(targets.size()) + "\n" + std::to_string(AREA.w) + "\n" + std::to_string(AREA.h);
-        if (event == "resize")
-            payload += "\n" + std::to_string((int)delta.x) + "\n" + std::to_string((int)delta.y) + "\n" + std::to_string(corner);
+        // the payload is one real scheme list: (count W H id… [dx dy corner])
+        std::vector<int> vals = {sc<int>(targets.size()), sc<int>(AREA.w), sc<int>(AREA.h)};
+        if (event == "resize") {
+            vals.push_back((int)delta.x);
+            vals.push_back((int)delta.y);
+            vals.push_back(corner);
+        }
         for (const auto& t : targets) {
             const auto window = t->window();
             if (!window) {
-                payload += "\n0";
+                vals.push_back(0);
                 continue;
             }
             const int id = Internals::g_nextWindowId++;
             Internals::g_windows.emplace(id, PHLWINDOWREF(window));
-            payload += "\n" + std::to_string(id);
+            vals.push_back(id);
         }
 
-        return Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event")), Sinteger(provider->fnId), Sstring(event.c_str()), Sstring_utf8(payload.c_str(), payload.size()));
+        return Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event")), Sinteger(provider->fnId), Sstring(event.c_str()), schemeIntList(vals));
     }
 
     static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, ptr result) {

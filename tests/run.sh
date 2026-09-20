@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 BIN=${BIN:-$HOME/.local/bin/hyprland-scheme}
 FILTER=${1:-}
 WORK=$(mktemp -d /tmp/hyprscheme-test.XXXXXX)
+export WORK
 export XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state
 # the scheme config reaches the plugin through HYPRSCHEME_CONFIG — dogfoods
 # the override on every run (if the env handling breaks, no test passes)
