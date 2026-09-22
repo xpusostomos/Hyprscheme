@@ -1,7 +1,11 @@
 #pragma once
 
-#include <src/helpers/memory/Memory.hpp>
+#ifndef HYPRTHEME_SCHEME_H_SEEN
+#define HYPRTHEME_SCHEME_H_SEEN
+#include <scheme.h>
+#endif
 #include <src/layout/algorithm/TiledAlgorithm.hpp>
+#include "SThunkRef.hpp"
 
 #include <optional>
 #include <string>
@@ -26,9 +30,12 @@ namespace Config::Scheme::Layouts {
 
     struct SSchemeLayoutProvider {
         std::string name;  // "scheme:NAME"
-        int         fnId   = -1;
         bool        active = true;
         bool        didError = false;
+        // the callback spec plist, LOCKED (SThunkRef.hpp — include scheme.h
+        // first): the provider is destroyed at Layouts::clear(), which
+        // unlocks it; the callbacks travel with the provider, no registry
+        SThunkRef spec;   // locked; unlocked when the provider is destroyed
     };
 
     class CSchemeTiledAlgorithm : public Layout::ITiledAlgorithm {

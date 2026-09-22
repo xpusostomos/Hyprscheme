@@ -1,6 +1,6 @@
 # events: window-open fires and delivers a usable handle
 $SCHEME '(define ev-open-count 0)' >/dev/null
-$SCHEME '(hl-on-window-open (lambda (w) (hl-state-set! (quote ev-open-count) (+ 1 (hl-state-ref (quote ev-open-count) 0)))))' >/dev/null
+$SCHEME '(hl-window-open-notification-add! (lambda (w) (hl-state-set! (quote ev-open-count) (+ 1 (hl-state-ref (quote ev-open-count) 0)))))' >/dev/null
 before=$($SCHEME '(hl-state-ref (quote ev-open-count))')
 $SCHEME '(hl-exec-shell! "foot -a ev-check")' >/dev/null
 sleep 1.5

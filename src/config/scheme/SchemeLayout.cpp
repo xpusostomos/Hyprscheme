@@ -1,9 +1,14 @@
+#ifndef HYPRTHEME_SCHEME_H_SEEN
+#define HYPRTHEME_SCHEME_H_SEEN
+#include <scheme.h>
+#endif
+#include "SThunkRef.hpp"
 #include "SchemeLayout.hpp"
 
 #include "SchemeInternals.hpp"
 
 extern "C" {
-#include <scheme.h>
+
 }
 
 #include <src/debug/log/Logger.hpp>
@@ -28,7 +33,8 @@ namespace Config::Scheme::Layouts {
     // FFI marshalling: build a real scheme list (the payload is all fixnums —
     // only the cons cells are heap objects, pinned with Slock_object while
     // stitching; see the marshalling notes in SchemeManager.cpp).
-    static ptr schemeIntList(const std::vector<int>& vals) {
+    template <typename T>
+    static ptr schemeIntList(const std::vector<T>& vals) {
         if (vals.empty())
             return Snil;
         ptr l = Snil;
@@ -49,10 +55,9 @@ namespace Config::Scheme::Layouts {
         if (!provider || !provider->active || !window)
             return;
 
-        const int id = Internals::g_nextWindowId++;
-        Internals::g_windows.emplace(id, PHLWINDOWREF(window));
+        const auto id = Internals::mintWindowHandle(window);
 
-        Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event")), Sinteger(provider->fnId), Sstring(event), Sinteger(id));
+        Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event-spec")), provider->spec.obj, Sstring(event), Sinteger(id));
     }
 
     static std::string normalizeName(std::string name) {
@@ -62,7 +67,7 @@ namespace Config::Scheme::Layouts {
     }
 
     void registerSymbols() {
-        Sregister_symbol("hl-scheme-layout-add", (void*)+[](const char* name) -> int {
+        Sregister_symbol("hl-scheme-layout-add", (void*)+[](const char* name, ptr spec) -> int {
             if (!Internals::g_up || !name || !*name)
                 return -1;
 
@@ -74,7 +79,7 @@ namespace Config::Scheme::Layouts {
 
             auto provider  = makeShared<SSchemeLayoutProvider>();
             provider->name = full;
-            provider->fnId = Internals::g_nextBindId++;
+            provider->spec.set(spec);
 
             if (!Layout::Supplementary::algoMatcher()->registerTiledAlgo(full, &typeid(CSchemeTiledAlgorithm),
                     [provider] { return makeUnique<CSchemeTiledAlgorithm>(provider); })) {
@@ -92,7 +97,7 @@ namespace Config::Scheme::Layouts {
             g_layoutEventListeners.emplace_back(Event::bus()->m_events.window.openLate.listen([provider](PHLWINDOW w) { fireSchemeLayoutWin(provider, "window-open", w); }));
             g_layoutEventListeners.emplace_back(Event::bus()->m_events.window.close.listen([provider](PHLWINDOW w) { fireSchemeLayoutWin(provider, "window-close", w); }));
 
-            return provider->fnId;
+            return 0;
         });
     }
 
@@ -247,7 +252,7 @@ namespace Config::Scheme::Layouts {
     // extras (resize: dx, dy, corner). returns the callback's return ptr,
     // or Sfalse when the callback is absent or failed.
     static ptr dispatchEventRaw(SP<SSchemeLayoutProvider> provider, const std::string& event, const std::string& payload) {
-        return Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event")), Sinteger(provider->fnId), Sstring(event.c_str()), Sstring_utf8(payload.c_str(), payload.size()));
+        return Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event-spec")), provider->spec.obj, Sstring(event.c_str()), Sstring_utf8(payload.c_str(), payload.size()));
     }
 
     static ptr dispatchLayoutEvent(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider, const std::string& event,
@@ -259,7 +264,7 @@ namespace Config::Scheme::Layouts {
         const auto AREA = space->workArea();
 
         // the payload is one real scheme list: (count W H id… [dx dy corner])
-        std::vector<int> vals = {sc<int>(targets.size()), sc<int>(AREA.w), sc<int>(AREA.h)};
+        std::vector<uintptr_t> vals = {targets.size(), (uintptr_t)AREA.w, (uintptr_t)AREA.h};
         if (event == "resize") {
             vals.push_back((int)delta.x);
             vals.push_back((int)delta.y);
@@ -271,12 +276,10 @@ namespace Config::Scheme::Layouts {
                 vals.push_back(0);
                 continue;
             }
-            const int id = Internals::g_nextWindowId++;
-            Internals::g_windows.emplace(id, PHLWINDOWREF(window));
-            vals.push_back(id);
+            vals.push_back(Internals::mintWindowHandle(window));
         }
 
-        return Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event")), Sinteger(provider->fnId), Sstring(event.c_str()), schemeIntList(vals));
+        return Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event-spec")), provider->spec.obj, Sstring(event.c_str()), schemeIntList(vals));
     }
 
     static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, ptr result) {

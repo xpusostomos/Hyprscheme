@@ -83,6 +83,7 @@ ok '(hl-window-float-set! w #f)'
 # swallow toggle moved later (it swallows incoming windows, hiding them, which
 # stalls destroy-based checks — see the notes by the sacrificial kill)
 ok '(hl-window-prop-set! w "opacity" "0.9")'
+ok '(hl-window-prop-set! w (quote opacity) "0.7")   ; props accept symbols too'
 ok '(hl-window-deny-from-group-set! w)'
 ok '(hl-window-group-move-in! w "r")'
 ok '(boolean? (hl-window-group-move-out! w "r"))'
@@ -90,6 +91,37 @@ ok '(hl-window-group-move-in-or-create! w "r")'
 ok '(boolean? (hl-window-deny-from-group? w))'
 ok '(hl-window-prop-set! w "opacity" "0.5")'
 ok '(let ((v (hl-window-prop w "opacity"))) (or (number? v) (eq? v #f)))'
+
+# ---- window read-side fields (LuaWindow parity) -----------------------------
+ok '(let ((a (hl-window-address w))) (and (string? a) (equal? (substring a 0 2) "0x")))'
+# the address is the stable identity: two DIFFERENT handles for the same
+# window carry the SAME address
+ok '(let ((w2 (hl-window-from "class:^api-main$")))
+     (and (not (= (hl-window-id w) (hl-window-id w2)))
+       (equal? (hl-window-address w) (hl-window-address w2))))'
+ok '(hl-window-mapped? w)'
+ok '(hl-window-visible? w)'
+ok '(hl-window-accepts-input? w)'
+ok '(let ((p (hl-window-position w))) (and (pair? p) (number? (car p)) (number? (cdr p))))'
+ok '(integer? (hl-window-focus-history-id w))'
+ok '(and (string? (hl-window-content-type w)) (if (member (hl-window-content-type w) (quote ("none" "photo" "video" "game"))) #t #f))'
+ok '(let ((a (hl-window-stable-id w))) (and (string? a) (not (equal? (substring a 0 2) "0x"))))'
+ok '(boolean? (hl-window-pin-fullscreened? w))'
+ok '(boolean? (hl-window-allowed-over-fullscreen? w))'
+ok '(boolean? (hl-window-tearing-hint? w))'
+ok '(boolean? (hl-window-inhibiting-idle? w))'
+ok '(eq? (hl-window-swallowing w) #f)'
+ok '(null? (hl-window-tags w))'
+ok '(let ((t (hl-window-xdg-tag w))) (or (string? t) (not t)))'
+ok '(let ((d (hl-window-xdg-description w))) (or (string? d) (not d)))'
+# layout plist: 'name is always there (string); the fixture may be tiled or
+# floating — a floating window has no layout target and gets #f
+ok '(let ((l (hl-window-layout w)))
+     (or (not l)
+       (and (pair? l) (eq? (car l) (quote name)) (string? (cadr l)))))'
+# static tags round-trip through the tag keeper the reader walks
+ok '(begin (hl-window-tag-add! w "api-read-tag") (equal? (hl-window-tags w) (quote ("api-read-tag"))))'
+ok '(begin (hl-window-tags-clear! w) (null? (hl-window-tags w)))'
 ok '(hl-window-signal! w 28)'
 
 # groups
@@ -194,6 +226,12 @@ ok '(integer? (hl-monitor-transform am))'
 ok '(number? (hl-monitor-refresh-rate am))'
 ok '(string? (hl-monitor-mode am))'
 ok '(boolean? (hl-monitor-power? am))'
+ok '(string? (hl-monitor-serial am))'
+ok '(let ((p (hl-monitor-physical-size am))) (and (pair? p) (integer? (car p)) (integer? (cdr p))))'
+ok '(let ((l (hl-monitor-mirrors am))) (list? l))'
+ok '(let ((l (hl-monitor-available-modes am))) (list? l))'
+ok '(let ((p (hl-monitor-hardware-details am))) (and (pair? p) (string? (hl--plist-get p (quote backend) ""))))'
+ok '(let ((l (hl-monitor-available-modes am))) (or (null? l) (and (pair? (car l)) (integer? (car (car l))))))'
 ok '(boolean? (hl-monitor-vrr? am))'
 ok '(boolean? (hl-monitor-10bit? am))'
 ok '(let ((r (hl-monitor-reserved am))) (and (pair? r) (eq? (car r) (quote top))))'
@@ -229,6 +267,56 @@ ok '(hl-cursor-move-to-corner! w 0)'
 ok '(> (hl-exec-shell! "true") 0)'
 ok '(hl-exec! "true")'
 ok '(hl-exec-shell-with-rules! "[float] true")'
+# exec-with-rule: spawn under a one-shot effects rule (no match — the executor
+# tags the spawned window by pid)
+idok '(hl-exec-with-rule! "foot -a exec-rule" (quote float) #t)'
+WAIT_FOR 10 '(let ((w (hl-window-from "class:^exec-rule$"))) (if w #t #f))' >/dev/null || { echo "exec-rule fixture never appeared"; FAILED=1; }
+$SCHEME '(define exec-rule-w (hl-window-from "class:^exec-rule$"))' >/dev/null
+ok '(begin (hl-window-focus! exec-rule-w) (hl-window-floating? exec-rule-w))'
+bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-exec-with-rule! "true" (quote bogus_effect) #t))))')
+[[ "$bad_exec" == *"bogus_effect"* ]] || { echo "FAIL: unknown exec effect not rejected => [$bad_exec]"; FAILED=1; }
+
+# ---- live notifications (upstream hl.notification object parity) ------------
+ok '(let ((n (hl-notification-add! (quote text) "api-notif" (quote timeout) 5000
+         (quote icon) "info" (quote font-size) 15 (quote color) "0x80FF80FF")))
+     (and (string? (hl-notification-text n))
+       (equal? (hl-notification-text n) "api-notif")
+       (= (hl-notification-timeout n) 5000)
+       (integer? (hl-notification-icon n))
+       (= (hl-notification-font-size n) 15)
+       (integer? (hl-notification-color n))))'
+ok '(let ((n (hl-notification-add! (quote text) "api-rw" (quote timeout) 9000)))
+     (and (begin (hl-notification-text-set! n "api-rw-2") #t)
+       (equal? (hl-notification-text n) "api-rw-2")
+       (begin (hl-notification-timeout-set! n 7000) (= (hl-notification-timeout n) 7000))
+       (begin (hl-notification-font-size-set! n 18) (= (hl-notification-font-size n) 18))
+       (begin (hl-notification-icon-set! n "warn") (= (hl-notification-icon n) 0))))'
+ok '(let ((n (hl-notification-add! (quote text) "api-pause" (quote timeout) 60000)))
+     (and (hl-notification-paused-set! n #t) (hl-notification-paused? n)
+       (hl-notification-paused-set! n) (not (hl-notification-paused? n))
+       (hl-notification-paused-set! n) (hl-notification-paused? n)))'
+ok '(let ((n (hl-notification-add! (quote text) "api-elapsed" (quote timeout) 60000)))
+     (and (number? (hl-notification-elapsed n)) (number? (hl-notification-age n))
+       (>= (hl-notification-age n) (hl-notification-elapsed n))))'
+ok '(let ((n (hl-notification-add! (quote text) "api-dup" (quote timeout) 60000))
+         (m (hl-notification-add! (quote text) "api-dup" (quote timeout) 60000)))
+     (and (not (hl-notification=? n m)) (hl-notification=? n n)))'
+ok '(begin (hl-notification-dismiss! (car (filter (lambda (n) (equal? (hl-notification-text n) "api-dup")) (hl-notifications)))) #t)'
+WAIT_FOR 8 '(not (exists (lambda (n) (equal? (hl-notification-text n) "api-dup")) (map hl-notification-text (hl-notifications))))' >/dev/null 2>&1 || true
+ok '(let ((n (car (filter (lambda (n) (equal? (hl-notification-text n) "api-notif")) (hl-notifications)))))
+     (and n (hl-notification-alive? n)))'
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote timeout) 100))))')
+[[ "$bad_notif" == *"'text is required"* ]] || { echo "FAIL: missing text not rejected => [$bad_notif]"; FAILED=1; }
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote text) "x"))))')
+[[ "$bad_notif" == *"'timeout is required"* ]] || { echo "FAIL: missing timeout not rejected => [$bad_notif]"; FAILED=1; }
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote text) "x" (quote timeout) 100 (quote icon) "bogus"))))')
+[[ "$bad_notif" == *"bad 'icon"* ]] || { echo "FAIL: bad icon not rejected => [$bad_notif]"; FAILED=1; }
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote text) "x" (quote timeout) 100 (quote font-size) 0))))')
+[[ "$bad_notif" == *"font-size"* ]] || { echo "FAIL: bad font-size not rejected => [$bad_notif]"; FAILED=1; }
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote text) "x" (quote timeout) 100 (quote bogus_field) 1))))')
+[[ "$bad_notif" == *"bogus_field"* ]] || { echo "FAIL: unknown notification field not rejected => [$bad_notif]"; FAILED=1; }
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (let ((n (hl-notification-add! (quote text) "x" (quote timeout) 100))) (hl-notification-timeout-set! n -5)))))')
+[[ "$bad_notif" == *">= 0"* ]] || { echo "FAIL: negative timeout not rejected => [$bad_notif]"; FAILED=1; }
 
 # ---- notifications / misc ---------------------------------------------------
 ok '(hl-notify! "api coverage" 100)'
@@ -273,33 +361,61 @@ ok '(boolean? (hl-rule-enabled? api-layer-rule))'
 ok '(hl-rule-set-enabled api-layer-rule #f)'
 
 # ---- layouts ----------------------------------------------------------------
-idok '(hl-layout-add! "api-layout" (quote recalculate) (lambda (count W H wins) (quote ())))'
+ok '(string? (hl-layout-add! "api-layout" (quote recalculate) (lambda (count W H wins) (quote ()))))'
 noerr '(hl-layout-msg "noop")'
 
 # ---- submaps ----------------------------------------------------------------
-idok '(hl-submap "api-sub" (lambda () (hl-bind (kbd "g") (lambda () #f))))'
+ok '(hl-bind? (hl-submap "api-sub" (lambda () (hl-bind-add! (kbd "g") (lambda () #f)))))'
 ok '(hl-submap-activate! "api-sub")'
 val '(hl-current-submap)' '"api-sub"'
 ok '(hl-submap-exit!)'
 val '(hl-current-submap)' '""'
 
 # ---- binds ------------------------------------------------------------------
-idok '(hl-bind (kbd "s-<F13>") (lambda () #f))'
-idok '(hl-bind (kbd "C-M-<F15>") (lambda () #f))'
-idok '(hl-bind (kbd "s-<F16>") (lambda () #f) (quote release) #t (quote description) "api")'
-ok '(let ((b (hl-bind (kbd "s-<F18>") (lambda () #f)))) (hl-unbind b))'
-ok '(let ((b (hl-bind (kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key "SUPER F19"))'
+# device-inclusive semantics: listed devices default to inclusive (8192); an
+# explicit 'device-inclusive #f opts OUT
+val '(hl--bind-flags (quote (devices ("k1"))) "x")' '8192'
+val '(hl--bind-flags (quote (devices ("k1") device-inclusive #f)) "x")' '0'
+val '(hl--bind-flags (quote (device-inclusive #t)) "x")' '8192'
+val '(hl--bind-flags (quote ()) "x")' '0'
+ok '(hl-bind? (hl-bind-add! (kbd "s-<F13>") (lambda () #f)))'
+ok '(hl-bind? (hl-bind-add! (kbd "C-M-<F15>") (lambda () #f)))'
+ok '(hl-bind? (hl-bind-add! (kbd "s-<F16>") (lambda () #f) (quote release) #t (quote description) "api"))'
+ok '(let ((b (hl-bind-add! (kbd "s-<F18>") (lambda () #f)))) (hl-unbind! b))'
+ok '(let ((b (hl-bind-add! (kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key! "SUPER F19"))'
 # function keys use emacs' bracketed notation; Hyprland matches key names
 # case-insensitively, so a lowercase emacs spelling resolves the same keysym
-ok '(let ((b (hl-bind (kbd "<f24>") (lambda () #f)))) b (hl-unbind-key "f24"))'
-# modless + literal forms of the explicit token list (regression: hl-bind
+ok '(let ((b (hl-bind-add! (kbd "<f24>") (lambda () #f)))) b (hl-unbind-key! "f24"))'
+
+# ---- bind records: the handle carries the token list and the thunk ----------
+ok '(let ((b (hl-bind-add! (kbd "C-M-a") (lambda () #f))))
+     (and (hl-bind? b)
+       (equal? (hl-bind-tokens b) (quote ("CTRL" "ALT" "a")))
+       (procedure? (hl-bind-thunk b))
+       (hl-unbind! b)))'
+# precise unbind: two binds on the SAME key; removing the first must leave
+# the second registrable-and-removable (a coarse unbind would kill both)
+ok '(let ((a (hl-bind-add! (kbd "s-<F33>") (lambda () #f)))
+         (c (hl-bind-add! (kbd "s-<F33>") (lambda () #f))))
+     (and (hl-unbind! a) (hl-unbind! c)))'
+# double unbind: the second is #f (already gone)
+ok '(let ((b (hl-bind-add! (kbd "s-<F34>") (lambda () #f))))
+     (and (hl-unbind! b) (not (hl-unbind! b))))'
+# unbinding one of two same-key binds, then firing the survivor through the
+# record path, must still work (the tag, not the key, is the identity)
+ok '(let ((dead (hl-bind-add! (kbd "s-<F35>") (lambda () #f)))
+         (live (hl-bind-add! (kbd "s-<F35>") (lambda () "survivor"))))
+     (and (hl-unbind! dead)
+       (equal? (hl--bind-fire-rec live) (quote (ok #t)))
+       (hl-unbind! live)))'
+# modless + literal forms of the explicit token list (regression: hl-bind-add!
 # used to auto-dispatch a two-string shorthand; the LIST is the only form)
-idok '(hl-bind (kbd "<F20>") (lambda () #f))'
-idok "(hl-bind (quote (\"SUPER\" \"F21\")) (lambda () #f))"
-idok '(hl-bind (hl-kbd "SUPER+F22") (lambda () #f))'
+ok '(hl-bind? (hl-bind-add! (kbd "<F20>") (lambda () #f)))'
+ok "(hl-bind? (hl-bind-add! (quote (\"SUPER\" \"F21\")) (lambda () #f)))"
+ok '(hl-bind? (hl-bind-add! (hl-kbd "SUPER+F22") (lambda () #f)))'
 
 # ---- timers -----------------------------------------------------------------
-idok '(hl-after 5000 (lambda () #f))'
+ok '(hl-timer? (hl-after 5000 (lambda () #f)))'
 ok '(let ((t (hl-repeat 5000 (lambda () #f))))
      (and (boolean? (hl-timer-enabled-set! t #f))
           (eq? (hl-timer-enabled? t) #f)
@@ -308,55 +424,88 @@ ok '(let ((t (hl-repeat 5000 (lambda () #f))))
           (boolean? (hl-timer-enabled-set! t))))'
 
 # ---- events: registration returns a listener id -----------------------------
-ok '(let ((id (hl-on-window-open (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-open-early (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-close (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-kill (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-title (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-class (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-urgent (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-pin (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-fullscreen (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-move-to-workspace (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-active (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-minimize (lambda (w s) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-bell (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-update-rules (lambda (w) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-workspace-active (lambda (ws) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-workspace-created (lambda (ws) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-workspace-removed (lambda (ws) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-workspace-special-active (lambda (ws m) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-workspace-move-to-monitor (lambda (ws m) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-monitor-added (lambda (m) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-monitor-removed (lambda (m) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-monitor-focused (lambda (m) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-monitor-layout-changed (lambda () #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-submap (lambda (s) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-start (lambda () #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-shutdown (lambda () #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-config-reloaded (lambda () #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-config-props-refreshed (lambda (b) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-config-unload (lambda () #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-window-destroy (lambda () #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-layer-open (lambda (ns) #f)))) (and (integer? id) (>= id 0)))'
-ok '(let ((id (hl-on-layer-close (lambda (ns) #f)))) (and (integer? id) (>= id 0)))'
+ok '(hl-event? (hl-window-open-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-open-early-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-close-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-kill-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-title-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-class-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-urgent-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-pin-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-fullscreen-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-move-to-workspace-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-active-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-minimize-notification-add! (lambda (w s) #f)))'
+ok '(hl-event? (hl-window-bell-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-window-update-rules-notification-add! (lambda (w) #f)))'
+ok '(hl-event? (hl-workspace-active-notification-add! (lambda (ws) #f)))'
+ok '(hl-event? (hl-workspace-created-notification-add! (lambda (ws) #f)))'
+ok '(hl-event? (hl-workspace-removed-notification-add! (lambda (ws) #f)))'
+ok '(hl-event? (hl-workspace-special-active-notification-add! (lambda (ws m) #f)))'
+ok '(hl-event? (hl-workspace-move-to-monitor-notification-add! (lambda (ws m) #f)))'
+ok '(hl-event? (hl-monitor-added-notification-add! (lambda (m) #f)))'
+ok '(hl-event? (hl-monitor-removed-notification-add! (lambda (m) #f)))'
+ok '(hl-event? (hl-monitor-focused-notification-add! (lambda (m) #f)))'
+ok '(hl-event? (hl-monitor-layout-changed-notification-add! (lambda () #f)))'
+ok '(hl-event? (hl-submap-notification-add! (lambda (s) #f)))'
+ok '(hl-event? (hl-start-notification-add! (lambda () #f)))'
+ok '(hl-event? (hl-shutdown-notification-add! (lambda () #f)))'
+ok '(hl-event? (hl-config-reloaded-notification-add! (lambda () #f)))'
+ok '(hl-event? (hl-config-props-refreshed-notification-add! (lambda (b) #f)))'
+ok '(hl-event? (hl-config-unload-notification-add! (lambda () #f)))'
+ok '(hl-event? (hl-window-destroy-notification-add! (lambda () #f)))'
+ok '(hl-event? (hl-layer-open-notification-add! (lambda (ns) #f)))'
+ok '(hl-event? (hl-layer-close-notification-add! (lambda (ns) #f)))'
 
 # ---- auto-consuming protocol: a bind thunk returning #f DECLINES the key ---
-ok '(let ((b (hl-bind (kbd "s-<F26>") (lambda () #f) (quote auto-consuming) #t)))
-     (begin (eq? (hl--bind-fire b) #f) (hl-unbind b)))'
-ok '(let ((b (hl-bind (kbd "s-<F27>") (lambda () #t) (quote auto-consuming) #t)))
-     (begin (eq? (hl--bind-fire b) #t) (hl-unbind b)))'
-ok '(let ((b (hl-bind (kbd "s-<F28>") (lambda () (error "boom")) (quote auto-consuming) #t)))
-     (begin (eq? (hl--bind-fire b) #f) (hl-unbind b)))'
+ok '(let ((b (hl-bind-add! (kbd "s-<F26>") (lambda () #f) (quote auto-consuming) #t)))
+     (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
+ok '(let ((b (hl-bind-add! (kbd "s-<F27>") (lambda () #t) (quote auto-consuming) #t)))
+     (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
+ok '(let ((b (hl-bind-add! (kbd "s-<F28>") (lambda () (error "boom")) (quote auto-consuming) #t)))
+     (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
+
+# ---- bind result protocol (upstream {ok, pass_event, error, request_release}) ----
+# a non-plist truthy value normalizes to ok #t, like upstream's non-table returns
+ok '(let ((b (hl-bind-add! (kbd "s-<F29>") (lambda () "done") (quote auto-consuming) #t)))
+     (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
+# pass-event: handled AND forwarded to the focused window (Keybinds Manager CONSUMES)
+ok '(let ((b (hl-bind-add! (kbd "s-<F30>") (lambda () (quote (pass-event #t))) (quote auto-consuming) #t)))
+     (begin (equal? (hl--bind-fire-rec b) (quote (ok #t pass-event #t))) (hl-unbind! b)))'
+# explicit decline with an error message
+ok '(let ((b (hl-bind-add! (kbd "s-<F31>") (lambda () (quote (ok #f (quote error) "not now"))) (quote auto-consuming) #t)))
+     (begin (equal? (hl--bind-fire-rec b) (quote (ok #f error "not now"))) (hl-unbind! b)))'
+# request-release: handled; asks the manager to trigger the release event (click/drag binds)
+ok '(let ((b (hl-bind-add! (kbd "s-<F32>") (lambda () (quote (request-release #t))) (quote auto-consuming) #t)))
+     (begin (equal? (hl--bind-fire-rec b) (quote (ok #t request-release #t))) (hl-unbind! b)))'
+
+# the C++ side reads the same plists: ok #f fails the result, which stops a
+# repeating timer from re-arming (fireSchemeBind gates re-arm on success)
+ok '(begin (hl-state-set! (quote proto-ticks) 0) #t)'
+ok '(let ((t (hl-repeat 60 (lambda ()
+        (hl-state-set! (quote proto-ticks) (+ 1 (hl-state-ref (quote proto-ticks) 0)))
+        (quote (ok #f))))))
+     (and (hl-timer? t) (hl-timer-set-timeout t 60)))'
+WAIT_FOR 10 '(= (hl-state-ref (quote proto-ticks) 0) 1)' >/dev/null || { echo "FAIL: proto timer never fired"; FAILED=1; }
+sleep 0.5
+# if the C++ reader missed ok #f, the timer re-armed and ticks kept climbing
+val '(hl-state-ref (quote proto-ticks) 0)' '1'
 
 # ---- gestures (registration only; no trackpad in the harness) ----------------
-idok '(hl-gesture 4 "swipe" (lambda () #f))'
-ok '(hl-gesture-live 4 "swipe" (lambda () #f) (lambda (dx dy s) #f) (lambda () #f))'
+ok '(hl-gesture-add! (quote fingers) 4 (quote direction) "swipe" (quote action) (lambda () #f))'
+ok '(hl-gesture-add! (quote fingers) 3 (quote direction) "pinch" (quote start) (lambda args #f) (quote update) (lambda args #f) (quote finish) (lambda args #f))'
+ok '(hl-gesture-add! (quote fingers) 2 (quote direction) "up" (quote mods) "SUPER" (quote action) (lambda () #f))'
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote bogus_field) #t))))')
+[[ "$bad_gest" == *"bogus_field"* ]] || { echo "FAIL: unknown gesture field not rejected => [$bad_gest]"; FAILED=1; }
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up"))))')
+[[ "$bad_gest" == *"action is required"* ]] || { echo "FAIL: missing gesture action not rejected => [$bad_gest]"; FAILED=1; }
+ok '(hl-event? (hl-screenshare-state-notification-add! (lambda (a t n) #f)))'
+ok '(hl-event? (hl-keyboard-key-notification-add! (lambda (k t s) #f)))'
 
 # ---- reload (LAST: the animation checks above must precede it) ---------------
 # config-unload fires BEFORE the reload; the flag survives via hl--state
 ok '(begin (hl-state-set! (quote api-unload) #f)
-     (hl-on-config-unload (lambda () (hl-state-set! (quote api-unload) #t)))
+     (hl-config-unload-notification-add! (lambda () (hl-state-set! (quote api-unload) #t)))
      #t)'
 ok '(hl-config-reload!)'
 ok '(hl-state-ref (quote api-unload))'

@@ -1,8 +1,13 @@
+#ifndef HYPRTHEME_SCHEME_H_SEEN
+#define HYPRTHEME_SCHEME_H_SEEN
+#include <scheme.h>
+#endif
+#include "SThunkRef.hpp"
 #include "SchemeManager.hpp"
 #include "SchemeLayout.hpp"
 #include "SchemeInternals.hpp"
 
-#include <scheme.h>
+
 
 #include <src/debug/log/Logger.hpp>
 #include <src/debug/crash/CrashReporter.hpp>
@@ -28,8 +33,13 @@
 #include <src/desktop/state/ViewState.hpp>
 #include <src/desktop/history/WindowHistoryTracker.hpp>
 #include <src/desktop/history/WorkspaceHistoryTracker.hpp>
+#include <src/layout/algorithm/tiled/master/MasterAlgorithm.hpp>
+#include <src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
+#include <src/protocols/types/ContentType.hpp>
 #include <src/desktop/view/window/Window.hpp>
+#include <src/desktop/view/window/WindowFullscreenPolicy.hpp>
 #include <src/desktop/view/window/WindowGroupMembership.hpp>
+#include <src/desktop/view/window/WindowSwallowController.hpp>
 #include <src/desktop/reserved/ReservedArea.hpp>
 #include <src/desktop/rule/Engine.hpp>
 #include <src/desktop/rule/Rule.hpp>
@@ -53,6 +63,7 @@
 #include <src/config/ConfigManager.hpp>
 #include <src/config/lua/ConfigManager.hpp>
 #include <src/config/lua/types/LuaConfigValue.hpp>
+#include <aquamarine/backend/Backend.hpp>
 #include <src/config/lua/types/LuaConfigBool.hpp>
 #include <src/config/lua/types/LuaConfigCssGap.hpp>
 #include <src/config/lua/types/LuaConfigFloat.hpp>
@@ -188,102 +199,106 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
         (lambda () (thunk))
         (lambda () (hl--wd-exit))))))
 
-(define (hl--fire id)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "callback" (cdr entry)))))
-          (not (eq? result hl--wd-aborted))))))
+;; ---- event fire helpers -------------------------------------------------------
+;; every helper receives the hl-event RECORD (carried locked by its bus
+;; connection) plus the payload; the handler thunk is extracted from the
+;; record. Return semantics unchanged from the id-era helpers.
 
-;; numeric-list payloads (live gesture updates): the handler is applied to the
-;; elements of the list (e.g. (lambda (dx dy scale) ...))
-(define (hl--fire-list id lst)
-  (let ((entry (assv id hl--binds)))
-    (if entry
-        (guard (e (#t (begin (hl--report e) #f)))
-          (hl--guarded-run "callback" (lambda () (apply (cdr entry) lst))))
-        #f)))
+;; bind-callback result protocol — full upstream dispatchResultFromLua
+;; parity (ConfigManager.cpp:1380): the Lua callback may return a table
+;; {ok, pass_event, error, request_release}; Scheme returns it as a plist.
+;;   #f                        — DECLINED (auto-consuming binds pass the key
+;;                               through; repeating timers stop). Errors and
+;;                               the watchdog decline too (upstream maps Lua
+;;                               callback errors to success=false,
+;;                               ConfigManager.cpp:1418).
+;;   #t / any non-plist value  — handled, 'ok defaults to #t
+;;   a plist                   — the full form; 'ok filled in when absent
+;; Normalized so fireSchemeBind always reads #f or one plist shape.
+(define (hl--bind-result r)
+  (cond ((not r) #f)
+        ((and (pair? r) (symbol? (car r)))
+         (if (hl--plist-has? r 'ok) r (list* 'ok #t r)))
+        (else '(ok #t))))
 
-;; bind-callback fire: #f from the thunk DECLINES the key (upstream's
-;; ok=false auto-consuming protocol); errors and the watchdog also decline
-;; (upstream maps Lua callback errors to success=false, ConfigManager.cpp:
-;; 1418, so the two behave identically downstream). Anything else consumes.
-;; fireSchemeBind maps the result onto SBindResult{.success}.
-(define (hl--bind-fire id)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "callback" (cdr entry)))))
-          (and (not (eq? result hl--wd-aborted)) (not (eq? result #f)))))))
+;; record-bind fire: the record arrives from the C++ capture (locked);
+;; extract the thunk and run it. Contract: #f = declined, otherwise the
+;; normalized result plist. Normalization runs INSIDE the guard.
+(define (hl--bind-fire-rec b)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "callback"
+                    (lambda () (hl--bind-result ((hl-bind-thunk b))))))))
+    (and (not (eq? result hl--wd-aborted)) result)))
 
-(define (hl--fire-str id arg)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "handler" (lambda () ((cdr entry) arg))))))
-          (not (eq? result hl--wd-aborted))))))
+(define (hl--event-fire b)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "callback" (hl-event-thunk b)))))
+    (not (eq? result hl--wd-aborted))))
 
-;; events carrying a boolean payload: the handler receives #t or #f
-(define (hl--fire-bool id arg)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "handler" (lambda () ((cdr entry) arg))))))
-          (not (eq? result hl--wd-aborted))))))
+;; numeric-list payloads (keyboard-key triples, screenshare triples): the
+;; handler is applied to the elements of the list
+;; timer-record fire: extract (hl-timer-thunk b) and run it zero-arg under
+;; the bind result protocol (repeating timers stop on ok #f)
+(define (hl--timer-fire b)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "callback"
+                    (lambda () (hl--bind-result ((hl-timer-thunk b))))))))
+    (and (not (eq? result hl--wd-aborted)) result)))
 
-;; events carrying a workspace handle: the payload crosses as a handle id
-;; (or #f); the record constructor lives in the bootstrap
-(define (hl--fire-ws id arg)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "handler" (lambda () ((cdr entry) (and (not (eq? arg #f)) (make-hl-workspace arg))))))))
-          (not (eq? result hl--wd-aborted))))))
+(define (hl--fire-list-rec b lst)
+  (guard (e (#t (begin (hl--report e) #f)))
+    (hl--guarded-run "handler" (lambda () (apply (hl-event-thunk b) lst)))))
 
-;; events carrying a monitor handle
-(define (hl--fire-mon id arg)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "handler" (lambda () ((cdr entry) (and (not (eq? arg #f)) (make-hl-monitor arg))))))))
-          (not (eq? result hl--wd-aborted))))))
+(define (hl--fire-str-rec b arg)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () ((hl-event-thunk b) arg))))))
+    (not (eq? result hl--wd-aborted))))
 
-;; events carrying two handles (workspace, monitor); #f crosses for an
-;; absent one (e.g. no special workspace open)
-(define (hl--fire-ws-mon id ws mon)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "handler" (lambda () ((cdr entry)
-                                                                 (and (not (eq? ws #f)) (make-hl-workspace ws))
-                                                                 (and (not (eq? mon #f)) (make-hl-monitor mon))))))))
-          (not (eq? result hl--wd-aborted))))))
+(define (hl--fire-bool-rec b arg)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () ((hl-event-thunk b) arg))))))
+    (not (eq? result hl--wd-aborted))))
 
-;; defined here so event handlers receive real window records; the record
-;; constructor lives in the bootstrap, loaded after this prelude
-(define (hl--fire-win id win-id)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "handler" (lambda () ((cdr entry) (make-hl-window win-id)))))))
-          (not (eq? result hl--wd-aborted))))))
+(define (hl--fire-ws-rec b arg)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () ((hl-event-thunk b) (and (not (eq? arg #f)) (hl--mint-workspace arg))))))))
+    (not (eq? result hl--wd-aborted))))
 
-;; events carrying (window, bool) payloads: minimize state
-(define (hl--fire-win-state id win-id state)
-  (let ((entry (assv id hl--binds)))
-    (if (not entry)
-        #f
-        (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                        (hl--guarded-run "handler" (lambda () ((cdr entry) (make-hl-window win-id) state))))))
-          (not (eq? result hl--wd-aborted))))))
+(define (hl--fire-mon-rec b arg)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () ((hl-event-thunk b) (and (not (eq? arg #f)) (hl--mint-monitor arg))))))))
+    (not (eq? result hl--wd-aborted))))
+
+(define (hl--fire-ws-mon-rec b ws mon)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () ((hl-event-thunk b)
+                                                           (and (not (eq? ws #f)) (hl--mint-workspace ws))
+                                                           (and (not (eq? mon #f)) (hl--mint-monitor mon))))))))
+    (not (eq? result hl--wd-aborted))))
+
+;; window payloads: the id crosses and becomes a real window record here
+(define (hl--fire-win-rec b win-id)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () ((hl-event-thunk b) (hl--mint-window win-id)))))))
+    (not (eq? result hl--wd-aborted))))
+
+(define (hl--fire-win-state-rec b win-id state)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () ((hl-event-thunk b) (hl--mint-window win-id) state))))))
+    (not (eq? result hl--wd-aborted))))
+
+;; bare-thunk list fire for GESTURES (the thunk travels directly, no record)
+(define (hl--fire-list fn lst)
+  (guard (e (#t (begin (hl--report e) #f)))
+    (hl--guarded-run "handler" (lambda () (apply fn lst)))))
+
+;; bare-thunk fire with the bind result protocol (gesture legacy end:
+;; zero-arg, auto-consuming rules apply)
+(define (hl--thunk-fire fn)
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "callback"
+                    (lambda () (hl--bind-result (fn)))))))
+    (and (not (eq? result hl--wd-aborted)) result)))
 
 ;; evaluate every form of a file into an environment (the explicit env
 ;; argument is the point: plain load always targets the interaction
@@ -377,19 +392,18 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
 ;;   ((recalculate . fn) (resize . fn) (window-open . fn) (window-close . fn))
 ;; recalculate/resize fn: (count W H windows [dx dy corner]) -> ((x y w h) ...)
 ;; window callbacks: (window) -> ignored. #f when absent or on error.
-(define (hl--layout-event id event payload)
-  (let* ((prov (assv id hl--binds))
-         (cbs  (if prov (cdr prov) #f)))
+(define (hl--layout-event-spec spec event payload)
+  (let* ((cbs spec))
     (if (not cbs)
         #f
         (guard (e (#t (hl--report e)))
           (cond
             ((equal? event "window-open")
              (let ((cb (hl--plist-get cbs 'window-open #f)))
-               (if cb (cb (make-hl-window payload)) #f)))
+               (if cb (cb (hl--mint-window payload)) #f)))
             ((equal? event "window-close")
              (let ((cb (hl--plist-get cbs 'window-close #f)))
-               (if cb (cb (make-hl-window payload)) #f)))
+               (if cb (cb (hl--mint-window payload)) #f)))
             ((equal? event "layout-msg")
              (let ((cb (hl--plist-get cbs 'layout-msg #f)))
                (if (not cb)
@@ -410,57 +424,59 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
                      (if cb
                          (apply cb
                                 (list count W H
-                                      (map make-hl-window (list-head tail (- n 3)))
+                                      (map hl--mint-window (list-head tail (- n 3)))
                                       (list-ref tail (- n 3))
                                       (list-ref tail (- n 2))
                                       (list-ref tail (- n 1))))
                          #f))
                    (let ((cb (hl--plist-get cbs 'recalculate #f)))
-                     (if cb (cb count W H (map make-hl-window tail)) #f))))))))))
+                     (if cb (cb count W H (map hl--mint-window tail)) #f))))))))))
 )scm";
 
 static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
-(define hl--binds '())
-
-(define c-hl-bind (foreign-procedure "hl-scheme-bind" (scheme-object int string string) int))
+;; hl-bind-add!: record first (locked + tagged C++-side), then the tokens
+;; the bind is built from, flags, description, devices
+(define c-hl-bind (foreign-procedure "hl-scheme-bind" (scheme-object scheme-object int string string) int))
 (define c-hl-exec (foreign-procedure "hl-scheme-exec" (string) int))
-(define c-hl-timer (foreign-procedure "hl-scheme-timer" (int int) int))
+(define c-hl-timer (foreign-procedure "hl-scheme-timer" (scheme-object int int) int))
 (define c-hl-active-title (foreign-procedure "hl-scheme-active-title" () scheme-object))
 (define c-hl-workspace-names (foreign-procedure "hl-scheme-workspace-names" () scheme-object))
-(define c-hl-submap-listen (foreign-procedure "hl-scheme-submap-listen" () int))
-(define c-hl-active-window-id (foreign-procedure "hl-scheme-active-window-id" () int))
+(define c-hl-submap-listen (foreign-procedure "hl-scheme-submap-listen" (scheme-object) int))
+(define c-hl-active-window-id (foreign-procedure "hl-scheme-active-window-id" () double))
 (define c-hl-window-ids (foreign-procedure "hl-scheme-window-ids" () scheme-object))
-(define c-hl-window-title (foreign-procedure "hl-scheme-window-title" (int) scheme-object))
-(define c-hl-window-alive (foreign-procedure "hl-scheme-window-alive" (int) int))
-(define c-hl-window-close (foreign-procedure "hl-scheme-window-close" (int) int))
-(define c-hl-window-class (foreign-procedure "hl-scheme-window-class" (int) scheme-object))
-(define c-hl-window-workspace-id (foreign-procedure "hl-scheme-window-workspace-id" (int) scheme-object))
-(define c-hl-window-monitor-id (foreign-procedure "hl-scheme-window-monitor-id" (int) scheme-object))
-(define c-hl-window-floating (foreign-procedure "hl-scheme-window-floating" (int) int))
-(define c-hl-window-size (foreign-procedure "hl-scheme-window-size" (int) scheme-object))
-(define c-hl-window-pid (foreign-procedure "hl-scheme-window-pid" (int) int))
-(define c-hl-window-focus (foreign-procedure "hl-scheme-window-focus" (int) int))
-(define c-hl-window-float (foreign-procedure "hl-scheme-window-float" (int) int))
-(define c-hl-window-move-to-workspace (foreign-procedure "hl-scheme-window-move-to-workspace" (int string) int))
+(define c-hl-window-title (foreign-procedure "hl-scheme-window-title" (integer-64) scheme-object))
+(define c-hl-window-alive (foreign-procedure "hl-scheme-window-alive" (integer-64) int))
+(define c-hl-window-close (foreign-procedure "hl-scheme-window-close" (integer-64) int))
+(define c-hl-window-class (foreign-procedure "hl-scheme-window-class" (integer-64) scheme-object))
+(define c-hl-window-workspace-id (foreign-procedure "hl-scheme-window-workspace-id" (integer-64) scheme-object))
+(define c-hl-window-monitor-id (foreign-procedure "hl-scheme-window-monitor-id" (integer-64) scheme-object))
+(define c-hl-window-floating (foreign-procedure "hl-scheme-window-floating" (integer-64) int))
+(define c-hl-window-size (foreign-procedure "hl-scheme-window-size" (integer-64) scheme-object))
+(define c-hl-window-pid (foreign-procedure "hl-scheme-window-pid" (integer-64) int))
+(define c-hl-window-focus (foreign-procedure "hl-scheme-window-focus" (integer-64) int))
+(define c-hl-window-float (foreign-procedure "hl-scheme-window-float" (integer-64) int))
+(define c-hl-window-move-to-workspace (foreign-procedure "hl-scheme-window-move-to-workspace" (integer-64 string) int))
 (define c-hl-monitor-names (foreign-procedure "hl-scheme-monitor-names" () scheme-object))
-(define c-hl-window-event-listen (foreign-procedure "hl-scheme-window-event-listen" (int) int))
-(define c-hl-window-minimize-listen (foreign-procedure "hl-scheme-window-minimize-listen" () int))
-(define c-hl-lifecycle-listen (foreign-procedure "hl-scheme-lifecycle-listen" (int) int))
-(define c-hl-config-reloaded-listen (foreign-procedure "hl-scheme-config-reloaded-listen" () int))
-(define c-hl-config-unload-listen (foreign-procedure "hl-scheme-config-unload-listen" () int))
-(define c-hl-config-props-refreshed-listen (foreign-procedure "hl-scheme-config-props-refreshed-listen" () int))
-(define c-hl-window-destroy-listen (foreign-procedure "hl-scheme-window-destroy-listen" () int))
-(define c-hl-layer-listen (foreign-procedure "hl-scheme-layer-listen" (int) int))
-(define c-hl-unbind (foreign-procedure "hl-scheme-unbind" (int) int))
+(define c-hl-window-event-listen (foreign-procedure "hl-scheme-window-event-listen" (scheme-object int) int))
+(define c-hl-window-minimize-listen (foreign-procedure "hl-scheme-window-minimize-listen" (scheme-object) int))
+(define c-hl-lifecycle-listen (foreign-procedure "hl-scheme-lifecycle-listen" (scheme-object int) int))
+(define c-hl-config-reloaded-listen (foreign-procedure "hl-scheme-config-reloaded-listen" (scheme-object) int))
+(define c-hl-config-unload-listen (foreign-procedure "hl-scheme-config-unload-listen" (scheme-object) int))
+(define c-hl-config-props-refreshed-listen (foreign-procedure "hl-scheme-config-props-refreshed-listen" (scheme-object) int))
+(define c-hl-window-destroy-listen (foreign-procedure "hl-scheme-window-destroy-listen" (scheme-object) int))
+(define c-hl-layer-listen (foreign-procedure "hl-scheme-layer-listen" (scheme-object int) int))
+(define c-hl-screenshare-listen (foreign-procedure "hl-scheme-screenshare-listen" (scheme-object) int))
+(define c-hl-keyboard-key-listen (foreign-procedure "hl-scheme-keyboard-key-listen" (scheme-object) int))
+(define c-hl-unbind-rec (foreign-procedure "hl-scheme-unbind-rec" (scheme-object) int))
 (define c-hl-unbind-key (foreign-procedure "hl-scheme-unbind-key" (string) int))
-(define c-hl-window-same (foreign-procedure "hl-scheme-window-same" (int int) int))
+(define c-hl-window-same (foreign-procedure "hl-scheme-window-same" (integer-64 integer-64) int))
 (define c-hl-current-submap (foreign-procedure "hl-scheme-current-submap" () scheme-object))
 (define c-hl-cursor-pos (foreign-procedure "hl-scheme-cursor-pos" () scheme-object))
-(define c-hl-workspace-active-listen (foreign-procedure "hl-scheme-workspace-active-listen" () int))
-(define c-hl-monitor-event-listen (foreign-procedure "hl-scheme-monitor-event-listen" (int) int))
-(define c-hl-workspace-event-listen (foreign-procedure "hl-scheme-workspace-event-listen" (int) int))
+(define c-hl-workspace-active-listen (foreign-procedure "hl-scheme-workspace-active-listen" (scheme-object) int))
+(define c-hl-monitor-event-listen (foreign-procedure "hl-scheme-monitor-event-listen" (scheme-object int) int))
+(define c-hl-workspace-event-listen (foreign-procedure "hl-scheme-workspace-event-listen" (scheme-object int) int))
 (define c-hl-workspace-change-id (foreign-procedure "hl-scheme-workspace-change-id" (string double) int))
-(define c-hl-layout-add (foreign-procedure "hl-scheme-layout-add" (string) int))
+(define c-hl-layout-add (foreign-procedure "hl-scheme-layout-add" (string scheme-object) int))
 
 ;; pure-function layout; see SchemeLayout.hpp for the contract
 ;; spec is a single recalculate fn, or a PLIST of callbacks:
@@ -478,10 +494,9 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (errorf 'hl-layout-add!
             "the callbacks must be named, e.g. (hl-layout-add! ~s 'recalculate LAMBDA ...)"
             name))
-  (let ((id (c-hl-layout-add name)))
-    (if (< id 0)
-        (errorf 'hl-layout-add! "layout ~a rejected, see compositor log" name)
-        (hl--register id spec))))
+  (if (= 0 (c-hl-layout-add name spec))
+      name
+      (errorf 'hl-layout-add! "layout ~a rejected, see compositor log" name)))
 
 (define c-hl-get-submap-ctx (foreign-procedure "hl-scheme-get-submap-ctx" () scheme-object))
 (define c-hl-set-submap-ctx (foreign-procedure "hl-scheme-set-submap-ctx" (string string) void))
@@ -505,21 +520,39 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 (define (hl-submap-exit!)
   (= 0 (c-hl-enter-submap "")))
-(define c-hl-window-fullscreen-toggle (foreign-procedure "hl-scheme-window-fullscreen-toggle" (int int) int))
-(define c-hl-window-fullscreen-set (foreign-procedure "hl-scheme-window-fullscreen-set" (int int) int))
-(define c-hl-window-fullscreen-mode (foreign-procedure "hl-scheme-window-fullscreen-mode" (int) int))
-(define c-hl-window-hidden (foreign-procedure "hl-scheme-window-hidden" (int) int))
-(define c-hl-window-pinned (foreign-procedure "hl-scheme-window-pinned" (int) int))
-(define c-hl-window-pseudo-query (foreign-procedure "hl-scheme-window-pseudo-query" (int) int))
-(define c-hl-window-maximized-query (foreign-procedure "hl-scheme-window-maximized-query" (int) int))
-(define c-hl-window-in-group (foreign-procedure "hl-scheme-window-in-group" (int) int))
-(define c-hl-window-group-denied (foreign-procedure "hl-scheme-window-group-denied" (int) int))
-(define c-hl-window-group-locked (foreign-procedure "hl-scheme-window-group-locked" (int) int))
+(define c-hl-window-fullscreen-toggle (foreign-procedure "hl-scheme-window-fullscreen-toggle" (integer-64 int) int))
+(define c-hl-window-fullscreen-set (foreign-procedure "hl-scheme-window-fullscreen-set" (integer-64 int) int))
+(define c-hl-window-fullscreen-mode (foreign-procedure "hl-scheme-window-fullscreen-mode" (integer-64) int))
+(define c-hl-window-hidden (foreign-procedure "hl-scheme-window-hidden" (integer-64) int))
+;; window read-side fields (LuaWindow parity)
+(define c-hl-window-address (foreign-procedure "hl-scheme-window-address" (integer-64) scheme-object))
+(define c-hl-window-mapped (foreign-procedure "hl-scheme-window-mapped" (integer-64) int))
+(define c-hl-window-visible (foreign-procedure "hl-scheme-window-visible" (integer-64) int))
+(define c-hl-window-accepts-input (foreign-procedure "hl-scheme-window-accepts-input" (integer-64) int))
+(define c-hl-window-position (foreign-procedure "hl-scheme-window-position" (integer-64) scheme-object))
+(define c-hl-window-pin-fullscreened (foreign-procedure "hl-scheme-window-pin-fullscreened" (integer-64) int))
+(define c-hl-window-allowed-over-fullscreen (foreign-procedure "hl-scheme-window-allowed-over-fullscreen" (integer-64) int))
+(define c-hl-window-tearing-hint (foreign-procedure "hl-scheme-window-tearing-hint" (integer-64) int))
+(define c-hl-window-inhibiting-idle (foreign-procedure "hl-scheme-window-inhibiting-idle" (integer-64) int))
+(define c-hl-window-focus-history-id (foreign-procedure "hl-scheme-window-focus-history-id" (integer-64) scheme-object))
+(define c-hl-window-content-type (foreign-procedure "hl-scheme-window-content-type" (integer-64) scheme-object))
+(define c-hl-window-stable-id (foreign-procedure "hl-scheme-window-stable-id" (integer-64) scheme-object))
+(define c-hl-window-tags (foreign-procedure "hl-scheme-window-tags" (integer-64) scheme-object))
+(define c-hl-window-swallowing-id (foreign-procedure "hl-scheme-window-swallowing-id" (integer-64) scheme-object))
+(define c-hl-window-xdg-tag (foreign-procedure "hl-scheme-window-xdg-tag" (integer-64) scheme-object))
+(define c-hl-window-xdg-description (foreign-procedure "hl-scheme-window-xdg-description" (integer-64) scheme-object))
+(define c-hl-window-layout (foreign-procedure "hl-scheme-window-layout" (integer-64) scheme-object))
+(define c-hl-window-pinned (foreign-procedure "hl-scheme-window-pinned" (integer-64) int))
+(define c-hl-window-pseudo-query (foreign-procedure "hl-scheme-window-pseudo-query" (integer-64) int))
+(define c-hl-window-maximized-query (foreign-procedure "hl-scheme-window-maximized-query" (integer-64) int))
+(define c-hl-window-in-group (foreign-procedure "hl-scheme-window-in-group" (integer-64) int))
+(define c-hl-window-group-denied (foreign-procedure "hl-scheme-window-group-denied" (integer-64) int))
+(define c-hl-window-group-locked (foreign-procedure "hl-scheme-window-group-locked" (integer-64) int))
 (define c-hl-groups-locked (foreign-procedure "hl-scheme-groups-locked" () int))
-(define c-hl-window-group-lock (foreign-procedure "hl-scheme-window-group-lock" (int int) int))
-(define c-hl-window-prop (foreign-procedure "hl-scheme-window-prop" (int string) scheme-object))
-(define c-hl-window-initial-class (foreign-procedure "hl-scheme-window-initial-class" (int) scheme-object))
-(define c-hl-window-initial-title (foreign-procedure "hl-scheme-window-initial-title" (int) scheme-object))
+(define c-hl-window-group-lock (foreign-procedure "hl-scheme-window-group-lock" (integer-64 int) int))
+(define c-hl-window-prop (foreign-procedure "hl-scheme-window-prop" (integer-64 string) scheme-object))
+(define c-hl-window-initial-class (foreign-procedure "hl-scheme-window-initial-class" (integer-64) scheme-object))
+(define c-hl-window-initial-title (foreign-procedure "hl-scheme-window-initial-title" (integer-64) scheme-object))
 
 ;; ---- actions: the dispatcher surface (window id -1 = active window) --------
 (define c-hl-focus-workspace (foreign-procedure "hl-scheme-focus-workspace" (string) int))
@@ -527,42 +560,42 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-focus-monitor (foreign-procedure "hl-scheme-focus-monitor" (string) int))
 (define c-hl-focus-last (foreign-procedure "hl-scheme-focus-last" () int))
 (define c-hl-focus-urgent (foreign-procedure "hl-scheme-focus-urgent" () int))
-(define c-hl-window-move-direction (foreign-procedure "hl-scheme-window-move-direction" (int string) int))
-(define c-hl-window-swap-direction (foreign-procedure "hl-scheme-window-swap-direction" (int string) int))
-(define c-hl-window-swap-next (foreign-procedure "hl-scheme-window-swap-next" (int int) int))
-(define c-hl-window-swap-with (foreign-procedure "hl-scheme-window-swap-with" (int int) int))
-(define c-hl-window-float-act (foreign-procedure "hl-scheme-window-float-act" (int int) int))
-(define c-hl-window-cycle (foreign-procedure "hl-scheme-window-cycle" (int int int) int))
-(define c-hl-window-center (foreign-procedure "hl-scheme-window-center" (int) int))
-(define c-hl-window-resize-px (foreign-procedure "hl-scheme-window-resize-px" (int double double int) int))
-(define c-hl-window-move-px (foreign-procedure "hl-scheme-window-move-px" (int double double int) int))
-(define c-hl-window-pin-act (foreign-procedure "hl-scheme-window-pin-act" (int int) int))
-(define c-hl-window-pseudo (foreign-procedure "hl-scheme-window-pseudo" (int int) int))
-(define c-hl-window-kill (foreign-procedure "hl-scheme-window-kill" (int) int))
-(define c-hl-window-signal (foreign-procedure "hl-scheme-window-signal" (int int) int))
-(define c-hl-window-zorder (foreign-procedure "hl-scheme-window-zorder" (int string) int))
-(define c-hl-window-set-prop (foreign-procedure "hl-scheme-window-set-prop" (int string string) int))
-(define c-hl-window-tag (foreign-procedure "hl-scheme-window-tag" (int string) int))
-(define c-hl-window-clear-tags (foreign-procedure "hl-scheme-window-clear-tags" (int) int))
+(define c-hl-window-move-direction (foreign-procedure "hl-scheme-window-move-direction" (integer-64 string) int))
+(define c-hl-window-swap-direction (foreign-procedure "hl-scheme-window-swap-direction" (integer-64 string) int))
+(define c-hl-window-swap-next (foreign-procedure "hl-scheme-window-swap-next" (integer-64 int) int))
+(define c-hl-window-swap-with (foreign-procedure "hl-scheme-window-swap-with" (integer-64 integer-64) int))
+(define c-hl-window-float-act (foreign-procedure "hl-scheme-window-float-act" (integer-64 int) int))
+(define c-hl-window-cycle (foreign-procedure "hl-scheme-window-cycle" (integer-64 int int) int))
+(define c-hl-window-center (foreign-procedure "hl-scheme-window-center" (integer-64) int))
+(define c-hl-window-resize-px (foreign-procedure "hl-scheme-window-resize-px" (integer-64 double double int) int))
+(define c-hl-window-move-px (foreign-procedure "hl-scheme-window-move-px" (integer-64 double double int) int))
+(define c-hl-window-pin-act (foreign-procedure "hl-scheme-window-pin-act" (integer-64 int) int))
+(define c-hl-window-pseudo (foreign-procedure "hl-scheme-window-pseudo" (integer-64 int) int))
+(define c-hl-window-kill (foreign-procedure "hl-scheme-window-kill" (integer-64) int))
+(define c-hl-window-signal (foreign-procedure "hl-scheme-window-signal" (integer-64 int) int))
+(define c-hl-window-zorder (foreign-procedure "hl-scheme-window-zorder" (integer-64 string) int))
+(define c-hl-window-set-prop (foreign-procedure "hl-scheme-window-set-prop" (integer-64 string string) int))
+(define c-hl-window-tag (foreign-procedure "hl-scheme-window-tag" (integer-64 string) int))
+(define c-hl-window-clear-tags (foreign-procedure "hl-scheme-window-clear-tags" (integer-64) int))
 (define c-hl-toggle-swallow (foreign-procedure "hl-scheme-toggle-swallow" () int))
-(define c-hl-group-toggle (foreign-procedure "hl-scheme-group-toggle" (int) int))
-(define c-hl-group-set (foreign-procedure "hl-scheme-group-set" (int int) int))
+(define c-hl-group-toggle (foreign-procedure "hl-scheme-group-toggle" (integer-64) int))
+(define c-hl-group-set (foreign-procedure "hl-scheme-group-set" (integer-64 int) int))
 (define c-hl-monitor-set-special (foreign-procedure "hl-scheme-monitor-set-special" (string string) int))
-(define c-hl-group-cycle (foreign-procedure "hl-scheme-group-cycle" (int int) int))
-(define c-hl-group-index (foreign-procedure "hl-scheme-group-index" (int int) int))
-(define c-hl-group-move-window (foreign-procedure "hl-scheme-group-move-window" (int int) int))
+(define c-hl-group-cycle (foreign-procedure "hl-scheme-group-cycle" (integer-64 int) int))
+(define c-hl-group-index (foreign-procedure "hl-scheme-group-index" (integer-64 int) int))
+(define c-hl-group-move-window (foreign-procedure "hl-scheme-group-move-window" (integer-64 int) int))
 (define c-hl-group-lock (foreign-procedure "hl-scheme-group-lock" (int) int))
 (define c-hl-group-lock-active (foreign-procedure "hl-scheme-group-lock-active" (int) int))
-(define c-hl-window-into-group (foreign-procedure "hl-scheme-window-into-group" (int string) int))
-(define c-hl-window-out-of-group (foreign-procedure "hl-scheme-window-out-of-group" (int string) int))
-(define c-hl-window-into-or-create-group (foreign-procedure "hl-scheme-window-into-or-create-group" (int string) int))
-(define c-hl-window-deny-from-group (foreign-procedure "hl-scheme-window-deny-from-group" (int int) int))
+(define c-hl-window-into-group (foreign-procedure "hl-scheme-window-into-group" (integer-64 string) int))
+(define c-hl-window-out-of-group (foreign-procedure "hl-scheme-window-out-of-group" (integer-64 string) int))
+(define c-hl-window-into-or-create-group (foreign-procedure "hl-scheme-window-into-or-create-group" (integer-64 string) int))
+(define c-hl-window-deny-from-group (foreign-procedure "hl-scheme-window-deny-from-group" (integer-64 int) int))
 (define c-hl-workspace-rename (foreign-procedure "hl-scheme-workspace-rename" (string string) int))
 (define c-hl-workspace-move-monitor (foreign-procedure "hl-scheme-workspace-move-monitor" (string string) int))
 (define c-hl-workspace-toggle-special (foreign-procedure "hl-scheme-workspace-toggle-special" (string) int))
 (define c-hl-workspace-swap-monitors (foreign-procedure "hl-scheme-workspace-swap-monitors" (string string) int))
 (define c-hl-cursor-move (foreign-procedure "hl-scheme-cursor-move" (double double) int))
-(define c-hl-cursor-corner (foreign-procedure "hl-scheme-cursor-corner" (int int) int))
+(define c-hl-cursor-corner (foreign-procedure "hl-scheme-cursor-corner" (integer-64 int) int))
 (define c-hl-exit (foreign-procedure "hl-scheme-exit" () int))
 (define c-hl-reload-config (foreign-procedure "hl-scheme-reload-config" () int))
 (define c-hl-force-renderer-reload (foreign-procedure "hl-scheme-force-renderer-reload" () int))
@@ -570,12 +603,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-force-idle (foreign-procedure "hl-scheme-force-idle" (double) int))
 (define c-hl-global (foreign-procedure "hl-scheme-global" (string) int))
 (define c-hl-event (foreign-procedure "hl-scheme-event" (string) int))
-(define c-hl-pass (foreign-procedure "hl-scheme-pass" (int) int))
-(define c-hl-send-shortcut (foreign-procedure "hl-scheme-send-shortcut" (string string int) int))
-(define c-hl-send-key-state (foreign-procedure "hl-scheme-send-key-state" (string string int int) int))
+(define c-hl-pass (foreign-procedure "hl-scheme-pass" (integer-64) int))
+(define c-hl-send-shortcut (foreign-procedure "hl-scheme-send-shortcut" (string string integer-64) int))
+(define c-hl-send-key-state (foreign-procedure "hl-scheme-send-key-state" (string string int integer-64) int))
 (define c-hl-mouse (foreign-procedure "hl-scheme-mouse" (string) int))
 (define c-hl-release-input-capture (foreign-procedure "hl-scheme-release-input-capture" () int))
-(define c-hl-window-fullscreen-state (foreign-procedure "hl-scheme-window-fullscreen-state" (int int int int) int))
+(define c-hl-window-fullscreen-state (foreign-procedure "hl-scheme-window-fullscreen-state" (integer-64 int int int) int))
 (define c-hl-layout-message (foreign-procedure "hl-scheme-layout-message" (string) int))
 ;; ---- config: set/get config options ----------------------------------------
 (define c-hl-config-begin (foreign-procedure "hl-config-begin" () int))
@@ -631,14 +664,15 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-loaded-plugins (foreign-procedure "hl-loaded-plugins" () scheme-object))
 (define c-hl-version (foreign-procedure "hl-version" () scheme-object))
 (define c-hl-windows-from (foreign-procedure "hl-windows-from" (string) scheme-object))
-(define c-hl-window-fullscreen-handler (foreign-procedure "hl-window-fullscreen-handler" (int) scheme-object))
+(define c-hl-window-fullscreen-handler (foreign-procedure "hl-window-fullscreen-handler" (integer-64) scheme-object))
 (define c-hl-notify (foreign-procedure "hl-notify!" (string double string string double) scheme-object))
-(define c-hl-timer-set-enabled (foreign-procedure "hl-timer-set-enabled" (double int) int))
-(define c-hl-timer-enabled (foreign-procedure "hl-timer-enabled" (double) int))
-(define c-hl-timer-set-timeout (foreign-procedure "hl-timer-set-timeout" (double double) int))
+(define c-hl-timer-set-enabled (foreign-procedure "hl-timer-set-enabled" (scheme-object int) int))
+(define c-hl-timer-enabled (foreign-procedure "hl-timer-enabled" (scheme-object) int))
+(define c-hl-timer-set-timeout (foreign-procedure "hl-timer-set-timeout" (scheme-object double) int))
+(define c-hl-timer-cancel (foreign-procedure "hl-timer-cancel" (scheme-object) int))
 (define c-hl-exec-raw (foreign-procedure "hl-exec!" (string) int))
 (define c-hl-exec-with-rules (foreign-procedure "hl-exec-shell-with-rules!" (string) int))
-(define c-hl-gesture (foreign-procedure "hl-scheme-gesture" (int string int string double int) scheme-object))
+(define c-hl-gesture (foreign-procedure "hl-scheme-gesture" (scheme-object int string int string double int) int))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -658,11 +692,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (cond ((symbol? s) (symbol->string s))
         ((number? s) (number->string s))
         (else s)))
-(define c-hl-window-x11 (foreign-procedure "hl-scheme-window-x11" (int) int))
-
-(define (hl--register id thunk)
-  (set! hl--binds (cons (cons id thunk) hl--binds))
-  id)
+(define c-hl-window-x11 (foreign-procedure "hl-scheme-window-x11" (integer-64) int))
 
 ;; flat option list -> assoc list: ('release #t 'description "x")
 ;; ---- plist helpers ----------------------------------------------------------
@@ -678,6 +708,11 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
     (if (null? tail)
         (errorf 'hl--plist "odd plist: ~s" l)
         tail)))
+
+;; public: read a field out of any plist (gesture events, config tables);
+;; missing key reports DEFAULT — pass #!eof to tell absent apart from #f
+(define (hl-plist-get plist key . default)
+  (apply hl--plist-get plist key default))
 
 (define (hl--plist-get pl key default)
   (let loop ((l pl))
@@ -726,46 +761,52 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         (drag  (hl--plist-get pl 'drag #f))
         (devices (hl--plist-get pl 'devices #f)))
     (when (and click drag)
-      (errorf 'hl-bind "click and drag are exclusive"))
+      (errorf 'hl-bind-add! "click and drag are exclusive"))
     (when (and (hl--plist-get pl 'mouse #f)
                (or (hl--plist-get pl 'repeat #f) (hl--plist-get pl 'locked #f) (hl--plist-get pl 'release #f)))
-      (errorf 'hl-bind "mouse is exclusive with repeat/locked/release"))
+      (errorf 'hl-bind-add! "mouse is exclusive with repeat/locked/release"))
     (+ (if (or click drag) 2 0)                    ; click/drag imply release: upstream also sets BIND_FLAG_RELEASE for them
-       (if (or devices (hl--plist-get pl 'device-inclusive #f)) 8192 0)  ; device binds are inclusive by default, as upstream (device option present ⇒ inclusive)
+       (if (if (hl--plist-has? pl 'device-inclusive)
+               (hl--plist-get pl 'device-inclusive #f)   ; explicit 'device-inclusive #f opts OUT of inclusivity
+               (pair? devices))                          ; absent: inclusive when devices are listed (upstream default true)
+           8192
+           0)
        (if (equal? key "catchall") 16384 0)      ; upstream: key "catchall" ⇒ BIND_FLAG_CATCH_ALL
        (hl--plist-fold (lambda (opt bit acc) (+ acc (if (hl--plist-get pl opt #f) bit 0))) 0 hl--flag-bits))))
 
 (define (hl--bind-impl tokens thunk . opts)
   (let* ((key (car (reverse tokens)))
-         (id (c-hl-bind tokens
-                         (hl--bind-flags opts key)
-                         (hl--plist-get opts 'description "")
-                         (let ((ds (hl--plist-get opts 'devices #f)))
-                           (if (list? ds)
-                               (let loop ((rest ds) (acc ""))
-                                 (cond ((null? rest) acc)
-                                       ((null? (cdr rest)) (string-append acc (car rest)))
-                                       (else (loop (cdr rest) (string-append acc (car rest) ",")))))
-                               "")))))
-    (if (< id 0)
-        (errorf 'hl-bind "bind ~a rejected, see compositor log" tokens)
-        (hl--register id thunk))))
+         (rec (make-hl-bind tokens thunk))
+         (rc (c-hl-bind rec
+                        tokens
+                        (hl--bind-flags opts key)
+                        (hl--plist-get opts 'description "")
+                        (let ((ds (hl--plist-get opts 'devices #f)))
+                          (if (list? ds)
+                              (let loop ((rest ds) (acc ""))
+                                (cond ((null? rest) acc)
+                                      ((null? (cdr rest)) (string-append acc (car rest)))
+                                      (else (loop (cdr rest) (string-append acc (car rest) ",")))))
+                              "")))))
+    (if (= 0 rc)
+        rec
+        (errorf 'hl-bind-add! "bind ~a rejected, see compositor log" tokens))))
 
-;; hl-bind is the one way to register a bind: TOKENS is a list of key
+;; hl-bind-add! is the one way to register a bind: TOKENS is a list of key
 ;; tokens — the modifiers first, then the key. Build it with a helper:
-;;   (hl-bind (kbd "C-M-a") THUNK . OPTS)        — emacs syntax
-;;   (hl-bind (hl-kbd "SUPER+A") THUNK . OPTS)   — hyprland syntax
+;;   (hl-bind-add! (kbd "C-M-a") THUNK . OPTS)        — emacs syntax
+;;   (hl-bind-add! (hl-kbd "SUPER+A") THUNK . OPTS)   — hyprland syntax
 ;; or write the list out literally:
-;;   (hl-bind '("SUPER" "Q") THUNK . OPTS)
+;;   (hl-bind-add! '("SUPER" "Q") THUNK . OPTS)
 ;; A modless key is still a list: (kbd "g") → ("g"). There is no
 ;; two-string shorthand in the core API — define your own wrapper on top
 ;; if you want one (see the wiki, binds).
-(define (hl-bind tokens thunk . opts)
+(define (hl-bind-add! tokens thunk . opts)
   (apply hl--bind-impl tokens thunk opts))
 
 ;; ---- key specification helpers -----------------------------------------------
-;; (kbd "C-M-a")      — emacs syntax → (mods . key) pair for hl-bind
-;; (hl-kbd "SUPER+SHIFT+Q") — lua/hyprland syntax → (mods . key) pair
+;; (kbd "C-M-a")      — emacs syntax → token list for hl-bind-add!
+;; (hl-kbd "SUPER+SHIFT+Q") — lua/hyprland syntax → token list
 
 (define hl--emacs-mods
   '(("C" . "CTRL") ("M" . "ALT") ("S" . "SHIFT")
@@ -824,17 +865,20 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-exec-shell! cmd)
   (c-hl-exec cmd))
 
+;; hl-after/hl-repeat return hl-timer RECORDS; these control them afterwards.
+;; A one-shot releases its own record lock when it completes; a repeating
+;; timer lives until reload (or hl-timer-cancel!).
 (define (hl-after ms thunk)
-  (let ((id (c-hl-timer ms 0)))
-    (if (< id 0)
-        (errorf 'hl-after "timer ~ams rejected, see compositor log" ms)
-        (hl--register id thunk))))
+  (let ((rec (make-hl-timer ms thunk)))
+    (if (= 0 (c-hl-timer rec (exact ms) 0))
+        rec
+        (errorf 'hl-after "timer ~ams rejected, see compositor log" ms))))
 
 (define (hl-repeat ms thunk)
-  (let ((id (c-hl-timer ms 1)))
-    (if (< id 0)
-        (errorf 'hl-repeat "timer ~ams rejected, see compositor log" ms)
-        (hl--register id thunk))))
+  (let ((rec (make-hl-timer ms thunk)))
+    (if (= 0 (c-hl-timer rec (exact ms) 1))
+        rec
+        (errorf 'hl-repeat "timer ~ams rejected, see compositor log" ms))))
 
 ;; returns #f when no window has focus
 (define (hl-active-title)
@@ -845,80 +889,147 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((ids (c-hl-workspace-names)))
     (if (eq? ids #f)
         '()
-        (map make-hl-workspace ids))))
+        (map hl--mint-workspace ids))))
 
-(define (hl-on-submap thunk)
-  (let ((id (c-hl-submap-listen)))
-    (if (< id 0)
-        (errorf 'hl-on-submap "listener rejected, see compositor log")
-        (hl--register id thunk))))
 
-;; windows are opaque records wrapping an int id. C++ keeps a weak reference
-;; keyed by id; the compositor can destroy the window at any moment, and
-;; stale handles simply report #f — the id is the only thing crossing FFI.
-(define-record-type hl-window (fields id))
 
-;; workspaces and monitors use the same handle model: an opaque record
-;; wrapping an int id that indexes a weak-ref registry C++-side. Getters
-;; mirror upstream Lua's object fields 1:1; a stale or dead handle yields #f
-;; from every getter.
-(define-record-type hl-workspace (fields id))
-(define-record-type hl-monitor (fields id))
+;; handles are opaque records whose single field is a guardian CELL
+;; ((address . 0) — see the mint helpers and the C++ IHandle comment): the
+;; address is a heap weak ref C++-side, and the record's death deletes it
+;; through the guardian. Stale handles simply report #f from every getter;
+;; the address is the only thing crossing FFI.
+(define-record-type hl-window (fields cell))
+(define-record-type hl-workspace (fields cell))
+(define-record-type hl-monitor (fields cell))
 
-(define c-hl-workspace-name (foreign-procedure "hl-workspace-name" (int) scheme-object))
-(define c-hl-workspace-addressable-name (foreign-procedure "hl-workspace-addressable-name" (int) scheme-object))
-(define c-hl-workspace-number (foreign-procedure "hl-workspace-number" (int) scheme-object))
-(define c-hl-workspace-monitor (foreign-procedure "hl-workspace-monitor" (int) scheme-object))
-(define c-hl-workspace-special (foreign-procedure "hl-workspace-special" (int) scheme-object))
-(define c-hl-workspace-active (foreign-procedure "hl-workspace-active" (int) scheme-object))
-(define c-hl-workspace-visible (foreign-procedure "hl-workspace-visible" (int) scheme-object))
-(define c-hl-workspace-empty (foreign-procedure "hl-workspace-empty" (int) scheme-object))
-(define c-hl-workspace-persistent (foreign-procedure "hl-workspace-persistent" (int) scheme-object))
-(define c-hl-workspace-has-urgent (foreign-procedure "hl-workspace-has-urgent" (int) scheme-object))
-(define c-hl-workspace-has-fullscreen (foreign-procedure "hl-workspace-has-fullscreen" (int) scheme-object))
-(define c-hl-workspace-fullscreen-mode (foreign-procedure "hl-workspace-fullscreen-mode" (int) scheme-object))
-(define c-hl-workspace-fullscreen-window (foreign-procedure "hl-workspace-fullscreen-window" (int) scheme-object))
-(define c-hl-workspace-last-window (foreign-procedure "hl-workspace-last-window" (int) scheme-object))
-(define c-hl-workspace-window-count (foreign-procedure "hl-workspace-window-count" (int) scheme-object))
-(define c-hl-workspace-group-count (foreign-procedure "hl-workspace-group-count" (int) scheme-object))
-(define c-hl-workspace-tiled-layout (foreign-procedure "hl-workspace-tiled-layout" (int) scheme-object))
-(define c-hl-workspace-alive (foreign-procedure "hl-workspace-alive" (int) scheme-object))
-(define c-hl-workspace-same (foreign-procedure "hl-workspace-same" (int int) scheme-object))
-(define c-hl-workspace-selector (foreign-procedure "hl-workspace-selector" (int) scheme-object))
+(define (hl-window-id w) (car (hl-window-cell w)))
+(define (hl-workspace-id w) (car (hl-workspace-cell w)))
+(define (hl-monitor-id w) (car (hl-monitor-cell w)))
 
-(define c-hl-monitor-name (foreign-procedure "hl-monitor-name" (int) scheme-object))
-(define c-hl-monitor-description (foreign-procedure "hl-monitor-description" (int) scheme-object))
-(define c-hl-monitor-number (foreign-procedure "hl-monitor-number" (int) scheme-object))
-(define c-hl-monitor-enabled (foreign-procedure "hl-monitor-enabled" (int) scheme-object))
-(define c-hl-monitor-focused (foreign-procedure "hl-monitor-focused" (int) scheme-object))
-(define c-hl-monitor-x (foreign-procedure "hl-monitor-x" (int) scheme-object))
-(define c-hl-monitor-y (foreign-procedure "hl-monitor-y" (int) scheme-object))
-(define c-hl-monitor-width (foreign-procedure "hl-monitor-width" (int) scheme-object))
-(define c-hl-monitor-height (foreign-procedure "hl-monitor-height" (int) scheme-object))
-(define c-hl-monitor-scale (foreign-procedure "hl-monitor-scale" (int) scheme-object))
-(define c-hl-monitor-transform (foreign-procedure "hl-monitor-transform" (int) scheme-object))
-(define c-hl-monitor-refresh-rate (foreign-procedure "hl-monitor-refresh-rate" (int) scheme-object))
-(define c-hl-monitor-mode (foreign-procedure "hl-monitor-mode" (int) scheme-object))
-(define c-hl-monitor-dpms (foreign-procedure "hl-monitor-dpms" (int) scheme-object))
-(define c-hl-monitor-vrr (foreign-procedure "hl-monitor-vrr" (int) scheme-object))
-(define c-hl-monitor-10bit (foreign-procedure "hl-monitor-10bit" (int) scheme-object))
-(define c-hl-monitor-reserved (foreign-procedure "hl-monitor-reserved" (int) scheme-object))
-(define c-hl-monitor-mirror-of (foreign-procedure "hl-monitor-mirror-of" (int) scheme-object))
-(define c-hl-monitor-active-workspace (foreign-procedure "hl-monitor-active-workspace" (int) scheme-object))
-(define c-hl-monitor-active-special-workspace (foreign-procedure "hl-monitor-active-special-workspace" (int) scheme-object))
-(define c-hl-monitor-alive (foreign-procedure "hl-monitor-alive" (int) scheme-object))
-(define c-hl-monitor-same (foreign-procedure "hl-monitor-same" (int int) scheme-object))
-(define c-hl-monitor-selector (foreign-procedure "hl-monitor-selector" (int) scheme-object))
+;; ---- handle lifetime ---------------------------------------------------------
+;; mint = record + guardian cell; the cell dies with the record, the guardian
+;; yields it, and the collect-request-handler below frees the C++ weak ref.
+;; (Upstream: userdata embed the weak ref and the Lua GC __gc destructs it.)
+(define hl--handle-guardian (make-guardian))
+
+(define (hl--mint-window v)
+  (let* ((v (inexact->exact v))
+      (cell (if (and (integer? v) (exact? v) (>= v 0) (< v 140737488355328))
+             (cons v 0)
+             (errorf 'hl--mint-window "implausible handle value ~s" v)))
+      (r (make-hl-window cell)))
+    (hl--handle-guardian cell)
+    r))
+
+(define (hl--mint-workspace v)
+  (let* ((v (inexact->exact v))
+      (cell (if (and (integer? v) (exact? v) (>= v 0) (< v 140737488355328))
+             (cons v 0)
+             (errorf 'hl--mint-workspace "implausible handle value ~s" v)))
+      (r (make-hl-workspace cell)))
+    (hl--handle-guardian cell)
+    r))
+
+(define (hl--mint-monitor v)
+  (let* ((v (inexact->exact v))
+      (cell (if (and (integer? v) (exact? v) (>= v 0) (< v 140737488355328))
+             (cons v 0)
+             (errorf 'hl--mint-monitor "implausible handle value ~s" v)))
+      (r (make-hl-monitor cell)))
+    (hl--handle-guardian cell)
+    r))
+
+;; notifications use the same handle model; the per-handle paused state
+;; lives in the C++ handle object (see SNotificationHandle)
+(define-record-type hl-notification (fields cell))
+(define (hl-notification-id n) (car (hl-notification-cell n)))
+
+(define (hl--mint-notification v)
+  (let* ((v (inexact->exact v))
+      (cell (if (and (integer? v) (exact? v) (>= v 0) (< v 140737488355328))
+             (cons v 0)
+             (errorf 'hl--mint-notification "implausible handle value ~s" v)))
+      (r (make-hl-notification cell)))
+    (hl--handle-guardian cell)
+    r))
+
+;; events: the record IS the handle — the event type (a full symbol like
+;; 'window-open) and the handler thunk. C++ locks the record inside the bus
+;; connection (SThunkRef); when the connection is torn down at reload or
+;; unload, the record unlocks and the handler becomes collectable.
+(define-record-type hl-event (fields type thunk))
+
+;; timers: the record IS the handle — the initial interval and the thunk.
+;; C++ locks it inside the timer's fire callback; a one-shot timer releases
+;; its own lock when it completes, and reload tears the rest down.
+(define-record-type hl-timer (fields interval thunk))
+
+;; binds: the record IS the handle — the token LIST (the bind's meaning)
+;; and the thunk. C++ locks the record while the bind is registered (see
+;; SThunkRef) and stamps its pinned address into the bind's argument tag;
+;; the record becomes collectable when the bind is unbound (or dies at
+;; reload) and the user drops it. No bind ids, no registries.
+(define-record-type hl-bind (fields tokens thunk))
+
+(define c-hl-workspace-name (foreign-procedure "hl-workspace-name" (integer-64) scheme-object))
+(define c-hl-workspace-addressable-name (foreign-procedure "hl-workspace-addressable-name" (integer-64) scheme-object))
+(define c-hl-workspace-number (foreign-procedure "hl-workspace-number" (integer-64) scheme-object))
+(define c-hl-workspace-monitor (foreign-procedure "hl-workspace-monitor" (integer-64) scheme-object))
+(define c-hl-workspace-special (foreign-procedure "hl-workspace-special" (integer-64) scheme-object))
+(define c-hl-workspace-active (foreign-procedure "hl-workspace-active" (integer-64) scheme-object))
+(define c-hl-workspace-visible (foreign-procedure "hl-workspace-visible" (integer-64) scheme-object))
+(define c-hl-workspace-empty (foreign-procedure "hl-workspace-empty" (integer-64) scheme-object))
+(define c-hl-workspace-persistent (foreign-procedure "hl-workspace-persistent" (integer-64) scheme-object))
+(define c-hl-workspace-has-urgent (foreign-procedure "hl-workspace-has-urgent" (integer-64) scheme-object))
+(define c-hl-workspace-has-fullscreen (foreign-procedure "hl-workspace-has-fullscreen" (integer-64) scheme-object))
+(define c-hl-workspace-fullscreen-mode (foreign-procedure "hl-workspace-fullscreen-mode" (integer-64) scheme-object))
+(define c-hl-workspace-fullscreen-window (foreign-procedure "hl-workspace-fullscreen-window" (integer-64) scheme-object))
+(define c-hl-workspace-last-window (foreign-procedure "hl-workspace-last-window" (integer-64) scheme-object))
+(define c-hl-workspace-window-count (foreign-procedure "hl-workspace-window-count" (integer-64) scheme-object))
+(define c-hl-workspace-group-count (foreign-procedure "hl-workspace-group-count" (integer-64) scheme-object))
+(define c-hl-workspace-tiled-layout (foreign-procedure "hl-workspace-tiled-layout" (integer-64) scheme-object))
+(define c-hl-workspace-alive (foreign-procedure "hl-workspace-alive" (integer-64) scheme-object))
+(define c-hl-workspace-same (foreign-procedure "hl-workspace-same" (integer-64 integer-64) scheme-object))
+(define c-hl-workspace-selector (foreign-procedure "hl-workspace-selector" (integer-64) scheme-object))
+
+(define c-hl-monitor-name (foreign-procedure "hl-monitor-name" (integer-64) scheme-object))
+(define c-hl-monitor-description (foreign-procedure "hl-monitor-description" (integer-64) scheme-object))
+(define c-hl-monitor-number (foreign-procedure "hl-monitor-number" (integer-64) scheme-object))
+(define c-hl-monitor-enabled (foreign-procedure "hl-monitor-enabled" (integer-64) scheme-object))
+(define c-hl-monitor-focused (foreign-procedure "hl-monitor-focused" (integer-64) scheme-object))
+(define c-hl-monitor-x (foreign-procedure "hl-monitor-x" (integer-64) scheme-object))
+(define c-hl-monitor-y (foreign-procedure "hl-monitor-y" (integer-64) scheme-object))
+(define c-hl-monitor-width (foreign-procedure "hl-monitor-width" (integer-64) scheme-object))
+(define c-hl-monitor-height (foreign-procedure "hl-monitor-height" (integer-64) scheme-object))
+(define c-hl-monitor-scale (foreign-procedure "hl-monitor-scale" (integer-64) scheme-object))
+(define c-hl-monitor-transform (foreign-procedure "hl-monitor-transform" (integer-64) scheme-object))
+(define c-hl-monitor-refresh-rate (foreign-procedure "hl-monitor-refresh-rate" (integer-64) scheme-object))
+(define c-hl-monitor-mode (foreign-procedure "hl-monitor-mode" (integer-64) scheme-object))
+(define c-hl-monitor-dpms (foreign-procedure "hl-monitor-dpms" (integer-64) scheme-object))
+(define c-hl-monitor-vrr (foreign-procedure "hl-monitor-vrr" (integer-64) scheme-object))
+(define c-hl-monitor-10bit (foreign-procedure "hl-monitor-10bit" (integer-64) scheme-object))
+(define c-hl-monitor-reserved (foreign-procedure "hl-monitor-reserved" (integer-64) scheme-object))
+(define c-hl-monitor-serial (foreign-procedure "hl-monitor-serial" (integer-64) scheme-object))
+(define c-hl-monitor-physical-size (foreign-procedure "hl-monitor-physical-size" (integer-64) scheme-object))
+(define c-hl-monitor-mirrors (foreign-procedure "hl-monitor-mirrors" (integer-64) scheme-object))
+(define c-hl-monitor-available-modes (foreign-procedure "hl-monitor-available-modes" (integer-64) scheme-object))
+(define c-hl-monitor-hardware-details (foreign-procedure "hl-monitor-hardware-details" (integer-64) scheme-object))
+(define c-hl-monitor-mirror-of (foreign-procedure "hl-monitor-mirror-of" (integer-64) scheme-object))
+(define c-hl-monitor-active-workspace (foreign-procedure "hl-monitor-active-workspace" (integer-64) scheme-object))
+(define c-hl-monitor-active-special-workspace (foreign-procedure "hl-monitor-active-special-workspace" (integer-64) scheme-object))
+(define c-hl-monitor-alive (foreign-procedure "hl-monitor-alive" (integer-64) scheme-object))
+(define c-hl-monitor-same (foreign-procedure "hl-monitor-same" (integer-64 integer-64) scheme-object))
+(define c-hl-monitor-selector (foreign-procedure "hl-monitor-selector" (integer-64) scheme-object))
 
 (define (hl-active-window)
   (let ((id (c-hl-active-window-id)))
-    (if (< id 0) #f (make-hl-window id))))
+    (if (< id 0) #f (hl--mint-window id))))
 
 (define (hl-windows)
   (let ((ids (c-hl-window-ids)))
     (if (eq? ids #f)
         '()
-        (map make-hl-window ids))))
+        (map hl--mint-window ids))))
 
 (define (hl-window-title w)
   (c-hl-window-title (hl-window-id w)))
@@ -935,12 +1046,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; => workspace handle, or #f
 (define (hl-window-workspace w)
   (let ((id (c-hl-window-workspace-id (hl-window-id w))))
-    (and id (make-hl-workspace id))))
+    (and id (hl--mint-workspace id))))
 
 ;; => monitor handle, or #f
 (define (hl-window-monitor w)
   (let ((id (c-hl-window-monitor-id (hl-window-id w))))
-    (and id (make-hl-monitor id))))
+    (and id (hl--mint-monitor id))))
 
 (define (hl-window-floating? w)
   (= 1 (c-hl-window-floating (hl-window-id w))))
@@ -1214,7 +1325,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
       (errorf 'hl-config-add! "~a" (c-hl-config-last-error))))
 
 (define (hl--push-val v)
-  (cond ((number? v) (c-hl-config-push-num (exact->inexact v)))
+  (cond ((number? v)
+         ;; exact integers must reach INT options as integers (upstream
+         ;; rejects doubles for them); FLOAT options accept integers too
+         (if (exact? v)
+             (c-hl-config-push-int (exact->inexact v))
+             (c-hl-config-push-num v)))
         ((boolean? v) (c-hl-config-push-bool (if v 1 0)))
         ((string? v) (c-hl-config-push-str v))
         ((and (pair? v) (symbol? (car v)))
@@ -1247,6 +1363,24 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (if (= 0 (c-hl-device-add (hl--str name) fields))
       #t
       (errorf 'hl-device-add! "~a" (c-hl-config-last-error))))
+
+(define c-hl-exec-with-rule (foreign-procedure "hl-exec-with-rule" (string scheme-object) int))
+
+;; spawn CMD under a one-shot rule built from an effects PLIST ('float #t
+;; 'workspace "games" ...). effects only — no match: the executor tags the
+;; spawned window by pid itself. values go through the same rule-spec
+;; coercion as hl-window-rule-add! (numbers/bools → config strings).
+(define (hl-exec-with-rule! cmd . fields)
+  (define (flat l)
+    (cond ((null? l) '())
+          ((null? (cdr l)) (errorf 'hl-exec-with-rule! "odd plist of effects"))
+          (else (list* (hl--str (car l))
+                       (hl--rule-spec-value (cadr l))
+                       (flat (cddr l))))))
+  (let ((pid (c-hl-exec-with-rule (hl--str cmd) (flat fields))))
+    (if (> pid 0)
+        pid
+        (errorf 'hl-exec-with-rule! "~a" (c-hl-config-last-error)))))
 
 ;; ---- rules -------------------------------------------------------------------
 ;; window/layer rules: a plist with 'match (a plist of property → value),
@@ -1353,6 +1487,14 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                                          (if (= 0 (c-hl-workspace-rule-layout-opt (hl--str (car o)) sv))
                                              (oloop (cdr otail))
                                              (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error)))))))))
+                         ((member k (list "gaps_in" "gaps_out" "float_gaps"))
+                          ;; css-gap fields: scalars and per-side plists both
+                          ;; go through the gap parser, whatever their type
+                          (c-hl-config-begin)
+                          (hl--push-val v)
+                          (if (= 0 (c-hl-workspace-rule-gap k))
+                              (loop (cdr tail))
+                              (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                          ((string? v)
                           (if (= 0 (c-hl-workspace-rule-str k v))
                               (loop (cdr tail))
@@ -1365,12 +1507,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                           (if (= 0 (c-hl-workspace-rule-bool k (if v 1 0)))
                               (loop (cdr tail))
                               (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
-                         ((pair? v)
-                          (c-hl-config-begin)
-                          (hl--push-val v)
-                          (if (= 0 (c-hl-workspace-rule-gap k))
-                              (loop (cdr tail))
-                              (errorf 'hl-workspace-rule-add! "~a" (c-hl-config-last-error))))
                          (else (errorf 'hl-workspace-rule-add! "unsupported value for ~a" k))))))))))
 
 ;; ---- queries ------------------------------------------------------------------
@@ -1379,46 +1515,46 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; (hl-window-from SELECTOR) -> window handle | #f
 (define (hl-window-from sel)
   (let ((id (c-hl-window-from (hl--str sel))))
-    (if (< id 0) #f (make-hl-window (inexact->exact id)))))
+    (if (< id 0) #f (hl--mint-window (inexact->exact id)))))
 
 (define (hl-urgent-window)
   (let ((id (c-hl-urgent-window)))
-    (if (< id 0) #f (make-hl-window (inexact->exact id)))))
+    (if (< id 0) #f (hl--mint-window (inexact->exact id)))))
 
 (define (hl-last-window)
   (let ((id (c-hl-last-window)))
-    (if (< id 0) #f (make-hl-window (inexact->exact id)))))
+    (if (< id 0) #f (hl--mint-window (inexact->exact id)))))
 
 ;; monitors resolve by name or "desc:DESCRIPTION" (config monitor syntax)
 ;; monitor queries => monitor handle, or #f
 (define (hl-monitor-from sel)
   (let ((id (c-hl-monitor-from (hl--str sel))))
-    (and id (make-hl-monitor id))))
+    (and id (hl--mint-monitor id))))
 
 (define (hl-monitor-at x y)
   (let ((id (c-hl-monitor-at (exact->inexact x) (exact->inexact y))))
-    (and id (make-hl-monitor id))))
+    (and id (hl--mint-monitor id))))
 
 (define (hl-monitor-at-cursor)
   (let ((id (c-hl-monitor-at-cursor)))
-    (and id (make-hl-monitor id))))
+    (and id (hl--mint-monitor id))))
 
 (define (hl-active-monitor)
   (let ((id (c-hl-active-monitor)))
-    (and id (make-hl-monitor id))))
+    (and id (hl--mint-monitor id))))
 
 ;; workspace queries => workspace handle, or #f
 (define (hl-active-workspace)
   (let ((id (c-hl-active-workspace)))
-    (and id (make-hl-workspace id))))
+    (and id (hl--mint-workspace id))))
 
 (define (hl-active-special-workspace)
   (let ((id (c-hl-active-special-workspace)))
-    (and id (make-hl-workspace id))))
+    (and id (hl--mint-workspace id))))
 
 (define (hl-last-workspace)
   (let ((id (c-hl-last-workspace)))
-    (and id (make-hl-workspace id))))
+    (and id (hl--mint-workspace id))))
 
 ;; windows on a workspace (a workspace handle or selector: "3", "name:foo",
 ;; "special:bar") => list of window handles
@@ -1426,7 +1562,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((s (c-hl-workspace-windows (hl--ws-arg ws))))
     (if (not s)
         '()
-        (map make-hl-window s))))
+        (map hl--mint-window s))))
 
 ;; ---- workspace/monitor handle getters ---------------------------------------
 ;; every getter takes a handle; a stale or dead handle yields #f from every
@@ -1460,7 +1596,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; => monitor handle, or #f
 (define (hl-workspace-monitor w)
   (let ((id (c-hl-workspace-monitor (hl-workspace-id w))))
-    (and id (make-hl-monitor id))))
+    (and id (hl--mint-monitor id))))
 
 (define (hl-workspace-special? w)
   (eq? (c-hl-workspace-special (hl-workspace-id w)) #t))
@@ -1491,12 +1627,12 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; => window handle, or #f
 (define (hl-workspace-fullscreen-window w)
   (let ((id (c-hl-workspace-fullscreen-window (hl-workspace-id w))))
-    (and id (make-hl-window id))))
+    (and id (hl--mint-window id))))
 
 ;; => window handle, or #f
 (define (hl-workspace-last-window w)
   (let ((id (c-hl-workspace-last-window (hl-workspace-id w))))
-    (and id (make-hl-window id))))
+    (and id (hl--mint-window id))))
 
 (define (hl-workspace-window-count w)
   (c-hl-workspace-window-count (hl-workspace-id w)))
@@ -1569,20 +1705,40 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-monitor-reserved m)
   (c-hl-monitor-reserved (hl-monitor-id m)))
 
+;; the monitor's serial (string), or #f when stale
+(define (hl-monitor-serial m)
+  (c-hl-monitor-serial (hl-monitor-id m)))
+
+;; physical size in mm: (w . h), or #f
+(define (hl-monitor-physical-size m)
+  (c-hl-monitor-physical-size (hl-monitor-id m)))
+
+;; monitor handles mirroring this one (or #f when none)
+(define (hl-monitor-mirrors m)
+  (or (c-hl-monitor-mirrors (hl-monitor-id m)) '()))
+
+;; available modes: ((width w height h refresh-rate r preferred b) ...)
+(define (hl-monitor-available-modes m)
+  (or (c-hl-monitor-available-modes (hl-monitor-id m)) '()))
+
+;; hardware details: a plist (backend "..." hdr b chroma b bt2020 b vrr-capable b)
+(define (hl-monitor-hardware-details m)
+  (c-hl-monitor-hardware-details (hl-monitor-id m)))
+
 ;; the monitor this one mirrors, as a handle; #f when not a mirror
 (define (hl-monitor-mirror-of m)
   (let ((id (c-hl-monitor-mirror-of (hl-monitor-id m))))
-    (and id (make-hl-monitor id))))
+    (and id (hl--mint-monitor id))))
 
 ;; => workspace handle, or #f
 (define (hl-monitor-active-workspace m)
   (let ((id (c-hl-monitor-active-workspace (hl-monitor-id m))))
-    (and id (make-hl-workspace id))))
+    (and id (hl--mint-workspace id))))
 
 ;; => workspace handle, or #f when no special workspace is open
 (define (hl-monitor-active-special-workspace m)
   (let ((id (c-hl-monitor-active-special-workspace (hl-monitor-id m))))
-    (and id (make-hl-workspace id))))
+    (and id (hl--mint-workspace id))))
 
 (define (hl-monitor-alive? m)
   (eq? (c-hl-monitor-alive (hl-monitor-id m)) #t))
@@ -1609,7 +1765,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((s (c-hl-windows-from (hl--str sel))))
     (if (not s)
         '()
-        (map make-hl-window s))))
+        (map hl--mint-window s))))
 
 ;; which fullscreen handler a window uses (string)
 (define (hl-window-fullscreen-handler w)
@@ -1627,20 +1783,126 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                         (exact->inexact (hl--plist-get opts 'font-size 13)))))
     (if s #t #f)))
 
+;; ---- live notification objects (upstream hl.notification parity) ------------
+;; (hl-notification-add! 'text "…" 'timeout ms ['icon "info"] ['color "…"]
+;;   ['font-size n]) => a notification HANDLE. 'timeout is required; pause
+;; freezes the timeout timer (the bubble stays until dismissed); expired
+;; handles read #f and mutate as no-ops.
+(define c-hl-notification-add (foreign-procedure "hl-notification-add" (scheme-object) scheme-object))
+(define c-hl-notification-list (foreign-procedure "hl-notification-list" () scheme-object))
+(define c-hl-notification-text (foreign-procedure "hl-notification-text" (integer-64) scheme-object))
+(define c-hl-notification-timeout (foreign-procedure "hl-notification-timeout" (integer-64) scheme-object))
+(define c-hl-notification-color (foreign-procedure "hl-notification-color" (integer-64) scheme-object))
+(define c-hl-notification-icon (foreign-procedure "hl-notification-icon" (integer-64) scheme-object))
+(define c-hl-notification-font-size (foreign-procedure "hl-notification-font-size" (integer-64) scheme-object))
+(define c-hl-notification-elapsed (foreign-procedure "hl-notification-elapsed" (integer-64) scheme-object))
+(define c-hl-notification-age (foreign-procedure "hl-notification-age" (integer-64) scheme-object))
+(define c-hl-notification-alive (foreign-procedure "hl-notification-alive" (integer-64) scheme-object))
+(define c-hl-notification-same (foreign-procedure "hl-notification-same" (integer-64 integer-64) scheme-object))
+(define c-hl-notification-text-set (foreign-procedure "hl-notification-text-set" (integer-64 string) int))
+(define c-hl-notification-timeout-set (foreign-procedure "hl-notification-timeout-set" (integer-64 double) int))
+(define c-hl-notification-color-set (foreign-procedure "hl-notification-color-set" (integer-64 string) int))
+(define c-hl-notification-icon-set (foreign-procedure "hl-notification-icon-set" (integer-64 scheme-object) int))
+(define c-hl-notification-font-size-set (foreign-procedure "hl-notification-font-size-set" (integer-64 double) int))
+(define c-hl-notification-paused-set (foreign-procedure "hl-notification-paused-set" (integer-64 int) int))
+(define c-hl-notification-paused-q (foreign-procedure "hl-notification-paused-q" (integer-64) scheme-object))
+(define c-hl-notification-dismiss (foreign-procedure "hl-notification-dismiss" (integer-64) int))
+
+(define (hl-notification-add! . fields)
+  (let ((id (c-hl-notification-add fields)))
+    (if id
+        (hl--mint-notification id)
+        (errorf 'hl-notification-add! "~a" (c-hl-config-last-error)))))
+
+;; => list of live notification handles
+(define (hl-notifications)
+  (let ((l (c-hl-notification-list)))
+    (if l (map hl--mint-notification l) '())))
+
+(define (hl-notification-text n)
+  (c-hl-notification-text (hl-notification-id n)))
+
+(define (hl-notification-timeout n)
+  (c-hl-notification-timeout (hl-notification-id n)))
+
+;; => the raw 0xAARRGGBB integer (readback parity with upstream)
+(define (hl-notification-color n)
+  (c-hl-notification-color (hl-notification-id n)))
+
+;; => the icon's hyprctl id (names exist on the write side only, upstream parity)
+(define (hl-notification-icon n)
+  (c-hl-notification-icon (hl-notification-id n)))
+
+(define (hl-notification-font-size n)
+  (c-hl-notification-font-size (hl-notification-id n)))
+
+;; ms excluding paused spans / ms since creation
+(define (hl-notification-elapsed n)
+  (c-hl-notification-elapsed (hl-notification-id n)))
+
+(define (hl-notification-age n)
+  (c-hl-notification-age (hl-notification-id n)))
+
+(define (hl-notification-alive? n)
+  (eq? (c-hl-notification-alive (hl-notification-id n)) #t))
+
+(define (hl-notification=? a b)
+  (eq? (c-hl-notification-same (hl-notification-id a) (hl-notification-id b)) #t))
+
+;; failed setters raise with the config system's own message
+(define (hl--notif-act who act)
+  (if (= 0 act) #t (errorf who "~a" (c-hl-config-last-error))))
+
+(define (hl-notification-text-set! n text)
+  (hl--notif-act 'hl-notification-text-set!
+    (c-hl-notification-text-set (hl-notification-id n) (hl--str text))))
+
+(define (hl-notification-timeout-set! n ms)
+  (hl--notif-act 'hl-notification-timeout-set!
+    (c-hl-notification-timeout-set (hl-notification-id n) (exact->inexact ms))))
+
+(define (hl-notification-color-set! n color)
+  (hl--notif-act 'hl-notification-color-set!
+    (c-hl-notification-color-set (hl-notification-id n) (hl--str color))))
+
+(define (hl-notification-icon-set! n icon)
+  (hl--notif-act 'hl-notification-icon-set!
+    (c-hl-notification-icon-set (hl-notification-id n) icon)))
+
+(define (hl-notification-font-size-set! n size)
+  (hl--notif-act 'hl-notification-font-size-set!
+    (c-hl-notification-font-size-set (hl-notification-id n) (exact->inexact size))))
+
+;; absent => toggle (via the paused? query); #t/#f => explicit
+(define (hl-notification-paused-set! n . on?)
+  (= 0 (c-hl-notification-paused-set (hl-notification-id n)
+         (if (if (null? on?) (not (eq? (hl-notification-paused? n) #t)) (eq? (car on?) #t)) 1 0))))
+
+(define (hl-notification-paused? n)
+  (eq? (c-hl-notification-paused-q (hl-notification-id n)) #t))
+
+(define (hl-notification-dismiss! n)
+  (= 0 (c-hl-notification-dismiss (hl-notification-id n))))
+
 ;; ---- timer handles --------------------------------------------------------------
-;; hl-after/hl-repeat return timer ids; these control them afterwards
+;; control functions take the hl-timer record
 ;; absent → toggle (via the enabled? query); #t/#f → explicit set
-(define (hl-timer-enabled-set! id . on?)
-  (if (= 0 (c-hl-timer-set-enabled (exact->inexact id)
-                                   (if (if (null? on?) (not (hl-timer-enabled? id)) (car on?)) 1 0)))
+(define (hl-timer-enabled-set! t . on?)
+  (if (= 0 (c-hl-timer-set-enabled t
+                                   (if (if (null? on?) (not (hl-timer-enabled? t)) (car on?)) 1 0)))
       #t
       (errorf 'hl-timer-enabled-set! "unknown timer")))
-(define (hl-timer-enabled? id)
-  (= 1 (c-hl-timer-enabled (exact->inexact id))))
-(define (hl-timer-set-timeout id ms)
-  (if (= 0 (c-hl-timer-set-timeout (exact->inexact id) (exact->inexact ms)))
+(define (hl-timer-enabled? t)
+  (= 1 (c-hl-timer-enabled t)))
+(define (hl-timer-set-timeout t ms)
+  (if (= 0 (c-hl-timer-set-timeout t (exact->inexact ms)))
       #t
       (errorf 'hl-timer-set-timeout "timeout must be >= 1ms")))
+
+;; beyond-upstream extension: kill a repeating timer before reload. The
+;; index entry erases itself; the record lock releases with the timer.
+(define (hl-timer-cancel! t)
+  (= 0 (c-hl-timer-cancel t)))
 
 ;; ---- exec variants ----------------------------------------------------------------
 ;; (hl-exec! "cmd") — no shell; the string is execvp'd (space-split)
@@ -1655,29 +1917,47 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; the thunk fires when the gesture ends (3+ finger swipes/pinches).
 ;; live variant: (hl-gesture-live 3 "swipe" on-begin on-update on-end ...) —
 ;; on-update receives (dx dy scale) as a 3-list.
-(define (hl-gesture fingers direction thunk . opts)
-  (let ((id (c-hl-gesture fingers (hl--str direction) 0
-                          (hl--str (hl--plist-get opts 'mods ""))
-                          (exact->inexact (hl--plist-get opts 'scale 1.0))
-                          (if (hl--plist-get opts 'disable-inhibit #f) 1 0))))
-    (if (not id)
-        (errorf 'hl-gesture "~a" (c-hl-config-last-error))
-        (hl--register id thunk))))
-
-(define (hl-gesture-live fingers direction on-begin on-update on-end . opts)
-  (let ((ids (c-hl-gesture fingers (hl--str direction) 1
-                           (hl--str (hl--plist-get opts 'mods ""))
-                           (exact->inexact (hl--plist-get opts 'scale 1.0))
-                           (if (hl--plist-get opts 'disable-inhibit #f) 1 0))))
-    (if (not ids)
-        (errorf 'hl-gesture "~a" (c-hl-config-last-error))
-        ;; ids = (begin-id update-id end-id); the update callback receives the
-        ;; live payload as a proper numeric list (dx dy scale)
-        (begin
-          (hl--register (car ids) on-begin)
-          (hl--register (cadr ids) on-update)
-          (hl--register (caddr ids) on-end)
-          #t))))
+;; per-gesture registration — upstream hl.gesture parity: ONE call with an
+;; arbitrary plist of fields (LuaBindingsConfigRules.cpp, hl.gesture):
+;;   fingers (int) + direction (string) — required
+;;   mods, scale, disable-inhibit — optional
+;;   action — EITHER a procedure (fires zero-arg when the gesture ends,
+;;   upstream's legacy single-function form) OR 'start/'update/'finish
+;;   procedures (live — each applied the gesture event plist as spread args).
+;; Built-in action STRINGS (workspace/move/close/fullscreen/cursor_zoom/...)
+;; are not yet supported — tracked in the project TODO.
+(define (hl-gesture-add! . fields)
+  (define known '(fingers direction mods scale disable-inhibit action start update finish))
+  (for-each (lambda (k)
+              (unless (memq k known)
+                (errorf 'hl-gesture-add! "unknown field ~a" k)))
+            (let loop ((l fields) (acc '()))
+              (if (null? l) (reverse acc) (loop (cddr l) (cons (car l) acc)))))
+  (let* ((fingers   (hl--plist-get fields 'fingers #!eof))
+         (direction (hl--plist-get fields 'direction #!eof))
+         (action    (hl--plist-get fields 'action #!eof))
+         (start     (hl--plist-get fields 'start #!eof))
+         (update    (hl--plist-get fields 'update #!eof))
+         (finish    (hl--plist-get fields 'finish #!eof))
+         (mods      (hl--plist-get fields 'mods ""))
+         (scale     (hl--plist-get fields 'scale 1.0))
+         (inhibit   (hl--plist-get fields 'disable-inhibit #f)))
+    (cond ((eq? fingers #!eof)
+           (errorf 'hl-gesture-add! "field 'fingers' is required"))
+          ((eq? direction #!eof)
+           (errorf 'hl-gesture-add! "field 'direction' is required"))
+          ((and (eq? action #!eof) (eq? start #!eof) (eq? update #!eof) (eq? finish #!eof))
+           (errorf 'hl-gesture-add!
+                   "an action is required — 'action LAMBDA or 'start/'update/'finish LAMBDA"))
+          (else
+           (let* ((live (eq? action #!eof))    ; an explicit action fn takes precedence (upstream dispatch)
+                  (rc (c-hl-gesture (if live (list start update finish) (list action))
+                                    fingers (hl--str direction) (if live 1 0)
+                                    (hl--str mods) (exact->inexact scale)
+                                    (if inhibit 1 0))))
+             (cond ((not (= 0 rc))
+                    (errorf 'hl-gesture-add! "~a" (c-hl-config-last-error)))
+                   (else #t)))))))
 
 ;; ---- monitors, curves, animations, permissions ------------------------------
 
@@ -1725,7 +2005,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; (hl-curve-add! "myspring" 'spring 250 25 1)
 (define (hl-curve-add! name type . vals)
   (let* ((t  (if (eq? type 'spring) 1 0))
-         (vs (append (map exact->inexact vals) (list 0 0 0 0))))
+         ;; pad THEN coerce: exact zeros are invalid in foreign double slots
+         (vs (map exact->inexact (append vals (list 0 0 0 0)))))
     (if (= 0 (c-hl-curve-add (hl--str name) t
                              (list-ref vs 0) (list-ref vs 1) (list-ref vs 2) (list-ref vs 3)))
         #t
@@ -1780,6 +2061,73 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-hidden? w)
   (= 1 (c-hl-window-hidden (hl-window-id w))))
 
+;; ---- window read-side fields (upstream LuaWindow field parity) --------------
+;; => "0x..." — the window's stable address (identity across queries;
+;;    handles differ per call, the address does not)
+(define (hl-window-address w)
+  (c-hl-window-address (hl-window-id w)))
+
+(define (hl-window-mapped? w)
+  (= 1 (c-hl-window-mapped (hl-window-id w))))
+
+;; mapped AND accepting input AND non-zero alpha
+(define (hl-window-visible? w)
+  (= 1 (c-hl-window-visible (hl-window-id w))))
+
+(define (hl-window-accepts-input? w)
+  (= 1 (c-hl-window-accepts-input (hl-window-id w))))
+
+;; => (x . y), or #f when stale
+(define (hl-window-position w)
+  (c-hl-window-position (hl-window-id w)))
+
+(define (hl-window-pin-fullscreened? w)
+  (= 1 (c-hl-window-pin-fullscreened (hl-window-id w))))
+
+(define (hl-window-allowed-over-fullscreen? w)
+  (= 1 (c-hl-window-allowed-over-fullscreen (hl-window-id w))))
+
+(define (hl-window-tearing-hint? w)
+  (= 1 (c-hl-window-tearing-hint (hl-window-id w))))
+
+(define (hl-window-inhibiting-idle? w)
+  (= 1 (c-hl-window-inhibiting-idle (hl-window-id w))))
+
+;; => int — 0 is the most recently focused window; -1 when not in history
+(define (hl-window-focus-history-id w)
+  (c-hl-window-focus-history-id (hl-window-id w)))
+
+;; => "none" / "photo" / "video" / "game"
+(define (hl-window-content-type w)
+  (c-hl-window-content-type (hl-window-id w)))
+
+;; => hex string of the metadata stable id
+(define (hl-window-stable-id w)
+  (c-hl-window-stable-id (hl-window-id w)))
+
+;; => list of tag strings (static tags, cf. hl-window-tag-add!)
+(define (hl-window-tags w)
+  (c-hl-window-tags (hl-window-id w)))
+
+;; => the window this one is swallowing, or #f
+(define (hl-window-swallowing w)
+  (let ((id (c-hl-window-swallowing-id (hl-window-id w))))
+    (and id (hl--mint-window id))))
+
+;; xdg shell metadata, or #f when unset
+(define (hl-window-xdg-tag w)
+  (c-hl-window-xdg-tag (hl-window-id w)))
+
+(define (hl-window-xdg-description w)
+  (c-hl-window-xdg-description (hl-window-id w)))
+
+;; => plist: ('name "master" 'is-master #f 'perc-master 0.5 'perc-size 1.0)
+;;          | ('name "scrolling" 'column (index n width f windows (…))
+;;               'index-in-column n)
+;; #f when the window is floating or has no tiled layout target
+(define (hl-window-layout w)
+  (c-hl-window-layout (hl-window-id w)))
+
 (define (hl-window-pinned? w)
   (= 1 (c-hl-window-pinned (hl-window-id w))))
 
@@ -1810,136 +2158,216 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let ((ids (c-hl-monitor-names)))
     (if (eq? ids #f)
         '()
-        (map make-hl-monitor ids))))
+        (map hl--mint-monitor ids))))
 
-(define (hl--window-listen which handler)
-  (let ((id (c-hl-window-event-listen which)))
-    (if (< id 0)
-        (errorf 'hl-on-window "listener rejected, see compositor log")
-        (hl--register id handler))))
+;; ---- events ------------------------------------------------------------------
+;; each notification-add! creates an hl-event record (type symbol + handler),
+;; hands it to C++ (locked inside the bus connection), and returns the record.
+;; handler shapes are per event — see the events wiki page.
 
-(define (hl-on-window-open handler)
-  (hl--window-listen 0 handler))
+;; ---- window events (one C++ entry, a which-number per kind) -------------------
+(define (hl--window-listen which type thunk who)
+  (let ((rec (make-hl-event type thunk)))
+    (if (= 0 (c-hl-window-event-listen rec which))
+        rec
+        (errorf who "listener rejected, see compositor log"))))
 
-(define (hl-on-window-close handler)
-  (hl--window-listen 1 handler))
+;; fires when a window opens (fully initialized, window rules applied)
+(define (hl-window-open-notification-add! handler)
+  (hl--window-listen 0 'window-open handler 'hl-window-open-notification-add!))
+
+(define (hl-window-close-notification-add! handler)
+  (hl--window-listen 1 'window-close handler 'hl-window-close-notification-add!))
 
 ;; handlers receive the window handle
-(define (hl-on-window-title handler)
-  (hl--window-listen 2 handler))
+(define (hl-window-title-notification-add! handler)
+  (hl--window-listen 2 'window-title handler 'hl-window-title-notification-add!))
 
-(define (hl-on-window-class handler)
-  (hl--window-listen 3 handler))
+(define (hl-window-class-notification-add! handler)
+  (hl--window-listen 3 'window-class handler 'hl-window-class-notification-add!))
 
-(define (hl-on-window-urgent handler)
-  (hl--window-listen 4 handler))
+(define (hl-window-urgent-notification-add! handler)
+  (hl--window-listen 4 'window-urgent handler 'hl-window-urgent-notification-add!))
 
-(define (hl-on-window-pin handler)
-  (hl--window-listen 5 handler))
+(define (hl-window-pin-notification-add! handler)
+  (hl--window-listen 5 'window-pin handler 'hl-window-pin-notification-add!))
 
-(define (hl-on-window-fullscreen handler)
-  (hl--window-listen 6 handler))
+(define (hl-window-fullscreen-notification-add! handler)
+  (hl--window-listen 6 'window-fullscreen handler 'hl-window-fullscreen-notification-add!))
 
 ;; fires when a window moves to a different workspace
-(define (hl-on-window-move-to-workspace handler)
-  (hl--window-listen 7 handler))
+(define (hl-window-move-to-workspace-notification-add! handler)
+  (hl--window-listen 7 'window-move-to-workspace handler 'hl-window-move-to-workspace-notification-add!))
 
 ;; fires when the focused window changes
-(define (hl-on-window-active handler)
-  (hl--window-listen 8 handler))
+(define (hl-window-active-notification-add! handler)
+  (hl--window-listen 8 'window-active handler 'hl-window-active-notification-add!))
 
 ;; handler signature: (lambda (w state) ...) — state is #t when minimized
-(define (hl-on-window-minimize handler)
-  (let ((id (c-hl-window-minimize-listen)))
-    (if (< id 0)
-        (errorf 'hl-on-window-minimize "listener rejected, see compositor log")
-        (hl--register id handler))))
+(define (hl-window-minimize-notification-add! handler)
+  (let ((rec (make-hl-event 'window-minimize handler)))
+    (if (= 0 (c-hl-window-minimize-listen rec))
+        rec
+        (errorf 'hl-window-minimize-notification-add! "listener rejected, see compositor log"))))
 
 ;; fires when a window is created and mapped, but before window rules are
-;; applied (hl-on-window-open waits for full initialization)
-(define (hl-on-window-open-early handler)
-  (hl--window-listen 9 handler))
+;; applied (window-open waits for full initialization)
+(define (hl-window-open-early-notification-add! handler)
+  (hl--window-listen 9 'window-open-early handler 'hl-window-open-early-notification-add!))
 
 ;; fires when the window is forcefully killed, e.g. via hyprctl kill
-(define (hl-on-window-kill handler)
-  (hl--window-listen 10 handler))
+(define (hl-window-kill-notification-add! handler)
+  (hl--window-listen 10 'window-kill handler 'hl-window-kill-notification-add!))
 
 ;; fires when a window rings the system bell, even if it's muted
-(define (hl-on-window-bell handler)
-  (hl--window-listen 11 handler))
+(define (hl-window-bell-notification-add! handler)
+  (hl--window-listen 11 'window-bell handler 'hl-window-bell-notification-add!))
 
 ;; fires when a window's rules are re-evaluated, e.g. on a title change
-(define (hl-on-window-update-rules handler)
-  (hl--window-listen 12 handler))
+(define (hl-window-update-rules-notification-add! handler)
+  (hl--window-listen 12 'window-update-rules handler 'hl-window-update-rules-notification-add!))
 
 ;; lifecycle: fires once when the session starts (its first render frame) and
 ;; once before exit. handlers registered after startup fire immediately.
-(define (hl-on-start handler)
-  (let ((id (c-hl-lifecycle-listen 0)))
-    (if (< id 0)
-        (errorf 'hl-on-start "listener rejected, see compositor log")
-        (hl--register id handler))))
+(define (hl-start-notification-add! handler)
+  (let ((rec (make-hl-event 'start handler)))
+    (if (= 0 (c-hl-lifecycle-listen rec 0))
+        rec
+        (errorf 'hl-start-notification-add! "listener rejected, see compositor log"))))
 
-(define (hl-on-shutdown handler)
-  (let ((id (c-hl-lifecycle-listen 1)))
-    (if (< id 0)
-        (errorf 'hl-on-shutdown "listener rejected, see compositor log")
-        (hl--register id handler))))
+(define (hl-shutdown-notification-add! handler)
+  (let ((rec (make-hl-event 'shutdown handler)))
+    (if (= 0 (c-hl-lifecycle-listen rec 1))
+        rec
+        (errorf 'hl-shutdown-notification-add! "listener rejected, see compositor log"))))
 
-(define (hl-on-config-reloaded handler)
-  (let ((id (c-hl-config-reloaded-listen)))
-    (if (< id 0)
-        (errorf 'hl-on-config-reloaded "listener rejected, see compositor log")
-        (hl--register id handler))))
+(define (hl-config-reloaded-notification-add! handler)
+  (let ((rec (make-hl-event 'config-reloaded handler)))
+    (if (= 0 (c-hl-config-reloaded-listen rec))
+        rec
+        (errorf 'hl-config-reloaded-notification-add! "listener rejected, see compositor log"))))
 
 ;; fires BEFORE a config reload (upstream config.unload → config.preReload)
-(define (hl-on-config-unload handler)
-  (let ((id (c-hl-config-unload-listen)))
-    (if (< id 0)
-        (errorf 'hl-on-config-unload "listener rejected, see compositor log")
-        (hl--register id handler))))
+(define (hl-config-unload-notification-add! handler)
+  (let ((rec (make-hl-event 'config-unload handler)))
+    (if (= 0 (c-hl-config-unload-listen rec))
+        rec
+        (errorf 'hl-config-unload-notification-add! "listener rejected, see compositor log"))))
 
 ;; zero-argument callback — upstream delivers nil for window.destroy (the bus
-;; event is a weak ref; identity belongs to hl-on-window-close)
-(define (hl-on-window-destroy handler)
-  (let ((id (c-hl-window-destroy-listen)))
-    (if (< id 0)
-        (errorf 'hl-on-window-destroy "listener rejected, see compositor log")
-        (hl--register id handler))))
+;; event is a weak ref; identity belongs to the window-close notification)
+(define (hl-window-destroy-notification-add! handler)
+  (let ((rec (make-hl-event 'window-destroy handler)))
+    (if (= 0 (c-hl-window-destroy-listen rec))
+        rec
+        (errorf 'hl-window-destroy-notification-add! "listener rejected, see compositor log"))))
 
 ;; layer callbacks receive the layer's namespace string
-(define (hl-on-layer-open handler)
-  (let ((id (c-hl-layer-listen 0)))
-    (if (< id 0)
-        (errorf 'hl-on-layer-open "listener rejected, see compositor log")
-        (hl--register id handler))))
+(define (hl-layer-open-notification-add! handler)
+  (let ((rec (make-hl-event 'layer-open handler)))
+    (if (= 0 (c-hl-layer-listen rec 0))
+        rec
+        (errorf 'hl-layer-open-notification-add! "listener rejected, see compositor log"))))
 
-(define (hl-on-layer-close handler)
-  (let ((id (c-hl-layer-listen 1)))
-    (if (< id 0)
-        (errorf 'hl-on-layer-close "listener rejected, see compositor log")
-        (hl--register id handler))))
+(define (hl-layer-close-notification-add! handler)
+  (let ((rec (make-hl-event 'layer-close handler)))
+    (if (= 0 (c-hl-layer-listen rec 1))
+        rec
+        (errorf 'hl-layer-close-notification-add! "listener rejected, see compositor log"))))
+
+;; high-frequency: fires on every key event — keep handlers trivial
+(define (hl-keyboard-key-notification-add! handler)
+  (let ((rec (make-hl-event 'keyboard-key handler)))
+    (if (= 0 (c-hl-keyboard-key-listen rec))
+        rec
+        (errorf 'hl-keyboard-key-notification-add! "listener rejected, see compositor log"))))
+
+(define (hl-screenshare-state-notification-add! handler)
+  (let ((rec (make-hl-event 'screenshare-state handler)))
+    (if (= 0 (c-hl-screenshare-listen rec))
+        rec
+        (errorf 'hl-screenshare-state-notification-add! "listener rejected, see compositor log"))))
 
 ;; handler signature: (lambda (scheduled?) ...) — #t when the prop refresh ran
 ;; as scheduled, #f when it was executed prematurely
-(define (hl-on-config-props-refreshed handler)
-  (let ((id (c-hl-config-props-refreshed-listen)))
-    (if (< id 0)
-        (errorf 'hl-on-config-props-refreshed "listener rejected, see compositor log")
-        (hl--register id handler))))
+(define (hl-config-props-refreshed-notification-add! handler)
+  (let ((rec (make-hl-event 'config-props-refreshed handler)))
+    (if (= 0 (c-hl-config-props-refreshed-listen rec))
+        rec
+        (errorf 'hl-config-props-refreshed-notification-add! "listener rejected, see compositor log"))))
+
+(define (hl-submap-notification-add! handler)
+  (let ((rec (make-hl-event 'submap handler)))
+    (if (= 0 (c-hl-submap-listen rec))
+        rec
+        (errorf 'hl-submap-notification-add! "listener rejected, see compositor log"))))
+
+;; ---- workspace events ---------------------------------------------------------
+(define (hl-workspace-active-notification-add! handler)
+  (let ((rec (make-hl-event 'workspace-active handler)))
+    (if (= 0 (c-hl-workspace-active-listen rec))
+        rec
+        (errorf 'hl-workspace-active-notification-add! "listener rejected, see compositor log"))))
+
+;; handler signature: (lambda (ws) ...) — ws is a workspace handle
+(define (hl--workspace-listen which type thunk who)
+  (let ((rec (make-hl-event type thunk)))
+    (if (= 0 (c-hl-workspace-event-listen rec which))
+        rec
+        (errorf who "listener rejected, see compositor log"))))
+
+;; fires when a workspace is created
+(define (hl-workspace-created-notification-add! handler)
+  (hl--workspace-listen 0 'workspace-created handler 'hl-workspace-created-notification-add!))
+
+;; fires when a workspace is removed. The handle it passes is BORN DEAD —
+;; every getter on it returns #f, exactly like an expired object in upstream
+;; Lua. See the comment at the C++ listener for why the name is not provided.
+(define (hl-workspace-removed-notification-add! handler)
+  (hl--workspace-listen 1 'workspace-removed handler 'hl-workspace-removed-notification-add!))
+
+;; fires when the opened special workspace on a monitor changes; handler
+;; signature: (lambda (ws mon) ...) — ws is #f when no special workspace is
+;; open on that monitor
+(define (hl-workspace-special-active-notification-add! handler)
+  (hl--workspace-listen 2 'workspace-special-active handler 'hl-workspace-special-active-notification-add!))
+
+;; fires when a workspace moves to a different monitor: (lambda (ws mon) ...)
+(define (hl-workspace-move-to-monitor-notification-add! handler)
+  (hl--workspace-listen 3 'workspace-move-to-monitor handler 'hl-workspace-move-to-monitor-notification-add!))
+
+;; ---- monitor events -----------------------------------------------------------
+;; handler signature: (lambda (mon) ...) — mon is a monitor handle
+(define (hl--monitor-listen which type thunk who)
+  (let ((rec (make-hl-event type thunk)))
+    (if (= 0 (c-hl-monitor-event-listen rec which))
+        rec
+        (errorf who "listener rejected, see compositor log"))))
+
+(define (hl-monitor-added-notification-add! handler)
+  (hl--monitor-listen 0 'monitor-added handler 'hl-monitor-added-notification-add!))
+
+(define (hl-monitor-removed-notification-add! handler)
+  (hl--monitor-listen 1 'monitor-removed handler 'hl-monitor-removed-notification-add!))
+
+(define (hl-monitor-focused-notification-add! handler)
+  (hl--monitor-listen 2 'monitor-focused handler 'hl-monitor-focused-notification-add!))
+
+;; fires when the monitor arrangement changes (no payload)
+(define (hl-monitor-layout-changed-notification-add! handler)
+  (hl--monitor-listen 3 'monitor-layout-changed handler 'hl-monitor-layout-changed-notification-add!))
 
 ;; identity, as in Lua's windowEq: true iff both handles refer to the same
-;; live window (two handles for one window each get their own id)
+;; live window
 (define (hl-window=? a b)
   (= 1 (c-hl-window-same (hl-window-id a) (hl-window-id b))))
 
-(define (hl-unbind id)
-  (= 0 (c-hl-unbind id)))
+(define (hl-unbind! b)
+  (= 0 (c-hl-unbind-rec b)))
 
-;; removes ALL binds matching a key string (the display key as passed to
-;; hl-bind — e.g. "SUPER T", "C-M-x", "mouse:272"). case-insensitive,
-;; whitespace-insensitive. returns #t if any binds were removed.
-(define (hl-unbind-key key)
+;; coarse: removes EVERY bind whose display key matches (case- and
+;; whitespace-insensitive, manager-side); precise removal is hl-unbind!
+(define (hl-unbind-key! key)
   (= 0 (c-hl-unbind-key (hl--str key))))
 
 (define (hl-current-submap)
@@ -1949,59 +2377,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-cursor-pos)
   (c-hl-cursor-pos))   ; (x . y), or #f
 
-(define (hl-on-workspace-active handler)
-  (let ((id (c-hl-workspace-active-listen)))
-    (if (< id 0)
-        (errorf 'hl-on-workspace-active "listener rejected, see compositor log")
-        (hl--register id handler))))
-
-;; handler signature: (lambda (ws) ...) — ws is a workspace handle
-(define (hl--workspace-event-listen which handler)
-  (let ((id (c-hl-workspace-event-listen which)))
-    (if (< id 0)
-        (errorf 'hl-on-workspace "listener rejected, see compositor log")
-        (hl--register id handler))))
-
-;; fires when a workspace is created
-(define (hl-on-workspace-created handler)
-  (hl--workspace-event-listen 0 handler))
-
-;; fires when a workspace is removed. The handle it passes is BORN DEAD —
-;; every getter on it returns #f, exactly like an expired object in upstream
-;; Lua. See the comment at the C++ listener for why the name is not provided.
-(define (hl-on-workspace-removed handler)
-  (hl--workspace-event-listen 1 handler))
-
-;; fires when the opened special workspace on a monitor changes; handler
-;; signature: (lambda (ws mon) ...) — ws is #f when no special workspace is
-;; open on that monitor
-(define (hl-on-workspace-special-active handler)
-  (hl--workspace-event-listen 2 handler))
-
-;; fires when a workspace moves to a different monitor: (lambda (ws mon) ...)
-(define (hl-on-workspace-move-to-monitor handler)
-  (hl--workspace-event-listen 3 handler))
-
-;; handler signature: (lambda (mon) ...) — mon is a monitor handle
-(define (hl--monitor-event-listen which handler)
-  (let ((id (c-hl-monitor-event-listen which)))
-    (if (< id 0)
-        (errorf 'hl-on-monitor "listener rejected, see compositor log")
-        (hl--register id handler))))
-
-(define (hl-on-monitor-added handler)
-  (hl--monitor-event-listen 0 handler))
-
-(define (hl-on-monitor-removed handler)
-  (hl--monitor-event-listen 1 handler))
-
-(define (hl-on-monitor-focused handler)
-  (hl--monitor-event-listen 2 handler))
-
-;; fires when the monitor arrangement changes (no payload)
-(define (hl-on-monitor-layout-changed handler)
-  (hl--monitor-event-listen 3 handler))
-
 ;; reload boundary: drop the previous generation's handler table and install
 ;; a FRESH environment for the new one. The copy inherits the API (defined
 ;; once in the persistent environment) but user definitions from previous
@@ -2010,7 +2385,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; is the one deliberate cross-generation bridge (it lives in the persistent
 ;; environment).
 (define (hl--reset)
-  (set! hl--binds '())
   ;; break the chain: clear the slot BEFORE copying so the new copy does
   ;; not retain the previous generation's environment through it (that
   ;; would keep every old generation alive), and user code never sees a
@@ -2042,26 +2416,55 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let loop ((l hl--state) (acc '()))
     (if (null? l) (reverse acc) (loop (cddr l) (cons (car l) acc)))))
 
+(define c-hl-handle-free (foreign-procedure "hl-handle-free" (unsigned-64) int))
+
+;; deletes the C++ weak ref behind a dead handle's cell. Allocation-free by
+;; design: this runs inside the GC rendezvous, where consing would re-enter
+;; the collector.
+(define (hl--drain-handles!)
+  (let loop ()
+    (let ((dead (hl--handle-guardian)))
+      (when dead
+        (c-hl-handle-free (car dead))
+        (loop)))))
+
+;; the Scheme translation of upstream's Lua GC hook: drain dead handles at
+;; every GC request, then let the collector proceed.
+(collect-request-handler
+  (lambda ()
+    (hl--drain-handles!)
+    (collect)))
+
 (set! hl--ready #t)
 )scm";
 
 namespace Config::Scheme::Internals {
     bool g_up          = false; // interpreter + bootstrap ready
     int  g_nextBindId  = 0;
-    int  g_nextWindowId = 0;
 
-    // window handles: id -> WEAK reference. The compositor destroys windows
-    // whenever it wants; a stale handle is detected via lock() == nullptr.
-    // Deliberately non-owning: a strong ref would keep a zombie window alive.
-    std::unordered_map<int, PHLWINDOWREF> g_windows;
+    // ---- object handles -------------------------------------------------------
+    // A handle is a heap-allocated weak ref; the Scheme record carries its
+    // address (an integer), and a guardian deletes the object when the
+    // record dies — see the collect-request-handler install at the end of
+    // the bootstrap. Stale == lock() == nullptr. There is NO registry: the
+    // handle itself is the only state. Upstream parity: Lua userdata embed
+    // the same weak ref and the Lua GC hook destructs it; our guardian is
+    // that hook.
+    struct IHandle {
+        virtual ~IHandle() = default;
+    };
+    template <typename W>
+    struct SHandle : IHandle {
+        W wp;
+        SHandle() = default;
+        template <typename T>
+        explicit SHandle(T o) : wp(o) {}
+    };
 
-    // workspace and monitor handles: same model as window handles — an int id
-    // in the user-facing record, mapped to a weak ref here so handles can be
-    // validated (and go stale) at use time. Deliberately non-owning too.
-    int g_nextWorkspaceId = 0;
-    int g_nextMonitorId   = 0;
-    std::unordered_map<int, PHLWORKSPACEREF> g_workspaces;
-    std::unordered_map<int, PHLMONITORREF>   g_monitors;
+    // shared with SchemeLayout.cpp (declared in SchemeInternals.hpp)
+    uintptr_t mintWindowHandle(PHLWINDOW window) {
+        return (uintptr_t)(new SHandle<PHLWINDOWREF>(window));
+    }
 }
 
 namespace Config::Scheme {
@@ -2073,11 +2476,8 @@ namespace Config::Scheme {
     static std::string                g_regSubmap;
     static std::string                g_regSubmapReset;
     static int                        g_watchFd       = -1;    // inotify fd; dup'd into event loop waiters
-    // binds keyed by their scheme id, so hl-unbind can target one
-    static std::vector<std::pair<int, Keybinds::PBind>> g_binds;
     // scheme timers: C++ owns the CEventLoopTimer, Scheme owns the closure
-    // (kept alive via the hl--binds assoc list, keyed by the same ids)
-    static std::vector<std::pair<int, SP<CEventLoopTimer>>> g_timers;
+    // (the handler closures travel inside the connections, locked)
     // event subscriptions: C++ owns the listener handles (dropping one
     // unsubscribes); Scheme owns the handler closures by id
     static std::vector<Hyprutils::Signal::CHyprSignalListener> g_submapListeners;
@@ -2087,7 +2487,7 @@ namespace Config::Scheme {
     // (covers the plugin-auto-loaded-at-startup path, where the config load
     // precedes the first render frame).
     static bool                                        g_startSeen      = false;
-    static std::vector<int>                            g_pendingStart;
+    static std::vector<SThunkRef>                      g_pendingStart;
     static std::vector<Hyprutils::Signal::CHyprSignalListener> g_lifecycleListeners;
 
 
@@ -2141,22 +2541,52 @@ namespace Config::Scheme {
         }).detach();
     }
 
+    // defined below (device section); used by the bind result reader
+    static std::string schemeDatumToStr(ptr p);
+
     static Keybinds::SBindResult fireSchemeBind(int id) {
         if (!g_up)
             return {.success = false, .error = "scheme interpreter not initialized"};
 
         watchdogEnter("bind callback");
-        // hl--bind-fire: #f = declined (thunk returned #f, or error/watchdog)
+        // hl--bind-fire: #f = declined (thunk returned #f, or error/watchdog);
+        // otherwise the normalized result plist (or a non-plist truthy value
+        // for plain callbacks)
         const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--bind-fire")), Sinteger(id));
         watchdogExit();
         if (r == Sfalse)
             return {.success = false, .error = "scheme keybind callback declined"};
-        return {};
+        if (r == Strue || !Spairp(r) || !Ssymbolp(Scar(r)))
+            return {}; // handled — 'ok defaults to true
+
+        // result-table return (upstream dispatchResultFromLua parity):
+        // {ok, pass-event, request-release, error}
+        Keybinds::SBindResult res;
+        ptr l = r;
+        while (Spairp(l) && Spairp(Scdr(l))) {
+            const std::string k = schemeDatumToStr(Scar(l));
+            const ptr        v  = Scar(Scdr(l));
+            if (k == "ok") {
+                if (v == Sfalse)
+                    res.success = false;
+            } else if (k == "pass-event") {
+                if (v == Strue)
+                    res.passEvent = true;
+            } else if (k == "request-release") {
+                if (v == Strue)
+                    res.followUp = Keybinds::BIND_FOLLOW_UP_TRIGGER_RELEASE;
+            } else if (k == "error" && Sstringp(v)) {
+                res.error = schemeDatumToStr(v);
+            }
+            l = Scdr(Scdr(l));
+        }
+        return res;
     }
 
     // fires a handler registered for id with no payload; errors contained
     // numeric payloads (e.g. live gesture update): a real list of numbers
-    static ptr schemeIntList(const std::vector<int>& vals) {
+    template <typename T>
+    static ptr schemeIntList(const std::vector<T>& vals) {
         if (vals.empty())
             return Snil;
         ptr l = Snil;
@@ -2167,6 +2597,10 @@ namespace Config::Scheme {
         for (ptr p = l; Spairp(p); p = Scdr(p))
             Sunlock_object(p);
         return l;
+    }
+
+    static ptr schemeIntList(std::initializer_list<int> vals) {
+        return schemeIntList(std::vector<int>(vals));
     }
 
     // record+pin every heap object a call creates; release all when the value
@@ -2180,43 +2614,35 @@ namespace Config::Scheme {
             Sunlock_object(*it);
     }
 
-    static void fireSchemeNums(int id, const std::vector<double>& vals) {
-        if (!g_up)
-            return;
-
-        std::vector<ptr> elems;
-        std::vector<ptr> roots;
-        elems.reserve(vals.size());
-        for (auto v : vals) {
-            ptr f = Sflonum(v);
-            marshRoot(f, roots);
-            elems.push_back(f);
-        }
-        // build the list, pin cells, then release everything just before the call
-        ptr l = Snil;
-        for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
-            l = Scons(*it, l);
-            marshRoot(l, roots);
-        }
-        marshRelease(roots);
-        watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-list")), Sinteger(id), l);
-        watchdogExit();
-    }
-
-    static void fireScheme(int id) {
+    static void fireScheme(ptr record) {
         if (!g_up)
             return;
         watchdogEnter("handler");
-        Scall1(Stop_level_value(Sstring_to_symbol("hl--fire")), Sinteger(id));
+        Scall1(Stop_level_value(Sstring_to_symbol("hl--event-fire")), record);
         watchdogExit();
     }
 
     // called from Scheme via foreign-procedure; flags are raw eBindFlags bits,
     // assembled Scheme-side from the options plist
-    static int hlSchemeBind(ptr tokens, int flags, const char* desc, const char* devices) {
+    // ---- bind handles ---------------------------------------------------------
+    // A bind's Scheme handle is an hl-bind RECORD (token list + thunk). The
+    // capture inside the CBind carries an SThunkRef to it (SchemeInternals.hpp):
+    // locked while any copy lives, released when the bind is destroyed. There
+    // is NO bind registry on our side: Hyprland's keybind registry is the only
+    // list. The record's pinned address, stamped into the bind's argument
+    // metadata at registration, identifies our binds for precise unbind and
+    // plugin shutdown.
+    static std::string bindTag(ptr record) {
+        return "scheme:" + std::to_string(reinterpret_cast<uintptr_t>(record));
+    }
+
+    static Keybinds::SBindResult fireSchemeBindRec(ptr record); // defined below
+
+    static int hlSchemeBind(ptr record, ptr tokens, int flags, const char* desc, const char* devices) {
         if (!g_up)
             return -1;
+
+        SThunkRef ref(record); // lock FIRST: the record is a GC root from here on
 
         std::vector<std::string> keys;
         for (ptr p = tokens; Spairp(p) && p != Snil; p = Scdr(p)) {
@@ -2229,8 +2655,6 @@ namespace Config::Scheme {
             }
         }
 
-        const int id = g_nextBindId++;
-
         Keybinds::SExtraBindArgs args;
         std::string display_key;
         for (const auto& k : keys) {
@@ -2238,6 +2662,7 @@ namespace Config::Scheme {
             display_key += k;
         }
         args.metadata.displayKey = display_key;
+        args.metadata.argument   = bindTag(record);
         if (desc && *desc)
             args.metadata.description = desc;
         args.metadata.submap      = g_regSubmap;
@@ -2249,40 +2674,78 @@ namespace Config::Scheme {
                     args.devices.emplace(dev);
         }
 
-        auto bind = Keybinds::CBind::make(std::move(keys), sc<Keybinds::BindFlags>(flags), [id] { return fireSchemeBind(id); }, std::move(args));
+        auto bind = Keybinds::CBind::make(std::move(keys), sc<Keybinds::BindFlags>(flags), [ref] { return fireSchemeBindRec(ref.obj); }, std::move(args));
         if (!bind) {
             LOG(Log::ERR, "[scheme] bind failed: {}", bind.error());
             return -1;
         }
 
-        g_binds.emplace_back(id, Keybinds::mgr()->addBind(std::move(*bind)));
-        return id;
+        // no registry of our own: the manager owns the bind from here; its
+        // eventual destruction (unbind, reload clearBinds, shutdown) runs the
+        // capture destructor, which releases the record lock
+        (void)Keybinds::mgr()->addBind(std::move(*bind));
+        return 0;
+    }
+
+    // fires a RECORD bind (the capture passes the locked record); the Scheme
+    // trampoline extracts the thunk. Result contract identical to the id path.
+    static Keybinds::SBindResult fireSchemeBindRec(ptr record) {
+        if (!g_up)
+            return {.success = false, .error = "scheme interpreter not initialized"};
+
+        watchdogEnter("bind callback");
+        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--bind-fire-rec")), record);
+        watchdogExit();
+        if (r == Sfalse)
+            return {.success = false, .error = "scheme keybind callback declined"};
+        if (r == Strue || !Spairp(r) || !Ssymbolp(Scar(r)))
+            return {}; // handled — 'ok defaults to true
+
+        Keybinds::SBindResult res;
+        ptr l = r;
+        while (Spairp(l) && Spairp(Scdr(l))) {
+            const std::string k = schemeDatumToStr(Scar(l));
+            const ptr        v  = Scar(Scdr(l));
+            if (k == "ok") {
+                if (v == Sfalse)
+                    res.success = false;
+            } else if (k == "pass-event") {
+                if (v == Strue)
+                    res.passEvent = true;
+            } else if (k == "request-release") {
+                if (v == Strue)
+                    res.followUp = Keybinds::BIND_FOLLOW_UP_TRIGGER_RELEASE;
+            } else if (k == "error" && Sstringp(v)) {
+                res.error = schemeDatumToStr(v);
+            }
+            l = Scdr(Scdr(l));
+        }
+        return res;
     }
 
     // called from Scheme via foreign-procedure: remove one scheme bind
     static int hlSchemeUnbindKey(const char* key) {
         if (!g_up || !Keybinds::mgr() || !key || !*key)
             return -1;
+        // coarse: removes EVERY bind whose display key matches (upstream
+        // hl.unbind parity); precise removal goes through hlSchemeUnbindRec
         const auto removed = Keybinds::mgr()->removeBinds(key);
-        // drop our g_binds entries whose displayKey matches
-        std::erase_if(g_binds, [&key](const auto& b) {
-            return b.second && b.second->metadata().displayKey == key;
-        });
         return removed > 0 ? 0 : -1;
     }
 
-    static int hlSchemeUnbind(int id) {
-        if (!g_up)
+    // precise: find OUR bind by the argument tag (the record's pinned
+    // address) and removeBind it — exactly one match, however many same-key
+    // siblings exist
+    static int hlSchemeUnbindRec(ptr record) {
+        if (!g_up || !Keybinds::mgr())
             return -1;
-
-        const auto it = std::ranges::find_if(g_binds, [id](const auto& b) { return b.first == id; });
-        if (it == g_binds.end())
-            return -1;
-
-        if (Keybinds::mgr())
-            Keybinds::mgr()->removeBind(it->second);
-        g_binds.erase(it);
-        return 0;
+        const std::string tag = bindTag(record);
+        for (const Keybinds::PBind& b : Keybinds::mgr()->registry().binds())
+            if (b && b->metadata().argument == tag) {
+                Keybinds::mgr()->removeBind(b);
+                return 0;
+            }
+        return -1; // not registered (already unbound, or a stale handle)
     }
 
     // called from Scheme via foreign-procedure
@@ -2295,59 +2758,44 @@ namespace Config::Scheme {
 
     // fires a handler registered for id with a string payload; all errors are
     // contained inside hl--fire-str's guard
-    static void fireSchemeStr(int id, const std::string& arg) {
+    static void fireSchemeStr(ptr record, const std::string& arg) {
         if (!g_up)
             return;
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-str")), Sinteger(id), Sstring_utf8(arg.c_str(), arg.size()));
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-str-rec")), record, Sstring_utf8(arg.c_str(), arg.size()));
         watchdogExit();
     }
 
     // fires a handler registered for id with a boolean payload (#t/#f); all
     // errors are contained inside hl--fire-bool's guard
-    static void fireSchemeBool(int id, bool arg) {
+    static void fireSchemeBool(ptr record, bool arg) {
         if (!g_up)
             return;
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-bool")), Sinteger(id), arg ? Strue : Sfalse);
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-bool-rec")), record, arg ? Strue : Sfalse);
         watchdogExit();
     }
 
     // events carrying window payloads: the window crosses as a fresh handle id
-    static void fireSchemeWin(int id, PHLWINDOW window) {
+    static void fireSchemeWin(ptr record, PHLWINDOW window) {
         if (!g_up || !window)
             return;
 
-        const int winId = g_nextWindowId++;
-        g_windows.emplace(winId, PHLWINDOWREF(window));
+        const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(window));
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-win")), Sinteger(id), Sinteger(winId));
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-win-rec")), record, Sinteger(winId));
         watchdogExit();
     }
 
-    // handle registries resolve like windowFromId: lock, or drop the dead
-    // entry while we're here
-    static PHLWORKSPACE workspaceFromId(int id) {
-        const auto it = g_workspaces.find(id);
-        if (it == g_workspaces.end())
-            return nullptr;
-        auto ws = it->second.lock();
-        if (!ws)
-            g_workspaces.erase(it);
-        return ws;
+    static PHLWORKSPACE workspaceFromId(long long id) {
+        return reinterpret_cast<SHandle<PHLWORKSPACEREF>*>(id)->wp.lock();
     }
 
-    static PHLMONITOR monitorFromId(int id) {
-        const auto it = g_monitors.find(id);
-        if (it == g_monitors.end())
-            return nullptr;
-        auto mon = it->second.lock();
-        if (!mon)
-            g_monitors.erase(it);
-        return mon;
+    static PHLMONITOR monitorFromId(long long id) {
+        return reinterpret_cast<SHandle<PHLMONITORREF>*>(id)->wp.lock();
     }
 
     // events carrying workspace/monitor payloads: the object crosses as a
@@ -2355,82 +2803,123 @@ namespace Config::Scheme {
     // the weak ref as-is without locking — used by workspace.removed, which
     // fires mid-destruction (that handle is born dead; see the comment at
     // the listener).
-    static void fireSchemeWs(int id, PHLWORKSPACE ws) {
+    static void fireSchemeWs(ptr record, PHLWORKSPACE ws) {
         if (!g_up)
             return;
 
-        int wsId = -1;
-        if (ws) {
-            wsId = g_nextWorkspaceId++;
-            g_workspaces.emplace(wsId, PHLWORKSPACEREF(ws));
-        }
+        const auto wsId = ws ? (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws)) : 0;
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-ws")), Sinteger(id), wsId >= 0 ? Sinteger(wsId) : Sfalse);
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-ws-rec")), record, wsId ? Sinteger(wsId) : Sfalse);
         watchdogExit();
     }
 
-    static void fireSchemeWsRef(int id, PHLWORKSPACEREF ws) {
+    static void fireSchemeWsRef(ptr record, PHLWORKSPACEREF ws) {
         if (!g_up)
             return;
 
-        const int wsId = g_nextWorkspaceId++;
-        g_workspaces.emplace(wsId, ws);
+        const auto wsId = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws));
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-ws")), Sinteger(id), Sinteger(wsId));
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-ws-rec")), record, Sinteger(wsId));
         watchdogExit();
     }
 
-    static void fireSchemeMon(int id, PHLMONITOR mon) {
+    static void fireSchemeMon(ptr record, PHLMONITOR mon) {
         if (!g_up)
             return;
 
-        int monId = -1;
-        if (mon) {
-            monId = g_nextMonitorId++;
-            g_monitors.emplace(monId, PHLMONITORREF(mon));
-        }
+        const auto monId = mon ? (uintptr_t)(new SHandle<PHLMONITORREF>(mon)) : 0;
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-mon")), Sinteger(id), monId >= 0 ? Sinteger(monId) : Sfalse);
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-mon-rec")), record, monId ? Sinteger(monId) : Sfalse);
         watchdogExit();
     }
 
     // two-handle payloads (workspace, monitor); a null object crosses as #f
-    static void fireSchemeWsMon(int id, PHLWORKSPACE ws, PHLMONITOR mon) {
+    static void fireSchemeWsMon(ptr record, PHLWORKSPACE ws, PHLMONITOR mon) {
         if (!g_up)
             return;
 
-        int wsId = -1, monId = -1;
-        if (ws) {
-            wsId = g_nextWorkspaceId++;
-            g_workspaces.emplace(wsId, PHLWORKSPACEREF(ws));
-        }
-        if (mon) {
-            monId = g_nextMonitorId++;
-            g_monitors.emplace(monId, PHLMONITORREF(mon));
-        }
+        const auto wsId  = ws ? (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws)) : 0;
+        const auto monId = mon ? (uintptr_t)(new SHandle<PHLMONITORREF>(mon)) : 0;
 
         watchdogEnter("handler");
-        Scall3(Stop_level_value(Sstring_to_symbol("hl--fire-ws-mon")), Sinteger(id), wsId >= 0 ? Sinteger(wsId) : Sfalse, monId >= 0 ? Sinteger(monId) : Sfalse);
+        Scall3(Stop_level_value(Sstring_to_symbol("hl--fire-ws-mon-rec")), record, wsId ? Sinteger(wsId) : Sfalse, monId ? Sinteger(monId) : Sfalse);
         watchdogExit();
     }
 
     // called from Scheme via foreign-procedure; repeat != 0 re-arms forever
     // (or until the callback errors, which stops zombie loops)
-    static int hlSchemeTimer(int ms, int repeat) {
+    // the timer index: record address -> live timer state. Entries erase
+    // themselves — a one-shot removes its entry in its own completion
+    // callback, reload tears the rest down — so the map only ever holds
+    // timers that can still fire. No ids, no global timer list: the event
+    // loop owns the CEventLoopTimer, the capture owns the record lock.
+    struct STimerEntry {
+        SP<CEventLoopTimer> timer;
+        int                 repeat;
+        uint64_t            ms; // current interval (set-timeout re-tunes it)
+    };
+    static std::unordered_map<uintptr_t, STimerEntry> g_timerIndex;
+
+    // timer-record fire: extract (hl-timer-thunk b) and run it zero-arg
+    // under the bind result protocol (repeating timers stop on ok #f)
+    static Keybinds::SBindResult fireSchemeTimerRec(ptr record) {
+        if (!g_up)
+            return {.success = false, .error = "scheme interpreter not initialized"};
+
+        watchdogEnter("bind callback");
+        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--timer-fire")), record);
+        watchdogExit();
+        if (r == Sfalse)
+            return {.success = false, .error = "scheme keybind callback declined"};
+        if (r == Strue || !Spairp(r) || !Ssymbolp(Scar(r)))
+            return {};
+        Keybinds::SBindResult res;
+        ptr l = r;
+        while (Spairp(l) && Spairp(Scdr(l))) {
+            const std::string k = schemeDatumToStr(Scar(l));
+            const ptr        v  = Scar(Scdr(l));
+            if (k == "ok") {
+                if (v == Sfalse)
+                    res.success = false;
+            } else if (k == "pass-event") {
+                if (v == Strue)
+                    res.passEvent = true;
+            } else if (k == "request-release") {
+                if (v == Strue)
+                    res.followUp = Keybinds::BIND_FOLLOW_UP_TRIGGER_RELEASE;
+            } else if (k == "error" && Sstringp(v)) {
+                res.error = schemeDatumToStr(v);
+            }
+            l = Scdr(Scdr(l));
+        }
+        return res;
+    }
+
+    static STimerEntry* timerByRecord(ptr record); // defined below (timer control)
+
+    static int hlSchemeTimer(ptr record, int ms, int repeat) {
         if (!g_up || !g_pEventLoopManager || ms < 0)
             return -1;
 
-        const int id = g_nextBindId++;
+        // the capture carries the record LOCKED (SThunkRef): the thunk stays
+        // alive while the timer can fire; when the timer object is destroyed
+        // (completion below, or reload teardown), the lock releases.
+        SThunkRef ref(record);
 
         auto shared = makeShared<CEventLoopTimer>(std::chrono::milliseconds(ms),
-            [id, ms, repeat](SP<CEventLoopTimer> self, void*) {
-                const auto result = fireSchemeBind(id);
+            [ref, ms, repeat](SP<CEventLoopTimer> self, void*) {
+                const auto result = fireSchemeTimerRec(ref.obj);
 
                 if (repeat && result.success) {
-                    self->updateTimeout(std::chrono::milliseconds(ms));
+                    // re-arm at the CURRENT interval — set-timeout re-tunes
+                    // the index entry, the captured ms is only the initial one
+                    uint64_t cur = ms;
+                    if (const auto* e = timerByRecord(ref.obj))
+                        cur = e->ms;
+                    self->updateTimeout(std::chrono::milliseconds(sc<int64_t>(cur)));
                     return;
                 }
 
@@ -2440,13 +2929,14 @@ namespace Config::Scheme {
                 self->cancel();
                 if (g_pEventLoopManager)
                     g_pEventLoopManager->removeTimer(self);
-                std::erase_if(g_timers, [self](const auto& t) { return t.second == self; });
+                g_timerIndex.erase(reinterpret_cast<uintptr_t>(ref.obj));
             },
             nullptr);
 
         g_pEventLoopManager->addTimer(shared);
-        g_timers.emplace_back(id, shared);
-        return id;
+        g_timerIndex.emplace(reinterpret_cast<uintptr_t>(record),
+                             STimerEntry{shared, repeat, sc<uint64_t>(ms)});
+        return 0;
     }
 
     // called from Scheme via foreign-procedure: focused window title, or #f
@@ -2479,47 +2969,51 @@ namespace Config::Scheme {
 
         // proper scheme data: a real list of ids, not a newline-joined string.
         // (Sinteger is an immediate — only the cons cells need rooting.)
-        std::vector<int> ids;
+        std::vector<uintptr_t> ids;
         for (const auto& wsRef : State::Workspace::state()->workspaces()) {
             const auto ws = wsRef.lock();
             if (!ws)
                 continue;
-            ids.push_back(g_nextWorkspaceId++);
-            g_workspaces.emplace(ids.back(), wsRef);
+            ids.push_back((uintptr_t)(new SHandle<PHLWORKSPACEREF>(wsRef)));
         }
 
         return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
     // called from Scheme via foreign-procedure: subscribe to submap changes
-    static int hlSchemeSubmapListen() {
+    static int hlSchemeSubmapListen(ptr record) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
-        g_submapListeners.emplace_back(Event::bus()->m_events.keybinds.submap.listen([id](const std::string& name) {
-            fireSchemeStr(id, name);
+        g_submapListeners.emplace_back(Event::bus()->m_events.keybinds.submap.listen([ref = SThunkRef(record)](const std::string& name) {
+            fireSchemeStr(ref.obj, name);
         }));
-        return id;
+        return 0;
     }
 
     // resolves a handle id to the live window, or null if stale (dead or
     // unknown). lazily drops dead entries while we're here.
-    static std::optional<PHLWINDOW> actionWindow(int id);
+    static std::optional<PHLWINDOW> actionWindow(long long id);
 
-    static PHLWINDOW windowFromId(int id) {
-        const auto it = g_windows.find(id);
-        if (it == g_windows.end())
-            return nullptr;
-
-        auto window = it->second.lock();
-        if (!window)
-            g_windows.erase(it);
-
-        return window;
+    // called from Scheme via foreign-procedure when the guardian yields a
+    // dead handle record: runs the weak ref's destructor (unregisters the
+    // observer from the object's control block)
+    static int hlHandleFree(unsigned long long addr) {
+        // implausible addresses (corruption, truncation bugs) are skipped and
+        // logged rather than crashed on; valid user-space pointers are < 2^47
+        if ((addr >> 47) != 0) {
+            LOG(Log::ERR, "[scheme] handle free: implausible address {:#x} — skipping", addr);
+            return -1;
+        }
+        delete reinterpret_cast<IHandle*>(addr);
+        return 0;
     }
 
-    static int hlSchemeActiveWindowId() {
+    static PHLWINDOW windowFromId(long long id) {
+        return reinterpret_cast<SHandle<PHLWINDOWREF>*>(id)->wp.lock();
+    }
+
+    static double hlSchemeActiveWindowId() {
         if (!g_up)
             return -1;
 
@@ -2527,28 +3021,25 @@ namespace Config::Scheme {
         if (!window)
             return -1;
 
-        const int id = g_nextWindowId++;
-        g_windows.emplace(id, PHLWINDOWREF(window));
-        return id;
+        return (double)(uintptr_t)(new SHandle<PHLWINDOWREF>(window));
     }
 
     static ptr hlSchemeWindowIds() {
         if (!g_up)
             return Sfalse;
 
-        std::vector<int> ids;
+        std::vector<uintptr_t> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!w->mapped())
                 continue;
-            const int id = g_nextWindowId++;
-            g_windows.emplace(id, PHLWINDOWREF(w));
+            const auto id = (uintptr_t)(new SHandle<PHLWINDOWREF>(w));
             ids.push_back(id);
         }
 
         return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
-    static ptr hlSchemeWindowTitle(int id) {
+    static ptr hlSchemeWindowTitle(long long id) {
         if (!g_up)
             return Sfalse;
 
@@ -2560,14 +3051,14 @@ namespace Config::Scheme {
         return Sstring_utf8(title.c_str(), title.size());
     }
 
-    static int hlSchemeWindowAlive(int id) {
+    static int hlSchemeWindowAlive(long long id) {
         if (!g_up)
             return 0;
 
         return windowFromId(id) ? 1 : 0;
     }
 
-    static int hlSchemeWindowClose(int id) {
+    static int hlSchemeWindowClose(long long id) {
         if (!g_up)
             return -1;
 
@@ -2580,7 +3071,7 @@ namespace Config::Scheme {
         return Config::Actions::closeWindow(window) ? 0 : -2;
     }
 
-    static ptr hlSchemeWindowClass(int id) {
+    static ptr hlSchemeWindowClass(long long id) {
         if (!g_up)
             return Sfalse;
         {
@@ -2597,7 +3088,7 @@ namespace Config::Scheme {
         return Sstring_utf8(s.c_str(), s.size());
     }
 
-    static ptr hlSchemeWindowWorkspaceId(int id) {
+    static ptr hlSchemeWindowWorkspaceId(long long id) {
         if (!g_up)
             return Sfalse;
 
@@ -2605,12 +3096,11 @@ namespace Config::Scheme {
         if (!window || !window->m_workspace)
             return Sfalse;
 
-        const int wsId = g_nextWorkspaceId++;
-        g_workspaces.emplace(wsId, PHLWORKSPACEREF(window->m_workspace));
+        const auto wsId = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(window->m_workspace));
         return Sinteger(wsId);
     }
 
-    static ptr hlSchemeWindowMonitorId(int id) {
+    static ptr hlSchemeWindowMonitorId(long long id) {
         if (!g_up)
             return Sfalse;
 
@@ -2622,12 +3112,11 @@ namespace Config::Scheme {
         if (!monitor)
             return Sfalse;
 
-        const int monId = g_nextMonitorId++;
-        g_monitors.emplace(monId, PHLMONITORREF(monitor));
+        const auto monId = (uintptr_t)(new SHandle<PHLMONITORREF>(monitor));
         return Sinteger(monId);
     }
 
-    static int hlSchemeWindowFloating(int id) {
+    static int hlSchemeWindowFloating(long long id) {
         if (!g_up)
             return 0;
 
@@ -2635,7 +3124,7 @@ namespace Config::Scheme {
         return (window && window->isFloating()) ? 1 : 0;
     }
 
-    static ptr hlSchemeWindowSize(int id) {
+    static ptr hlSchemeWindowSize(long long id) {
         if (!g_up)
             return Sfalse;
 
@@ -2647,7 +3136,7 @@ namespace Config::Scheme {
         return Scons(Sinteger((int)sz.x), Sinteger((int)sz.y));   // (w . h)
     }
 
-    static int hlSchemeWindowPid(int id) {
+    static int hlSchemeWindowPid(long long id) {
         if (!g_up)
             return -1;
 
@@ -2658,7 +3147,235 @@ namespace Config::Scheme {
         return (int)window->backend().pid();
     }
 
-    static int hlSchemeWindowFocus(int id) {
+    // ---- window read-side fields (LuaWindow.cpp field parity, 2026-09-21) ----
+    // upstream's is_master / perc_master / perc_size / index / index_in_column
+    // / column all live inside ONE `layout` table — mirrored as the single
+    // hl-window-layout plist getter, not five functions.
+    static int hlWindowFocusHistoryId(PHLWINDOW wnd) {
+        const auto& history = Desktop::History::windowTracker()->fullHistory();
+        for (size_t i = 0; i < history.size(); ++i) {
+            if (history[i].lock() == wnd)
+                return sc<int>(history.size() - i - 1); // reverse order, upstream parity
+        }
+        return -1;
+    }
+
+    static ptr hlSchemeWindowAddress(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        const auto addr = std::format("0x{:x}", reinterpret_cast<uintptr_t>(window.get()));
+        return Sstring_utf8(addr.c_str(), addr.size());
+    }
+
+    static int hlSchemeWindowMapped(long long id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromId(id);
+        return (window && window->mapped()) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowVisible(long long id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromId(id);
+        return (window && window->mapped() && window->acceptsInput() && window->alphaNonZero()) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowAcceptsInput(long long id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromId(id);
+        return (window && window->acceptsInput()) ? 1 : 0;
+    }
+
+    static ptr hlSchemeWindowPosition(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        const auto pos = window->position(Desktop::View::IGeometric::GEOMETRIC_GOAL);
+        return Scons(Sinteger((int)pos.x), Sinteger((int)pos.y)); // (x . y)
+    }
+
+    static int hlSchemeWindowPinFullscreened(long long id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromId(id);
+        return (window && window->fullscreenPolicy().pinFullscreened()) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowAllowedOverFullscreen(long long id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromId(id);
+        return (window && window->fullscreenPolicy().allowedOverFullscreen()) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowTearingHint(long long id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromId(id);
+        return (window && (window->m_hints & Desktop::View::WINDOW_HINT_TEAR)) ? 1 : 0;
+    }
+
+    static int hlSchemeWindowInhibitingIdle(long long id) {
+        if (!g_up)
+            return 0;
+        const auto window = windowFromId(id);
+        return (window && g_pInputManager && g_pInputManager->isWindowInhibiting(window, false)) ? 1 : 0;
+    }
+
+    static ptr hlSchemeWindowFocusHistoryId(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        return Sinteger(hlWindowFocusHistoryId(window));
+    }
+
+    static ptr hlSchemeWindowContentType(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        const auto ct = NContentType::toString(window->getContentType());
+        return Sstring_utf8(ct.c_str(), ct.size());
+    }
+
+    static ptr hlSchemeWindowStableId(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        const auto sid = std::format("{:x}", window->metadata().stableID());
+        return Sstring_utf8(sid.c_str(), sid.size());
+    }
+
+    static ptr hlSchemeWindowTags(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        ptr l = Snil;
+        for (const auto& tag : window->m_ruleApplicator->m_tagKeeper.getTags())
+            l = Scons(Sstring_utf8(tag.c_str(), tag.size()), l);
+        return l;
+    }
+
+    static ptr hlSchemeWindowSwallowingId(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        const auto swallowee = window->swallowing().swallowee();
+        if (!swallowee)
+            return Sfalse;
+        const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(swallowee));
+        return Sinteger(winId);
+    }
+
+    static ptr hlSchemeWindowXdgTag(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        const auto tag = window->backend().metadata().tag;
+        if (!tag)
+            return Sfalse;
+        return Sstring_utf8(tag->c_str(), tag->size());
+    }
+
+    static ptr hlSchemeWindowXdgDescription(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+        const auto desc = window->backend().metadata().description;
+        if (!desc)
+            return Sfalse;
+        return Sstring_utf8(desc->c_str(), desc->size());
+    }
+
+    // upstream's `layout` window field: {name} for plain algos, plus
+    // is_master/perc_master/perc_size under master, and a nested column
+    // table {index width windows} + index_in_column under scrolling.
+    // Mirrored as a plist: (name "master" 'is-master #f 'perc-master 0.5
+    // 'perc-size 1.0) | (name "scrolling" 'column (index n width f
+    // windows (…)) 'index-in-column n). Stale handle / no algo -> #f.
+    static ptr hlSchemeWindowLayout(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto window = windowFromId(id);
+        if (!window)
+            return Sfalse;
+
+        const auto target = window->layoutTarget();
+        if (!target || target->floating() || !window->m_workspace || !window->m_workspace->space())
+            return Sfalse;
+        const auto& algo = window->m_workspace->space()->algorithm();
+        if (!algo || !algo->tiledAlgo())
+            return Sfalse;
+        const auto& tiledAlgo = algo->tiledAlgo();
+
+        const std::string name = Layout::Supplementary::algoMatcher()->getNameForTiledAlgo(tiledAlgo.get());
+        ptr l = Scons(Sstring_to_symbol("name"), Scons(Sstring_utf8(name.c_str(), name.size()), Snil));
+
+        if (const auto* master = dynamic_cast<Layout::Tiled::CMasterAlgorithm*>(tiledAlgo.get())) {
+            const auto node = master->getNodeFromTarget(target);
+            if (node) {
+                l = Scons(Sstring_to_symbol("is-master"),
+                     Scons(node->isMaster ? Strue : Sfalse, l));
+                l = Scons(Sstring_to_symbol("perc-master"),
+                     Scons(Sflonum(node->percMaster), l));
+                l = Scons(Sstring_to_symbol("perc-size"),
+                     Scons(Sflonum(node->percSize), l));
+            }
+        } else if (auto* scrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(tiledAlgo.get())) {
+            const auto data = scrolling->dataFor(target);
+            if (data) {
+                const auto col = data->column.lock();
+                if (col) {
+                    const auto scrollingData = col->scrollingData.lock();
+                    ptr column = Snil;
+                    if (scrollingData)
+                        column = Scons(Sstring_to_symbol("index"),
+                                   Scons(Sinteger((int)scrollingData->idx(col)), column));
+                    column = Scons(Sstring_to_symbol("width"),
+                               Scons(Sflonum(col->getColumnWidth()), column));
+                    ptr windows = Snil;
+                    for (const auto& td : col->targetDatas) {
+                        const auto t = td->target.lock();
+                        if (!t)
+                            continue;
+                        const auto win = t->window();
+                        if (!win)
+                            continue;
+                        const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(win));
+                        windows = Scons(Sinteger(winId), windows);
+                    }
+                    column = Scons(Sstring_to_symbol("windows"),
+                               Scons(windows, column));
+                    l = Scons(Sstring_to_symbol("index-in-column"),
+                          Scons(Sinteger((int)col->idx(target)), l));
+                    l = Scons(Sstring_to_symbol("column"), Scons(column, l));
+                }
+            }
+        }
+        return l;
+    }
+
+    static int hlSchemeWindowFocus(long long id) {
         if (!g_up)
             return -1;
 
@@ -2669,7 +3386,7 @@ namespace Config::Scheme {
         return Config::Actions::focus(*window) ? 0 : -2;
     }
 
-    static int hlSchemeWindowFloat(int id) {
+    static int hlSchemeWindowFloat(long long id) {
         if (!g_up)
             return -1;
 
@@ -2680,7 +3397,7 @@ namespace Config::Scheme {
         return Config::Actions::floatWindow(Config::Actions::TOGGLE_ACTION_TOGGLE, *window) ? 0 : -2;
     }
 
-    static int hlSchemeWindowMoveToWorkspace(int id, const char* name) {
+    static int hlSchemeWindowMoveToWorkspace(long long id, const char* name) {
         if (!g_up || !name)
             return -1;
 
@@ -2711,7 +3428,7 @@ namespace Config::Scheme {
     // mirroring the toggle logic in Lua's dsp_fullscreenWindowWithAction
     // true set: 0 = none, 1 = maximized, 2 = fullscreen — regardless of the
     // current state (the toggle above exits when already in the mode)
-    static int hlSchemeWindowFullscreenSet(int id, int modeRaw) {
+    static int hlSchemeWindowFullscreenSet(long long id, int modeRaw) {
         if (!g_up)
             return -1;
         const auto window = actionWindow(id).value_or(nullptr);
@@ -2721,7 +3438,7 @@ namespace Config::Scheme {
         return Config::Actions::fullscreenWindow(mode, false, window) ? 0 : -2;
     }
 
-    static int hlSchemeWindowFullscreenToggle(int id, int modeRaw) {
+    static int hlSchemeWindowFullscreenToggle(long long id, int modeRaw) {
         if (!g_up)
             return -1;
 
@@ -2737,7 +3454,7 @@ namespace Config::Scheme {
         return Config::Actions::fullscreenWindow(mode, false, w) ? 0 : -2;
     }
 
-    static int hlSchemeWindowFullscreenMode(int id) {
+    static int hlSchemeWindowFullscreenMode(long long id) {
         if (!g_up)
             return -1;
 
@@ -2748,7 +3465,7 @@ namespace Config::Scheme {
         return sc<int>(Fullscreen::controller()->getFullscreenModes(window).internal);
     }
 
-    static int hlSchemeWindowHidden(int id) {
+    static int hlSchemeWindowHidden(long long id) {
         if (!g_up)
             return 0;
 
@@ -2756,7 +3473,7 @@ namespace Config::Scheme {
         return (window && window->isHidden()) ? 1 : 0;
     }
 
-    static int hlSchemeWindowPinned(int id) {
+    static int hlSchemeWindowPinned(long long id) {
         if (!g_up)
             return 0;
 
@@ -2770,32 +3487,32 @@ namespace Config::Scheme {
 
     // windowHandle: scheme ids 0+ map to registry windows, -1 to the focused
     // window (same convention as actionWindow below)
-    static PHLWINDOW windowFromSchemeId(int id) {
+    static PHLWINDOW windowFromSchemeId(long long id) {
         return id >= 0 ? windowFromId(id) : Desktop::focusState()->window();
     }
 
-    static int hlSchemeWindowPseudoQuery(int id) {
+    static int hlSchemeWindowPseudoQuery(long long id) {
         if (!g_up)
             return 0;
         const auto window = windowFromSchemeId(id);
         return (window && window->layoutTarget()->isPseudo()) ? 1 : 0;
     }
 
-    static int hlSchemeWindowMaximizedQuery(int id) {
+    static int hlSchemeWindowMaximizedQuery(long long id) {
         if (!g_up)
             return 0;
         const auto window = windowFromSchemeId(id);
         return (window && Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_MAXIMIZED) ? 1 : 0;
     }
 
-    static int hlSchemeWindowInGroup(int id) {
+    static int hlSchemeWindowInGroup(long long id) {
         if (!g_up)
             return 0;
         const auto window = windowFromSchemeId(id);
         return (window && window->grouping().group()) ? 1 : 0;
     }
 
-    static int hlSchemeWindowGroupDenied(int id) {
+    static int hlSchemeWindowGroupDenied(long long id) {
         if (!g_up)
             return 0;
         const auto window = windowFromSchemeId(id);
@@ -2805,7 +3522,7 @@ namespace Config::Scheme {
         return (group && group->denied()) ? 1 : 0;
     }
 
-    static int hlSchemeWindowGroupLocked(int id) {
+    static int hlSchemeWindowGroupLocked(long long id) {
         if (!g_up)
             return 0;
         const auto window = windowFromSchemeId(id);
@@ -2824,7 +3541,7 @@ namespace Config::Scheme {
     // window-scoped group lock: toggle/set the lock on the group of the given
     // window (id 0 → focused). Mirrors upstream lockActiveGroup with the
     // target window explicit instead of always-focused.
-    static int hlSchemeWindowGroupLock(int id, int act) {
+    static int hlSchemeWindowGroupLock(long long id, int act) {
         if (!g_up)
             return -1;
         const auto window = windowFromSchemeId(id);
@@ -2845,7 +3562,7 @@ namespace Config::Scheme {
     // read back the dynamic window props setProp writes: effective values
     // (defaults included), as #t/#f for booleans, numbers for opacities and
     // border/rounding, and #f for unknown/unsupported prop names.
-    static ptr hlSchemeWindowPropGet(int id, const char* prop) {
+    static ptr hlSchemeWindowPropGet(long long id, const char* prop) {
         if (!g_up)
             return Sfalse;
         const auto window = windowFromSchemeId(id);
@@ -2903,7 +3620,7 @@ namespace Config::Scheme {
     // hl.dsp.* dispatchers use. Window args take a scheme handle id, or -1
     // for the active window.
 
-    static std::optional<PHLWINDOW> actionWindow(int id) {
+    static std::optional<PHLWINDOW> actionWindow(long long id) {
         if (id >= 0)
             return windowFromId(id);
         return Desktop::focusState()->window();
@@ -2970,25 +3687,25 @@ namespace Config::Scheme {
         return actionResult("focus-urgent", Config::Actions::focusUrgentOrLast());
     }
 
-    static int hlSchemeWindowMoveDirection(int id, const char* dir) {
+    static int hlSchemeWindowMoveDirection(long long id, const char* dir) {
         if (!g_up)
             return -1;
         return actionResult("window-move-direction", Config::Actions::moveInDirection(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowSwapDirection(int id, const char* dir) {
+    static int hlSchemeWindowSwapDirection(long long id, const char* dir) {
         if (!g_up)
             return -1;
         return actionResult("window-swap-direction", Config::Actions::swapInDirection(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowSwapNext(int id, int prev) {
+    static int hlSchemeWindowSwapNext(long long id, int prev) {
         if (!g_up)
             return -1;
         return actionResult("window-swap-next", Config::Actions::swapNext(prev == 0, actionWindow(id)));
     }
 
-    static int hlSchemeWindowSwapWith(int id, int otherId) {
+    static int hlSchemeWindowSwapWith(long long id, long long otherId) {
         if (!g_up)
             return -1;
         const auto other = windowFromId(otherId);
@@ -2998,7 +3715,7 @@ namespace Config::Scheme {
     }
 
     // filter: 0 = all, 1 = tiled only, 2 = floating only
-    static int hlSchemeWindowCycle(int id, int next, int filter) {
+    static int hlSchemeWindowCycle(long long id, int next, int filter) {
         if (!g_up)
             return -1;
         std::optional<bool> tiled, floating;
@@ -3009,74 +3726,74 @@ namespace Config::Scheme {
         return actionResult("window-cycle", Config::Actions::cycleNext(next != 0, tiled, floating, actionWindow(id)));
     }
 
-    static int hlSchemeWindowCenter(int id) {
+    static int hlSchemeWindowCenter(long long id) {
         if (!g_up)
             return -1;
         return actionResult("window-center", Config::Actions::center(actionWindow(id)));
     }
 
-    static int hlSchemeWindowResizePx(int id, double w, double h, int relative) {
+    static int hlSchemeWindowResizePx(long long id, double w, double h, int relative) {
         if (!g_up)
             return -1;
         return actionResult("window-resize", Config::Actions::resize(Vector2D{w, h}, relative != 0, actionWindow(id)));
     }
 
-    static int hlSchemeWindowMovePx(int id, double x, double y, int relative) {
+    static int hlSchemeWindowMovePx(long long id, double x, double y, int relative) {
         if (!g_up)
             return -1;
         return actionResult("window-move", Config::Actions::move(Vector2D{x, y}, relative != 0, actionWindow(id)));
     }
 
     // act: 0 = toggle, 1 = on, 2 = off
-    static int hlSchemeWindowFloatAct(int id, int act) {
+    static int hlSchemeWindowFloatAct(long long id, int act) {
         if (!g_up)
             return -1;
         return actionResult("window-float", Config::Actions::floatWindow(sc<Config::Actions::eTogglableAction>(act), actionWindow(id)));
     }
 
     // act: 0 = toggle, 1 = on, 2 = off
-    static int hlSchemeWindowPinAct(int id, int act) {        if (!g_up)
+    static int hlSchemeWindowPinAct(long long id, int act) {        if (!g_up)
             return -1;
         return actionResult("window-pin", Config::Actions::pinWindow(sc<Config::Actions::eTogglableAction>(act), actionWindow(id)));
     }
 
-    static int hlSchemeWindowPseudo(int id, int act) {
+    static int hlSchemeWindowPseudo(long long id, int act) {
         if (!g_up)
             return -1;
         return actionResult("window-pseudo", Config::Actions::pseudoWindow(sc<Config::Actions::eTogglableAction>(act), actionWindow(id)));
     }
 
-    static int hlSchemeWindowKill(int id) {
+    static int hlSchemeWindowKill(long long id) {
         if (!g_up)
             return -1;
         return actionResult("window-kill", Config::Actions::killWindow(actionWindow(id)));
     }
 
-    static int hlSchemeWindowSignal(int id, int sig) {
+    static int hlSchemeWindowSignal(long long id, int sig) {
         if (!g_up)
             return -1;
         return actionResult("window-signal", Config::Actions::signalWindow(sig, actionWindow(id)));
     }
 
-    static int hlSchemeWindowZOrder(int id, const char* mode) {
+    static int hlSchemeWindowZOrder(long long id, const char* mode) {
         if (!g_up)
             return -1;
         return actionResult("window-zorder", Config::Actions::alterZOrder(std::string(mode ? mode : ""), actionWindow(id)));
     }
 
-    static int hlSchemeWindowSetProp(int id, const char* prop, const char* val) {
+    static int hlSchemeWindowSetProp(long long id, const char* prop, const char* val) {
         if (!g_up)
             return -1;
         return actionResult("window-set-prop", Config::Actions::setProp(std::string(prop ? prop : ""), std::string(val ? val : ""), actionWindow(id)));
     }
 
-    static int hlSchemeWindowTag(int id, const char* tag) {
+    static int hlSchemeWindowTag(long long id, const char* tag) {
         if (!g_up)
             return -1;
         return actionResult("window-tag", Config::Actions::tag(std::string(tag ? tag : ""), actionWindow(id)));
     }
 
-    static int hlSchemeWindowClearTags(int id) {
+    static int hlSchemeWindowClearTags(long long id) {
         if (!g_up)
             return -1;
         return actionResult("window-clear-tags", Config::Actions::clearTags(actionWindow(id)));
@@ -3088,7 +3805,7 @@ namespace Config::Scheme {
         return actionResult("toggle-swallow", Config::Actions::toggleSwallow());
     }
 
-    static int hlSchemeGroupToggle(int id) {
+    static int hlSchemeGroupToggle(long long id) {
         if (!g_up)
             return -1;
         return actionResult("group-toggle", Config::Actions::toggleGroup(actionWindow(id)));
@@ -3096,7 +3813,7 @@ namespace Config::Scheme {
 
     // explicit set: a no-op when the window is already in the requested
     // state (group() is null iff the window is not a member of a group)
-    static int hlSchemeGroupSet(int id, int on) {
+    static int hlSchemeGroupSet(long long id, int on) {
         if (!g_up)
             return -1;
         const auto w = actionWindow(id).value_or(nullptr);
@@ -3107,19 +3824,19 @@ namespace Config::Scheme {
         return actionResult("group-set", Config::Actions::toggleGroup(w));
     }
 
-    static int hlSchemeGroupCycle(int id, int prev) {
+    static int hlSchemeGroupCycle(long long id, int prev) {
         if (!g_up)
             return -1;
         return actionResult("group-cycle", Config::Actions::changeGroupActive(prev == 0, actionWindow(id)));
     }
 
-    static int hlSchemeGroupIndex(int id, int index) {
+    static int hlSchemeGroupIndex(long long id, int index) {
         if (!g_up)
             return -1;
         return actionResult("group-index", Config::Actions::setGroupActive(index, actionWindow(id)));
     }
 
-    static int hlSchemeGroupMoveWindow(int id, int prev) {
+    static int hlSchemeGroupMoveWindow(long long id, int prev) {
         if (!g_up)
             return -1;
         return actionResult("group-move-window", Config::Actions::moveGroupWindow(prev == 0));
@@ -3137,25 +3854,25 @@ namespace Config::Scheme {
         return actionResult("group-lock-active", Config::Actions::lockActiveGroup(sc<Config::Actions::eTogglableAction>(act)));
     }
 
-    static int hlSchemeWindowIntoGroup(int id, const char* dir) {
+    static int hlSchemeWindowIntoGroup(long long id, const char* dir) {
         if (!g_up)
             return -1;
         return actionResult("window-into-group", Config::Actions::moveIntoGroup(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowOutOfGroup(int id, const char* dir) {
+    static int hlSchemeWindowOutOfGroup(long long id, const char* dir) {
         if (!g_up)
             return -1;
         return actionResult("window-out-of-group", Config::Actions::moveOutOfGroup(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowIntoOrCreateGroup(int id, const char* dir) {
+    static int hlSchemeWindowIntoOrCreateGroup(long long id, const char* dir) {
         if (!g_up)
             return -1;
         return actionResult("window-into-or-create-group", Config::Actions::moveIntoOrCreateGroup(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowDenyFromGroup(int id, int act) {
+    static int hlSchemeWindowDenyFromGroup(long long id, int act) {
         if (!g_up)
             return -1;
         return actionResult("window-deny-from-group", Config::Actions::denyWindowFromGroup(sc<Config::Actions::eTogglableAction>(act)));
@@ -3249,7 +3966,7 @@ namespace Config::Scheme {
         return actionResult("cursor-move", Config::Actions::moveCursor(Vector2D{x, y}));
     }
 
-    static int hlSchemeCursorCorner(int id, int corner) {
+    static int hlSchemeCursorCorner(long long id, int corner) {
         if (!g_up)
             return -1;
         return actionResult("cursor-move-to-corner", Config::Actions::moveCursorToCorner(corner, actionWindow(id)));
@@ -3305,7 +4022,7 @@ namespace Config::Scheme {
         return actionResult("event", Config::Actions::event(std::string(data ? data : "")));
     }
 
-    static int hlSchemePass(int id) {
+    static int hlSchemePass(long long id) {
         if (!g_up)
             return -1;
         return actionResult("pass", Config::Actions::pass(actionWindow(id)));
@@ -3315,7 +4032,7 @@ namespace Config::Scheme {
 
     // mods/key arrive as the same strings binds take (e.g. "SUPER" "F10");
     // resolve to mask + keysym here so the Scheme surface stays string-based
-    static int hlSchemeSendShortcut(const char* mods, const char* key, int id) {
+    static int hlSchemeSendShortcut(const char* mods, const char* key, long long id) {
         if (!g_up)
             return -1;
         const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
@@ -3324,7 +4041,7 @@ namespace Config::Scheme {
         return actionResult("send-shortcut", Config::Actions::pass(gestureMods(mods), sc<uint32_t>(sym), actionWindow(id)));
     }
 
-    static int hlSchemeSendKeyState(const char* mods, const char* key, int state, int id) {
+    static int hlSchemeSendKeyState(const char* mods, const char* key, int state, long long id) {
         if (!g_up)
             return -1;
         const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
@@ -3346,7 +4063,7 @@ namespace Config::Scheme {
     }
 
     // explicit fullscreen: internal and client modes, layout-aware flag
-    static int hlSchemeWindowFullscreenState(int id, int internalMode, int clientMode, int layoutAware) {
+    static int hlSchemeWindowFullscreenState(long long id, int internalMode, int clientMode, int layoutAware) {
         if (!g_up)
             return -1;
         const auto w = actionWindow(id);
@@ -3715,6 +4432,46 @@ namespace Config::Scheme {
 
         Config::Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_INPUT_DEVICES);
         return 0;
+    }
+
+    // (hl-exec-with-rule! CMD . FIELDS) — spawn CMD under a one-shot window
+    // rule built from an effects plist ('float #t 'workspace "games" ...).
+    // Effects only, no match: the executor tags the spawned window by pid
+    // itself (upstream hl.exec rule-object parity, SExecRequest.rule).
+    static int hlSchemeExecRule(const char* cmd, ptr fields) {
+        if (!g_up || !cmd || !*cmd)
+            return -1;
+
+        auto rule = makeShared<Desktop::Rule::CWindowRule>();
+        ptr  l    = fields;
+        while (Spairp(l)) {
+            if (!Spairp(Scdr(l))) {
+                g_configError = "hl-exec-with-rule!: odd plist of effects";
+                return -1;
+            }
+            const std::string effect = schemeDatumToStr(Scar(l));
+            const auto        e      = Desktop::Rule::windowEffects()->get(std::string_view(effect));
+            if (!e) {
+                g_configError = std::format("hl-exec-with-rule!: unknown effect '{}'", effect);
+                return -1;
+            }
+            const auto res = rule->addEffect(*e, schemeDatumToStr(Scar(Scdr(l))));
+            if (!res) {
+                g_configError = std::format("hl-exec-with-rule!: effect '{}': {}", effect, res.error());
+                return -1;
+            }
+            l = Scdr(Scdr(l));
+        }
+
+        // an empty field list spawns plain (upstream: empty rule → spawn(proc))
+        if (l != Snil) {
+            g_configError = "hl-exec-with-rule!: odd plist of effects";
+            return -1;
+        }
+
+        return (int)Config::Supplementary::executor()
+                   ->spawn(Config::Supplementary::SExecRequest{.exec = cmd, .rule = std::move(rule)})
+                   .value_or(-1);
     }
     static ptr hlConfigGet(const char* key) {
         if (!g_up)
@@ -4408,8 +5165,7 @@ namespace Config::Scheme {
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!windowMatchesSelector(w, selector))
                 continue;
-            const int id = g_nextWindowId++;
-            g_windows.emplace(id, PHLWINDOWREF(w));
+            const auto id = (uintptr_t)(new SHandle<PHLWINDOWREF>(w));
             return (double)id;
         }
         return -1;
@@ -4421,8 +5177,7 @@ namespace Config::Scheme {
         const auto w = Desktop::viewState()->query().urgent().runWindow();
         if (!w)
             return -1;
-        const int id = g_nextWindowId++;
-        g_windows.emplace(id, PHLWINDOWREF(w));
+        const auto id = (uintptr_t)(new SHandle<PHLWINDOWREF>(w));
         return (double)id;
     }
 
@@ -4437,8 +5192,7 @@ namespace Config::Scheme {
                 continue;
             if (current && candidate == current)
                 continue;
-            const int id = g_nextWindowId++;
-            g_windows.emplace(id, PHLWINDOWREF(candidate));
+            const auto id = (uintptr_t)(new SHandle<PHLWINDOWREF>(candidate));
             return (double)id;
         }
         return -1;
@@ -4447,8 +5201,7 @@ namespace Config::Scheme {
     static ptr monitorIdResult(PHLMONITOR m) {
         if (!m)
             return Sfalse;
-        const int id = g_nextMonitorId++;
-        g_monitors.emplace(id, PHLMONITORREF(m));
+        const auto id = (uintptr_t)(new SHandle<PHLMONITORREF>(m));
         return Sinteger(id);
     }
 
@@ -4483,8 +5236,7 @@ namespace Config::Scheme {
         const auto mon = Desktop::focusState()->monitor();
         if (!mon || !mon->m_activeWorkspace)
             return Sfalse;
-        const int id = g_nextWorkspaceId++;
-        g_workspaces.emplace(id, PHLWORKSPACEREF(mon->m_activeWorkspace));
+        const auto id = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(mon->m_activeWorkspace));
         return Sinteger(id);
     }
 
@@ -4494,8 +5246,7 @@ namespace Config::Scheme {
         const auto mon = Desktop::focusState()->monitor();
         if (!mon || !mon->m_activeSpecialWorkspace)
             return Sfalse;
-        const int id = g_nextWorkspaceId++;
-        g_workspaces.emplace(id, PHLWORKSPACEREF(mon->m_activeSpecialWorkspace));
+        const auto id = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(mon->m_activeSpecialWorkspace));
         return Sinteger(id);
     }
 
@@ -4512,8 +5263,7 @@ namespace Config::Scheme {
             ws = State::Workspace::state()->find(previous.target);
         if (!ws)
             return Sfalse;
-        const int id = g_nextWorkspaceId++;
-        g_workspaces.emplace(id, PHLWORKSPACEREF(ws));
+        const auto id = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws));
         return Sinteger(id);
     }
 
@@ -4530,29 +5280,26 @@ namespace Config::Scheme {
     static ptr windowHandleResult(PHLWINDOW w) {
         if (!w)
             return Sfalse;
-        const int id = g_nextWindowId++;
-        g_windows.emplace(id, PHLWINDOWREF(w));
+        const auto id = (uintptr_t)(new SHandle<PHLWINDOWREF>(w));
         return Sinteger(id);
     }
 
     static ptr workspaceHandleResult(PHLWORKSPACE ws) {
         if (!ws)
             return Sfalse;
-        const int id = g_nextWorkspaceId++;
-        g_workspaces.emplace(id, PHLWORKSPACEREF(ws));
+        const auto id = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws));
         return Sinteger(id);
     }
 
     static ptr monitorHandleResult(PHLMONITOR mon) {
         if (!mon)
             return Sfalse;
-        const int id = g_nextMonitorId++;
-        g_monitors.emplace(id, PHLMONITORREF(mon));
+        const auto id = (uintptr_t)(new SHandle<PHLMONITORREF>(mon));
         return Sinteger(id);
     }
 
     template <typename F>
-    static ptr wsGet(int id, F&& fn) {
+    static ptr wsGet(long long id, F&& fn) {
         if (!g_up)
             return Sfalse;
         const auto ws = workspaceFromId(id);
@@ -4562,7 +5309,7 @@ namespace Config::Scheme {
     }
 
     template <typename F>
-    static ptr monGet(int id, F&& fn) {
+    static ptr monGet(long long id, F&& fn) {
         if (!g_up)
             return Sfalse;
         const auto mon = monitorFromId(id);
@@ -4572,82 +5319,82 @@ namespace Config::Scheme {
     }
 
     // -- workspace getters
-    static ptr hlWorkspaceName(int id) {
+    static ptr hlWorkspaceName(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { const auto& s = ws->displayName(); return Sstring_utf8(s.c_str(), s.size()); });
     }
 
-    static ptr hlWorkspaceAddressableName(int id) {
+    static ptr hlWorkspaceAddressableName(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { const auto& s = ws->addressableName(); return Sstring_utf8(s.c_str(), s.size()); });
     }
 
-    static ptr hlWorkspaceNumber(int id) {
+    static ptr hlWorkspaceNumber(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
             const auto n = ws->numberedID();
             return n ? Sinteger(sc<int>(*n)) : Sfalse;
         });
     }
 
-    static ptr hlWorkspaceMonitor(int id) {
+    static ptr hlWorkspaceMonitor(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return monitorHandleResult(ws->m_monitor.lock()); });
     }
 
-    static ptr hlWorkspaceSpecial(int id) {
+    static ptr hlWorkspaceSpecial(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->type() == Workspace::eWorkspaceType::SPECIAL); });
     }
 
-    static ptr hlWorkspaceActive(int id) {
+    static ptr hlWorkspaceActive(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
             const auto mon = ws->m_monitor.lock();
             return boolResult(mon && (mon->m_activeWorkspace == ws || mon->m_activeSpecialWorkspace == ws));
         });
     }
 
-    static ptr hlWorkspaceVisible(int id) {
+    static ptr hlWorkspaceVisible(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->visible()); });
     }
 
-    static ptr hlWorkspaceEmpty(int id) {
+    static ptr hlWorkspaceEmpty(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->getWindowCount() == 0); });
     }
 
-    static ptr hlWorkspacePersistent(int id) {
+    static ptr hlWorkspacePersistent(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
             const auto REGULAR = dynamicPointerCast<Workspace::CRegularWorkspace>(ws);
             return boolResult(REGULAR && REGULAR->isPersistent());
         });
     }
 
-    static ptr hlWorkspaceHasUrgent(int id) {
+    static ptr hlWorkspaceHasUrgent(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->hasUrgentWindow()); });
     }
 
-    static ptr hlWorkspaceHasFullscreen(int id) {
+    static ptr hlWorkspaceHasFullscreen(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(Fullscreen::controller()->hasFullscreen(ws)); });
     }
 
-    static ptr hlWorkspaceFullscreenMode(int id) {
+    static ptr hlWorkspaceFullscreenMode(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(sc<int>(Fullscreen::controller()->getFullscreenModes(ws).internal)); });
     }
 
-    static ptr hlWorkspaceFullscreenWindow(int id) {
+    static ptr hlWorkspaceFullscreenWindow(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return windowHandleResult(Fullscreen::controller()->getFullscreenWindow(ws)); });
     }
 
-    static ptr hlWorkspaceLastWindow(int id) {
+    static ptr hlWorkspaceLastWindow(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return windowHandleResult(ws->getLastFocusedWindow()); });
     }
 
-    static ptr hlWorkspaceWindowCount(int id) {
+    static ptr hlWorkspaceWindowCount(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(ws->getWindowCount()); });
     }
 
-    static ptr hlWorkspaceGroupCount(int id) {
+    static ptr hlWorkspaceGroupCount(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(ws->getGroups()); });
     }
 
     // windows on the workspace as newline-joined window-handle ids
 
-    static ptr hlWorkspaceTiledLayout(int id) {
+    static ptr hlWorkspaceTiledLayout(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
             std::string layoutName = "unknown";
             const auto  SPACE      = ws->space();
@@ -4657,89 +5404,200 @@ namespace Config::Scheme {
         });
     }
 
-    static ptr hlWorkspaceAlive(int id) {
+    static ptr hlWorkspaceAlive(long long id) {
         return boolResult(g_up && workspaceFromId(id) != nullptr);
     }
 
     // identity, mirroring hl-window=?: true iff both handles lock to the same
     // live workspace; dead handles are never "the same" as anything
-    static ptr hlWorkspaceSame(int a, int b) {
+    static ptr hlWorkspaceSame(long long a, long long b) {
         const auto wa = g_up ? workspaceFromId(a) : nullptr;
         const auto wb = g_up ? workspaceFromId(b) : nullptr;
         return boolResult(wa && wb && wa.get() == wb.get());
     }
 
     // -- monitor getters
-    static ptr hlMonitorName(int id) {
+    static ptr hlMonitorName(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_name.c_str(), mon->m_name.size()); });
     }
 
-    static ptr hlMonitorDescription(int id) {
+    static ptr hlMonitorDescription(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_description.c_str(), mon->m_description.size()); });
     }
 
-    static ptr hlMonitorNumber(int id) {
+    static ptr hlMonitorNumber(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_id)); });
     }
 
-    static ptr hlMonitorEnabled(int id) {
+    static ptr hlMonitorEnabled(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_enabled); });
     }
 
-    static ptr hlMonitorFocused(int id) {
+    static ptr hlMonitorFocused(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(Desktop::focusState()->monitor() == mon); });
     }
 
-    static ptr hlMonitorX(int id) {
+    static ptr hlMonitorX(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_position.x)); });
     }
 
-    static ptr hlMonitorY(int id) {
+    static ptr hlMonitorY(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_position.y)); });
     }
 
-    static ptr hlMonitorWidth(int id) {
+    static ptr hlMonitorWidth(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_size.x)); });
     }
 
-    static ptr hlMonitorHeight(int id) {
+    static ptr hlMonitorHeight(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_size.y)); });
     }
 
-    static ptr hlMonitorScale(int id) {
+    static ptr hlMonitorScale(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sflonum(sc<double>(mon->m_scale)); });
     }
 
-    static ptr hlMonitorTransform(int id) {
+    static ptr hlMonitorTransform(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_transform)); });
     }
 
-    static ptr hlMonitorRefreshRate(int id) {
+    static ptr hlMonitorRefreshRate(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sflonum(sc<double>(mon->m_refreshRate)); });
     }
 
-    static ptr hlMonitorMode(int id) {
+    static ptr hlMonitorMode(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr {
             const auto s = std::format("{}x{}@{}", sc<int>(mon->m_size.x), sc<int>(mon->m_size.y), mon->m_refreshRate);
             return Sstring_utf8(s.c_str(), s.size());
         });
     }
 
-    static ptr hlMonitorDpms(int id) {
+    static ptr hlMonitorDpms(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_dpmsStatus); });
     }
 
-    static ptr hlMonitorVrr(int id) {
+    static ptr hlMonitorVrr(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_vrrActive != 0); });
     }
 
-    static ptr hlMonitor10bit(int id) {
+    static ptr hlMonitor10bit(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_enabled10bit); });
     }
 
     // reserved area; all-zero means unset
     // when nothing is reserved
-    static ptr hlMonitorReserved(int id) {
+
+    // ---- monitor hardware getters (upstream LuaMonitor parity: serial,
+    // physical_width/height, available_modes, mirrors, hardware_details) ----
+
+    static const char* monitorBackendName(Aquamarine::eBackendType t) {
+        switch (t) {
+            case Aquamarine::AQ_BACKEND_DRM: return "drm";
+            case Aquamarine::AQ_BACKEND_WAYLAND: return "wayland";
+            case Aquamarine::AQ_BACKEND_HEADLESS: return "headless";
+            case Aquamarine::AQ_BACKEND_NULL: return "null";
+            default: return "unknown";
+        }
+    }
+
+    static ptr hlMonitorSerial(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr {
+            const auto& s = mon->m_output->serial;
+            return Sstring_utf8(s.c_str(), s.size());
+        });
+    }
+
+    // (physical-width . physical-height), in mm
+    static ptr hlMonitorPhysicalSize(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr {
+            return Scons(Sinteger((int)mon->m_output->physicalSize.x),
+                         Sinteger((int)mon->m_output->physicalSize.y));
+        });
+    }
+
+    static ptr hlMonitorMirrors(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr {
+            std::vector<uintptr_t> ids;
+            for (const auto& mirrorRef : mon->m_mirrors) {
+                const auto mirror = mirrorRef.lock();
+                if (!mirror)
+                    continue;
+                const auto mid = (uintptr_t)(new SHandle<PHLMONITORREF>(mirror));
+                ids.push_back(mid);
+            }
+            return schemeIntList(ids);
+        });
+    }
+
+    // list of per-mode plists: ((width w height h refresh-rate r preferred b) ...)
+    static ptr hlMonitorAvailableModes(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr {
+            std::vector<ptr> roots, modes;
+            for (const auto& mode : mon->m_output->modes) {
+                if (!mode)
+                    continue;
+                std::vector<ptr> elems;
+                ptr k = Sstring_to_symbol("width");
+                marshRoot(k, roots); elems.push_back(k);
+                elems.push_back(Sinteger((int)mode->pixelSize.x));
+                k = Sstring_to_symbol("height");
+                marshRoot(k, roots); elems.push_back(k);
+                elems.push_back(Sinteger((int)mode->pixelSize.y));
+                k = Sstring_to_symbol("refresh-rate");
+                marshRoot(k, roots); elems.push_back(k);
+                ptr r = Sflonum(mode->refreshRate / 1000.0);
+                marshRoot(r, roots); elems.push_back(r);
+                k = Sstring_to_symbol("preferred");
+                marshRoot(k, roots); elems.push_back(k);
+                elems.push_back(mode->preferred ? Strue : Sfalse);
+                ptr m = Snil;
+                for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
+                    m = Scons(*it, m);
+                    marshRoot(m, roots);
+                }
+                modes.push_back(m);
+            }
+            ptr l = Snil;
+            for (auto it = modes.rbegin(); it != modes.rend(); ++it) {
+                l = Scons(*it, l);
+                marshRoot(l, roots);
+            }
+            marshRelease(roots);
+            return l;
+        });
+    }
+
+    // plist: (backend "..." hdr b chroma b bt2020 b vrr-capable b)
+    static ptr hlMonitorHardwareDetails(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> ptr {
+            std::vector<ptr> roots, elems;
+            const std::string backend = monitorBackendName(mon->m_output->getBackend()->type());
+            ptr k = Sstring_to_symbol("backend");
+            marshRoot(k, roots); elems.push_back(k);
+            ptr b = Sstring_utf8(backend.c_str(), backend.size());
+            marshRoot(b, roots); elems.push_back(b);
+            k = Sstring_to_symbol("hdr");
+            marshRoot(k, roots);
+            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.hdrMetadata.has_value() ? Strue : Sfalse);
+            k = Sstring_to_symbol("chroma");
+            marshRoot(k, roots);
+            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.chromaticityCoords.has_value() ? Strue : Sfalse);
+            k = Sstring_to_symbol("bt2020");
+            marshRoot(k, roots);
+            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.supportsBT2020 ? Strue : Sfalse);
+            k = Sstring_to_symbol("vrr-capable");
+            marshRoot(k, roots);
+            elems.push_back(k); elems.push_back(mon->m_output->vrrCapable ? Strue : Sfalse);
+            ptr l = Snil;
+            for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
+                l = Scons(*it, l);
+                marshRoot(l, roots);
+            }
+            marshRelease(roots);
+            return l;
+        });
+    }
+    static ptr hlMonitorReserved(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr {
             // a plist: (top n left n right n bottom n)
             const auto&         r = mon->m_reservedArea;
@@ -4764,23 +5622,23 @@ namespace Config::Scheme {
     }
 
     // the monitor this one mirrors, as a handle; #f when not a mirror
-    static ptr hlMonitorMirrorOf(int id) {
+    static ptr hlMonitorMirrorOf(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return monitorHandleResult(mon->m_mirrorOf.lock()); });
     }
 
-    static ptr hlMonitorActiveWorkspace(int id) {
+    static ptr hlMonitorActiveWorkspace(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return workspaceHandleResult(mon->m_activeWorkspace); });
     }
 
-    static ptr hlMonitorActiveSpecialWorkspace(int id) {
+    static ptr hlMonitorActiveSpecialWorkspace(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return workspaceHandleResult(mon->m_activeSpecialWorkspace); });
     }
 
-    static ptr hlMonitorAlive(int id) {
+    static ptr hlMonitorAlive(long long id) {
         return boolResult(g_up && monitorFromId(id) != nullptr);
     }
 
-    static ptr hlMonitorSame(int a, int b) {
+    static ptr hlMonitorSame(long long a, long long b) {
         const auto ma = g_up ? monitorFromId(a) : nullptr;
         const auto mb = g_up ? monitorFromId(b) : nullptr;
         return boolResult(ma && mb && ma.get() == mb.get());
@@ -4789,14 +5647,14 @@ namespace Config::Scheme {
     // -- selector bridges: handles are accepted anywhere a selector string is,
     // resolved through the canonical selector exactly like upstream's
     // *SelectorOrObject helpers (LuaBindingsInternal.cpp)
-    static ptr hlWorkspaceSelector(int id) {
+    static ptr hlWorkspaceSelector(long long id) {
         return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
             const auto s = Workspace::selector(*ws);
             return Sstring_utf8(s.c_str(), s.size());
         });
     }
 
-    static ptr hlMonitorSelector(int id) {
+    static ptr hlMonitorSelector(long long id) {
         return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_name.c_str(), mon->m_name.size()); });
     }
 
@@ -4816,12 +5674,11 @@ namespace Config::Scheme {
         const auto ws = workspaceFromSelector(sel ? sel : "");
         if (!ws)
             return Sfalse;
-        std::vector<int> ids;
+        std::vector<uintptr_t> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!w->mapped() || w->m_workspace != ws)
                 continue;
-            ids.push_back(g_nextWindowId++);
-            g_windows.emplace(ids.back(), PHLWINDOWREF(w));
+            ids.push_back((uintptr_t)(new SHandle<PHLWINDOWREF>(PHLWINDOWREF(w))));
         }
         return ids.empty() ? Sfalse : schemeIntList(ids);
     }
@@ -4898,17 +5755,16 @@ namespace Config::Scheme {
         if (!g_up)
             return Sfalse;
         const std::string selector = sel ? sel : "";
-        std::vector<int> ids;
+        std::vector<uintptr_t> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!windowMatchesSelector(w, selector))
                 continue;
-            ids.push_back(g_nextWindowId++);
-            g_windows.emplace(ids.back(), PHLWINDOWREF(w));
+            ids.push_back((uintptr_t)(new SHandle<PHLWINDOWREF>(PHLWINDOWREF(w))));
         }
         return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
-    static ptr hlWindowFullscreenHandler(int id) {
+    static ptr hlWindowFullscreenHandler(long long id) {
         if (!g_up)
             return Sfalse;
         const auto window = windowFromId(id);
@@ -4920,78 +5776,377 @@ namespace Config::Scheme {
 
     // ---- notifications ---------------------------------------------------------
 
+    // ---- notifications: shared field parsing (used by hl-notify! AND the
+    // live notification objects) ------------------------------------------------
+    // icon names, mirroring the lua config's table
+    static eIcons schemeIconFromStr(const std::string& ic, bool* ok = nullptr) {
+        static const std::pair<const char*, eIcons> ICON_NAMES[] = {
+            {"warning", ICON_WARNING}, {"warn", ICON_WARNING},     {"info", ICON_INFO},       {"hint", ICON_HINT},
+            {"error", ICON_ERROR},     {"err", ICON_ERROR},       {"confused", ICON_CONFUSED},
+            {"question", ICON_CONFUSED}, {"ok", ICON_OK},         {"none", ICON_NONE},
+        };
+        for (const auto& [n, i] : ICON_NAMES)
+            if (ic == n)
+                return i;
+        if (ok)
+            *ok = false;
+        return ICON_NONE;
+    }
+
+    static eIcons schemeIconFromScheme(ptr v, bool* ok = nullptr) {
+        if (Sstringp(v))
+            return schemeIconFromStr(schemeDatumToStr(v), ok);
+        if (Sfixnump(v)) {
+            const auto raw = Sfixnum_value(v);
+            if (raw >= ICON_WARNING && raw <= ICON_NONE)
+                return sc<eIcons>(raw);
+        }
+        if (ok)
+            *ok = false;
+        return ICON_NONE;
+    }
+
+    // color: config hex form "0xAARRGGBB" (decimal digits also accepted)
+    static std::optional<CHyprColor> schemeColorFromStr(const std::string& cs) {
+        if (cs.empty())
+            return CHyprColor(0);
+        try {
+            return CHyprColor(std::stoull(cs.starts_with("0x") || cs.starts_with("0X") ? cs.substr(2) : cs, nullptr, 16));
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
     static ptr hlNotify(const char* text, double durationMs, const char* icon, const char* color, double fontSize) {
         if (!g_up)
             return Sfalse;
 
-        // icon names, mirroring the lua config's table
-        eIcons  theIcon = ICON_NONE;
-        const std::string ic = icon ? icon : "";
-        const std::pair<const char*, eIcons> ICON_NAMES[] = {
-            {"warning", ICON_WARNING}, {"warn", ICON_WARNING},     {"info", ICON_INFO},       {"hint", ICON_HINT},
-            {"error", ICON_ERROR},     {"err", ICON_ERROR},        {"confused", ICON_CONFUSED},
-            {"question", ICON_CONFUSED}, {"ok", ICON_OK},           {"none", ICON_NONE},
-        };
-        for (const auto& [n, i] : ICON_NAMES)
-            if (ic == n) {
-                theIcon = i;
-                break;
-            }
-
-        // color: config hex form "0xAARRGGBB" (decimal digits also accepted)
-        CHyprColor col(0);
-        const std::string cs = color ? color : "";
-        if (!cs.empty()) {
-            try {
-                col = CHyprColor(std::stoull(cs.starts_with("0x") || cs.starts_with("0X") ? cs.substr(2) : cs, nullptr, 16));
-            } catch (...) {
-                g_configError = "hl-notify!: bad color (expected 0xAARRGGBB)";
+        eIcons     theIcon = ICON_NONE;
+        const auto ic      = schemeIconFromStr(icon ? icon : "");
+        if (icon && *icon) {
+            bool ok = true;
+            theIcon = schemeIconFromStr(icon, &ok);
+            if (!ok) {
+                g_configError = "hl-notify!: bad icon (expected none/warn/info/hint/error/confused/ok)";
                 return Sfalse;
             }
         }
-
-        Notification::overlay()->addNotification(text ? text : "", col, sc<float>(durationMs), theIcon, sc<float>(fontSize));
+        const auto col = schemeColorFromStr(color ? color : "");
+        if (!col) {
+            g_configError = "hl-notify!: bad color (expected 0xAARRGGBB)";
+            return Sfalse;
+        }
+        Notification::overlay()->addNotification(text ? text : "", *col, sc<float>(durationMs), theIcon, sc<float>(fontSize));
         return Strue;
+    }
+
+    // ---- live notification objects (upstream hl.notification parity) -----------
+    // A notification handle is a guardian-managed weak ref; the per-handle
+    // 'paused' bit rides in the handle (upstream's SNotificationRef.paused —
+    // a paused handle releases its lock when the handle dies). Pause freezes
+    // the timeout timer: the bubble stays on screen until dismissed.
+    struct SNotificationHandle : IHandle {
+        WP<Notification::CNotification> wp;
+        bool                            paused = false;
+        explicit SNotificationHandle(SP<Notification::CNotification> n) : wp(n) {}
+        ~SNotificationHandle() override {
+            if (paused)
+                if (auto n = wp.lock())
+                    n->unlock();
+        }
+    };
+
+    static SP<Notification::CNotification> notificationFromHandle(long long id) {
+        return reinterpret_cast<SNotificationHandle*>(id)->wp.lock();
+    }
+
+    static ptr hlNotificationAdd(ptr fields) {
+        if (!g_up)
+            return Sfalse;
+
+        // walk the plist first: a bad field writes nothing (device-add parity)
+        std::string text;
+        double      timeout = -1, fontSize = 13.0;
+        eIcons      icon = ICON_NONE;
+        CHyprColor  color(0);
+        ptr         l = fields;
+        while (Spairp(l) && Spairp(Scdr(l))) {
+            const std::string k = schemeDatumToStr(Scar(l));
+            const ptr         v = Scar(Scdr(l));
+            if (k == "text") {
+                if (!Sstringp(v)) {
+                    g_configError = "hl-notification-add!: 'text must be a string";
+                    return Sfalse;
+                }
+                text = schemeDatumToStr(v);
+            } else if (k == "timeout" || k == "duration" || k == "time") {
+                if (!Sfixnump(v) && !Sflonump(v)) {
+                    g_configError = "hl-notification-add!: 'timeout must be a number (ms)";
+                    return Sfalse;
+                }
+                timeout = Sfixnump(v) ? sc<double>(Sfixnum_value(v)) : Sflonum_value(v);
+                if (timeout < 0) {
+                    g_configError = "hl-notification-add!: 'timeout must be >= 0";
+                    return Sfalse;
+                }
+            } else if (k == "icon") {
+                bool ok = true;
+                icon = schemeIconFromScheme(v, &ok);
+                if (!ok) {
+                    g_configError = "hl-notification-add!: bad 'icon (expected none/warn/info/hint/error/confused/ok or an id 0-6)";
+                    return Sfalse;
+                }
+            } else if (k == "color") {
+                const auto c = schemeColorFromStr(Sstringp(v) ? schemeDatumToStr(v) : (Sfixnump(v) ? std::to_string(Sfixnum_value(v)) : ""));
+                if (!c) {
+                    g_configError = "hl-notification-add!: bad 'color (expected 0xAARRGGBB)";
+                    return Sfalse;
+                }
+                color = *c;
+            } else if (k == "font-size") {
+                if (!Sfixnump(v) && !Sflonump(v)) {
+                    g_configError = "hl-notification-add!: 'font-size must be a number";
+                    return Sfalse;
+                }
+                fontSize = Sfixnump(v) ? sc<double>(Sfixnum_value(v)) : Sflonum_value(v);
+                if (fontSize <= 0) {
+                    g_configError = "hl-notification-add!: 'font-size must be > 0";
+                    return Sfalse;
+                }
+            } else {
+                g_configError = std::format("hl-notification-add!: unknown field '{}'", k);
+                return Sfalse;
+            }
+            l = Scdr(Scdr(l));
+        }
+        if (text.empty()) {
+            g_configError = "hl-notification-add!: 'text is required";
+            return Sfalse;
+        }
+        if (timeout < 0) {
+            g_configError = "hl-notification-add!: 'timeout is required";
+            return Sfalse;
+        }
+
+        const auto n = Notification::overlay()->addNotification(text, color, sc<float>(timeout), icon, sc<float>(fontSize));
+        if (!n)
+            return Sfalse;
+        return Sinteger((uintptr_t)(new SNotificationHandle(n)));
+    }
+
+    static ptr hlNotificationList() {
+        if (!g_up)
+            return Sfalse;
+        std::vector<uintptr_t> ids;
+        for (const auto& n : Notification::overlay()->getNotifications())
+            ids.push_back((uintptr_t)(new SNotificationHandle(n)));
+        return ids.empty() ? Sfalse : schemeIntList(ids);
+    }
+
+    static ptr hlNotificationText(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto n = notificationFromHandle(id);
+        if (!n)
+            return Sfalse;
+        return Sstring_utf8(n->text().c_str(), n->text().size());
+    }
+
+    static ptr hlNotificationTimeout(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto n = notificationFromHandle(id);
+        return n ? Sflonum(n->timeMs()) : Sfalse;
+    }
+
+    static ptr hlNotificationColor(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto n = notificationFromHandle(id);
+        return n ? Sinteger(n->color().getAsHex()) : Sfalse;
+    }
+
+    static ptr hlNotificationIcon(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto n = notificationFromHandle(id);
+        return n ? Sinteger(sc<int>(n->icon())) : Sfalse;
+    }
+
+    static ptr hlNotificationFontSize(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto n = notificationFromHandle(id);
+        return n ? Sflonum(n->fontSize()) : Sfalse;
+    }
+
+    static ptr hlNotificationElapsed(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto n = notificationFromHandle(id);
+        return n ? Sflonum(n->timeElapsedMs()) : Sfalse;
+    }
+
+    static ptr hlNotificationAge(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto n = notificationFromHandle(id);
+        return n ? Sflonum(n->timeElapsedSinceCreationMs()) : Sfalse;
+    }
+
+    static ptr hlNotificationAlive(long long id) {
+        if (!g_up)
+            return Sfalse;
+        return notificationFromHandle(id) ? Strue : Sfalse;
+    }
+
+    static ptr hlNotificationSame(long long a, long long b) {
+        if (!g_up)
+            return Sfalse;
+        const auto na = notificationFromHandle(a);
+        const auto nb = notificationFromHandle(b);
+        return (na && nb && na.get() == nb.get()) ? Strue : Sfalse;
+    }
+
+    // expired handles mutate as silent no-ops (upstream parity)
+    static int hlNotificationTextSet(long long id, const char* text) {
+        if (!g_up)
+            return -1;
+        if (const auto n = notificationFromHandle(id))
+            n->setText(std::string(text ? text : ""));
+        return 0;
+    }
+
+    static int hlNotificationTimeoutSet(long long id, double ms) {
+        if (!g_up)
+            return -1;
+        if (ms < 0) {
+            g_configError = "hl-notification-timeout-set!: timeout must be >= 0";
+            return -2;
+        }
+        if (const auto n = notificationFromHandle(id))
+            n->resetTimeout(sc<float>(ms));
+        return 0;
+    }
+
+    static int hlNotificationColorSet(long long id, const char* color) {
+        if (!g_up)
+            return -1;
+        const auto c = schemeColorFromStr(color ? color : "");
+        if (!c) {
+            g_configError = "hl-notification-color-set!: bad color (expected 0xAARRGGBB)";
+            return -2;
+        }
+        if (const auto n = notificationFromHandle(id))
+            n->setColor(*c);
+        return 0;
+    }
+
+    static int hlNotificationIconSet(long long id, ptr v) {
+        if (!g_up)
+            return -1;
+        bool ok = true;
+        const auto icon = schemeIconFromScheme(v, &ok);
+        if (!ok) {
+            g_configError = "hl-notification-icon-set!: bad icon (expected none/warn/info/hint/error/confused/ok or an id 0-6)";
+            return -2;
+        }
+        if (const auto n = notificationFromHandle(id))
+            n->setIcon(icon);
+        return 0;
+    }
+
+    static int hlNotificationFontSizeSet(long long id, double size) {
+        if (!g_up)
+            return -1;
+        if (size <= 0) {
+            g_configError = "hl-notification-font-size-set!: font size must be > 0";
+            return -2;
+        }
+        if (const auto n = notificationFromHandle(id))
+            n->setFontSize(sc<float>(size));
+        return 0;
+    }
+
+    static int hlNotificationPausedSet(long long id, int on) {
+        if (!g_up)
+            return -1;
+        auto* h = reinterpret_cast<SNotificationHandle*>(id);
+        if (const auto n = h->wp.lock()) {
+            if (on && !h->paused) {
+                n->lock();
+                h->paused = true;
+            } else if (!on && h->paused) {
+                n->unlock();
+                h->paused = false;
+            }
+        }
+        return 0;
+    }
+
+    static ptr hlNotificationPausedQ(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto n = notificationFromHandle(id);
+        if (!n)
+            return Sfalse;
+        return n->isLocked() ? Strue : Sfalse;
+    }
+
+    static int hlNotificationDismiss(long long id) {
+        if (!g_up)
+            return -1;
+        if (const auto n = notificationFromHandle(id))
+            Notification::overlay()->dismissNotification(n);
+        return 0;
     }
 
     // ---- timer handles ----------------------------------------------------------
 
-    static std::unordered_map<int, uint64_t> g_timerMs;
 
-    static SP<CEventLoopTimer> timerById(int id) {
-        for (const auto& [tid, t] : g_timers)
-            if (tid == id)
-                return t;
-        return nullptr;
+    static STimerEntry* timerByRecord(ptr record) {
+        const auto it = g_timerIndex.find(reinterpret_cast<uintptr_t>(record));
+        return it == g_timerIndex.end() ? nullptr : &it->second;
     }
 
-    static int hlTimerSetEnabled(double id, int enabled) {
+    static int hlTimerSetEnabled(ptr record, int enabled) {
         if (!g_up)
             return -1;
-        const auto timer = timerById(sc<int>(id));
-        if (!timer)
+        auto* e = timerByRecord(record);
+        if (!e)
             return -1;
-        if (enabled != 0) {
-            const auto it = g_timerMs.find(sc<int>(id));
-            timer->updateTimeout(std::chrono::milliseconds(it != g_timerMs.end() ? sc<int64_t>(it->second) : 1));
-        } else
-            timer->updateTimeout(std::nullopt);
+        if (enabled != 0)
+            e->timer->updateTimeout(std::chrono::milliseconds(sc<int64_t>(e->ms)));
+        else
+            e->timer->updateTimeout(std::nullopt);
         return 0;
     }
 
-    static int hlTimerEnabled(double id) {
-        const auto timer = timerById(sc<int>(id));
-        return (timer && timer->armed()) ? 1 : 0;
+    static int hlTimerEnabled(ptr record) {
+        const auto* e = timerByRecord(record);
+        return (e && e->timer && e->timer->armed()) ? 1 : 0;
     }
 
-    static int hlTimerSetTimeout(double id, double ms) {
+    static int hlTimerSetTimeout(ptr record, double ms) {
         if (!g_up)
             return -1;
-        const auto timer = timerById(sc<int>(id));
-        if (!timer || ms < 1)
+        auto* e = timerByRecord(record);
+        if (!e || ms < 1)
             return -1;
-        g_timerMs[sc<int>(id)] = sc<uint64_t>(ms);
-        timer->updateTimeout(std::chrono::milliseconds(sc<int64_t>(ms)));
+        e->ms = sc<uint64_t>(ms);
+        e->timer->updateTimeout(std::chrono::milliseconds(sc<int64_t>(ms)));
+        return 0;
+    }
+
+    static int hlTimerCancel(ptr record) {
+        if (!g_up || !g_pEventLoopManager)
+            return -1;
+        auto* e = timerByRecord(record);
+        if (!e)
+            return -1;
+        e->timer->cancel();
+        g_pEventLoopManager->removeTimer(e->timer);
+        g_timerIndex.erase(reinterpret_cast<uintptr_t>(record));
         return 0;
     }
 
@@ -5014,34 +6169,145 @@ namespace Config::Scheme {
     // system. Registered gestures are cleared by the config reload (the gesture
     // manager clears itself), so no extra bookkeeping is needed.
 
+    // gesture event plist — upstream pushGestureEvent parity (LuaFunctionGesture
+    // .cpp:42-122). The handler is APPLIED the plist fields, so callbacks
+    // destructure them as normal lambda args:
+    //   (lambda (phase direction type time-ms fingers delta . rest))   ; begin/update
+    //   (lambda (phase direction type time-ms cancelled) ...)          ; end
+    static ptr gestureEventPlist(std::vector<ptr>& roots, const char* phase, const std::string& dir,
+                                 const char* type, uint32_t timeMs, std::optional<int> fingers, ptr deltaPair,
+                                 ptr scale, ptr rotation, ptr cancelled) {
+        std::vector<ptr> elems;
+        auto push = [&](ptr p) { marshRoot(p, roots); elems.push_back(p); };
+        push(Sstring_to_symbol("phase"));      push(Sstring_utf8(phase, strlen(phase)));
+        push(Sstring_to_symbol("direction"));  push(Sstring_utf8(dir.c_str(), dir.size()));
+        push(Sstring_to_symbol("type"));       push(Sstring_utf8(type, strlen(type)));
+        push(Sstring_to_symbol("time-ms"));    elems.push_back(Sinteger((int)timeMs));
+        if (fingers) { push(Sstring_to_symbol("fingers")); elems.push_back(Sinteger(*fingers)); }
+        if (deltaPair) { push(Sstring_to_symbol("delta")); push(deltaPair); }
+        if (scale && scale != Sfalse) { push(Sstring_to_symbol("scale")); push(scale); }
+        if (rotation && rotation != Sfalse) { push(Sstring_to_symbol("rotation")); push(rotation); }
+        if (cancelled && cancelled != Sfalse) { push(Sstring_to_symbol("cancelled")); push(cancelled); }
+        ptr l = Snil;
+        for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
+            l = Scons(*it, l);
+            marshRoot(l, roots);
+        }
+        return l;
+    }
+
+    static void fireSchemeListRec(ptr record, ptr lst) {
+        if (!g_up)
+            return;
+        watchdogEnter("handler");
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-list-rec")), record, lst);
+        watchdogExit();
+    }
+
+    // bare-thunk fire with the bind result protocol (gesture legacy end:
+    // zero-arg, auto-consuming rules apply)
+    static Keybinds::SBindResult fireSchemeThunk(ptr thunk) {
+        if (!g_up)
+            return {.success = false, .error = "scheme interpreter not initialized"};
+
+        watchdogEnter("bind callback");
+        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--thunk-fire")), thunk);
+        watchdogExit();
+        if (r == Sfalse)
+            return {.success = false, .error = "scheme keybind callback declined"};
+        if (r == Strue || !Spairp(r) || !Ssymbolp(Scar(r)))
+            return {};
+        Keybinds::SBindResult res;
+        ptr l = r;
+        while (Spairp(l) && Spairp(Scdr(l))) {
+            const std::string k = schemeDatumToStr(Scar(l));
+            const ptr        v  = Scar(Scdr(l));
+            if (k == "ok") {
+                if (v == Sfalse)
+                    res.success = false;
+            } else if (k == "pass-event") {
+                if (v == Strue)
+                    res.passEvent = true;
+            } else if (k == "request-release") {
+                if (v == Strue)
+                    res.followUp = Keybinds::BIND_FOLLOW_UP_TRIGGER_RELEASE;
+            } else if (k == "error" && Sstringp(v)) {
+                res.error = schemeDatumToStr(v);
+            }
+            l = Scdr(Scdr(l));
+        }
+        return res;
+    }
+
+    // bare-thunk variant: gestures carry their callbacks directly (SThunkRef
+    // members), so the fire passes the callable itself; the plist is APPLIED
+    // to it (spread args)
+    static void fireSchemeList(ptr thunk, ptr lst) {
+        if (!g_up)
+            return;
+        watchdogEnter("handler");
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-list")), thunk, lst);
+        watchdogExit();
+    }
+
+    template <typename E>
+    static void fireSchemeGestureEvent(ptr thunk, const char* phase, const E& e, const std::string& dir) {
+        if (!g_up)
+            return;
+        std::vector<ptr>      roots;
+        constexpr bool        IS_END = std::is_same_v<E, ITrackpadGesture::STrackpadGestureEnd>;
+        ptr                   delta  = Snil, scale = Sfalse, rotation = Sfalse;
+        if constexpr (!IS_END) {
+            const auto& d = e.swipe ? e.swipe->delta : e.pinch->delta;
+            ptr x = Sflonum(d.x); marshRoot(x, roots);
+            ptr y = Sflonum(d.y); marshRoot(y, roots);
+            delta = Scons(x, y); marshRoot(delta, roots);
+            if (e.pinch) {
+                scale = Sflonum(e.pinch->scale); marshRoot(scale, roots);
+                rotation = Sflonum(e.pinch->rotation); marshRoot(rotation, roots);
+            }
+        }
+        ptr cancelled = Sfalse;
+        if constexpr (IS_END)
+            cancelled = (e.swipe ? e.swipe->cancelled : e.pinch->cancelled) ? Strue : Sfalse;
+        std::optional<int> fingers;
+        if constexpr (!IS_END)
+            fingers = (int)(e.swipe ? e.swipe->fingers : e.pinch->fingers);
+        ptr lst = gestureEventPlist(roots, phase, dir,
+                                    e.swipe ? "swipe" : "pinch",
+                                    e.swipe ? e.swipe->timeMs : e.pinch->timeMs,
+                                    fingers,
+                                    delta, scale, rotation, cancelled);
+        marshRelease(roots);
+        fireSchemeList(thunk, lst);
+    }
+
     class CSchemeGesture : public ITrackpadGesture {
       public:
-        CSchemeGesture(int actionId, int beginId, int updateId, int endId) :
-            m_actionId(actionId), m_beginId(beginId), m_updateId(updateId), m_endId(endId) {}
+        // the callbacks arrive as thunks and are carried locked; Snil means
+        // "unused" (the counted lock no-ops on immediates). The gesture
+        // manager destroys us at config reload, which unlocks them.
+        CSchemeGesture(ptr action, ptr begin, ptr update, ptr end, const char* direction) :
+            m_action(action), m_begin(begin), m_update(update), m_end(end), m_direction(direction ? direction : "") {}
 
         void  begin(const STrackpadGestureBegin& e) override {
-            if (m_beginId >= 0)
-                fireSchemeBind(m_beginId);
+            if (!Snullp(m_begin.obj))
+                fireSchemeGestureEvent(m_begin.obj, "start", e, m_direction);
         }
         void  update(const STrackpadGestureUpdate& e) override {
-            if (m_updateId < 0)
-                return;
-            float dx = 0, dy = 0;
-            if (e.swipe) {
-                dx = e.swipe->delta.x;
-                dy = e.swipe->delta.y;
-            }
-            fireSchemeNums(m_updateId, {dx, dy, e.scale});   // (dx dy scale)
+            if (!Snullp(m_update.obj))
+                fireSchemeGestureEvent(m_update.obj, "update", e, m_direction);
         }
         void  end(const STrackpadGestureEnd& e) override {
-            if (m_endId >= 0)
-                fireSchemeBind(m_endId);
-            else if (m_actionId >= 0)
-                fireSchemeBind(m_actionId);
+            if (!Snullp(m_end.obj))
+                fireSchemeGestureEvent(m_end.obj, "end", e, m_direction);
+            else if (!Snullp(m_action.obj))
+                fireSchemeThunk(m_action.obj);   // legacy single-thunk: zero-arg on end (upstream m_legacyEndOnly parity)
         }
 
       private:
-        int m_actionId, m_beginId, m_updateId, m_endId;
+        SThunkRef   m_action, m_begin, m_update, m_end;
+        std::string m_direction;
     };
 
     static Input::ModifierMask gestureMods(const char* mods) {
@@ -5070,33 +6336,39 @@ namespace Config::Scheme {
         return Input::ModifierMask(sc<Input::eKeyboardModifiers>(raw));
     }
 
-    // (fingers, direction, live?, mods, scale, disableInhibit) → the allocated
-    // handler ids as "a" (simple) or "b u e" (live), space-separated; #f on error
-    static ptr hlSchemeGesture(int fingers, const char* direction, int live, const char* mods, double scale, int disableInhibit) {
+    // (record, fingers, direction, live?, mods, scale, disableInhibit) → 0 ok;
+    // the record's thunk field carries the action fn (simple form) or the
+    // three fns (live: start update finish) — carried locked by the gesture,
+    // unlocked when the gesture manager destroys it at config reload
+    static int hlSchemeGesture(ptr record, int fingers, const char* direction, int live, const char* mods, double scale, int disableInhibit) {
         if (!g_up || !g_pTrackpadGestures)
-            return Sfalse;
+            return -1;
         const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
         if (dir == TRACKPAD_GESTURE_DIR_NONE) {
             g_configError = std::string("hl-gesture: invalid direction '") + (direction ? direction : "") + "'";
-            return Sfalse;
+            return -1;
         }
-        const int a = g_nextBindId++;
-        int       b = -1, u = -1, e = -1;
-        if (live) {
-            b = g_nextBindId++;
-            u = g_nextBindId++;
-            e = g_nextBindId++;
+        // walk the thunks list: (action) or (start update finish)
+        ptr t1 = Snil, t2 = Snil, t3 = Snil;
+        if (Spairp(record)) {
+            t1 = Scar(record);
+            if (Spairp(Scdr(record))) {
+                t2 = Scar(Scdr(record));
+                if (Spairp(Scdr(Scdr(record))))
+                    t3 = Scar(Scdr(Scdr(record)));
+            }
+        }
+        if (live)
             g_pTrackpadGestures->addGesture(
-                makeUnique<CSchemeGesture>(-1, b, u, e), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
-            return schemeIntList({b, u, e});   // (begin-id update-id end-id)
-        }
-        g_pTrackpadGestures->addGesture(makeUnique<CSchemeGesture>(a, -1, -1, -1), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale),
-                                        disableInhibit != 0);
-        return Sinteger(a);
+                makeUnique<CSchemeGesture>(Snil, t1, t2, t3, direction), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
+        else
+            g_pTrackpadGestures->addGesture(makeUnique<CSchemeGesture>(t1, Snil, Snil, Snil, direction), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale),
+                                            disableInhibit != 0);
+        return 0;
     }
 
 
-    static ptr hlSchemeWindowInitialClass(int id) {
+    static ptr hlSchemeWindowInitialClass(long long id) {
         if (!g_up)
             return Sfalse;
 
@@ -5108,7 +6380,7 @@ namespace Config::Scheme {
         return Sstring_utf8(s.c_str(), s.size());
     }
 
-    static ptr hlSchemeWindowInitialTitle(int id) {
+    static ptr hlSchemeWindowInitialTitle(long long id) {
         if (!g_up)
             return Sfalse;
 
@@ -5120,7 +6392,7 @@ namespace Config::Scheme {
         return Sstring_utf8(s.c_str(), s.size());
     }
 
-    static int hlSchemeWindowX11(int id) {
+    static int hlSchemeWindowX11(long long id) {
         if (!g_up)
             return 0;
 
@@ -5132,101 +6404,95 @@ namespace Config::Scheme {
         if (!g_up)
             return Sfalse;
 
-        std::vector<int> ids;
+        std::vector<uintptr_t> ids;
         for (const auto& m : State::monitorState()->monitors()) {
-            ids.push_back(g_nextMonitorId++);
-            g_monitors.emplace(ids.back(), PHLMONITORREF(m));
+            ids.push_back((uintptr_t)(new SHandle<PHLMONITORREF>(m)));
         }
 
         return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
-    static int hlSchemeWindowEventListen(int which) {
+    static int hlSchemeWindowEventListen(ptr record, int which) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
-
         switch (which) {
-            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openLate.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.close.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.title.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.class_.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 4: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.urgent.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 5: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.pin.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 6: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.fullscreen.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 7: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.moveToWorkspace.listen([id](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(id, w); })); break;
-            case 8: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.active.listen([id](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(id, w); })); break;
-            case 9: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openEarly.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 10: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.kill.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
-            case 11: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.bell.listen([id](PHLWINDOW w, Event::SCallbackInfo&) { fireSchemeWin(id, w); })); break;
-            case 12: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.updateRules.listen([id](PHLWINDOW w) { fireSchemeWin(id, w); })); break;
+            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openLate.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.close.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.title.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.class_.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 4: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.urgent.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 5: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.pin.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 6: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.fullscreen.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 7: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.moveToWorkspace.listen([ref = SThunkRef(record)](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(ref.obj, w); })); break;
+            case 8: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.active.listen([ref = SThunkRef(record)](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(ref.obj, w); })); break;
+            case 9: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openEarly.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 10: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.kill.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 11: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.bell.listen([ref = SThunkRef(record)](PHLWINDOW w, Event::SCallbackInfo&) { fireSchemeWin(ref.obj, w); })); break;
+            case 12: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.updateRules.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
             default: break;
         }
 
-        return id;
+        return 0;
     }
 
     // minimize fires with (window, state): pass the bool as a second arg
-    static int hlSchemeWindowMinimizeListen() {
+    static int hlSchemeWindowMinimizeListen(ptr record) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.window.minimize.listen([id](PHLWINDOW w, bool state) {
+        SThunkRef ref(record);
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.window.minimize.listen([ref](PHLWINDOW w, bool state) {
             if (!g_up || !w)
                 return;
-            const int winId = g_nextWindowId++;
-            g_windows.emplace(winId, PHLWINDOWREF(w));
-            Scall3(Stop_level_value(Sstring_to_symbol("hl--fire-win-state")), Sinteger(id), Sinteger(winId), state ? Strue : Sfalse);
+            const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(w));
+            Scall3(Stop_level_value(Sstring_to_symbol("hl--fire-win-state-rec")), ref.obj, Sinteger(winId), state ? Strue : Sfalse);
         }));
-        return id;
+        return 0;
     }
 
     // lifecycle: 0 = start (session's first render frame), 1 = shutdown
     // (the exit action). Matches upstream: a handler registered after start
     // already fired (only possible when the plugin itself loaded before the
     // first frame) runs on the next loop pass.
-    static int hlSchemeLifecycleListen(int which) {
+    static int hlSchemeLifecycleListen(ptr record, int which) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
+        SThunkRef ref(record);
 
         if (which == 0) {
             if (g_startSeen) {
                 // the handler is registered by Scheme only AFTER this call
                 // returns, so the immediate fire must wait for the next pass
                 if (g_pEventLoopManager)
-                    g_pEventLoopManager->doLater([id] { fireScheme(id); });
+                    g_pEventLoopManager->doLater([ref] { fireScheme(ref.obj); });
             } else
-                g_pendingStart.emplace_back(id);
+                g_pendingStart.emplace_back(record);
         } else
-            g_windowEventListeners.emplace_back(Event::bus()->m_events.exit.listen([id] { fireScheme(id); }));
+            g_windowEventListeners.emplace_back(Event::bus()->m_events.exit.listen([ref] { fireScheme(ref.obj); }));
 
-        return id;
+        return 0;
     }
 
-    static int hlSchemeMonitorListen(int which) {
+    static int hlSchemeMonitorListen(ptr record, int which) {
         if (!g_up)
             return -1;
-        const int id = g_nextBindId++;
         switch (which) {
-            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.added.listen([id](PHLMONITOR m) { fireSchemeMon(id, m); })); break;
-            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.removed.listen([id](PHLMONITOR m) { fireSchemeMon(id, m); })); break;
-            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.focused.listen([id](PHLMONITOR m) { fireSchemeMon(id, m); })); break;
-            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.layoutChanged.listen([id] { fireScheme(id); })); break;
+            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.added.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.removed.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.focused.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.layoutChanged.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); })); break;
             default: break;
         }
-        return id;
+        return 0;
     }
 
-    static int hlSchemeWorkspaceListen(int which) {
+    static int hlSchemeWorkspaceListen(ptr record, int which) {
         if (!g_up)
             return -1;
-        const int id = g_nextBindId++;
         switch (which) {
-            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.created.listen([id](PHLWORKSPACEREF ws) { auto w = ws.lock(); if (w) fireSchemeWs(id, w); })); break;
+            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.created.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { auto w = ws.lock(); if (w) fireSchemeWs(ref.obj, w); })); break;
             // removed fires from ~CHLWorkspace: the payload cannot be locked
             // (hyprutils marks the impl "destroying"), but the data pointer
             // stays valid until the destructor returns, so the name COULD be
@@ -5239,74 +6505,102 @@ namespace Config::Scheme {
             // instant — a later enhancement could snapshot it into the handle
             // at fire time and expose it through (hl-workspace-name), but that
             // would go beyond what Lua offers, so it is deliberately not done.
-            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.removed.listen([id](PHLWORKSPACEREF ws) { fireSchemeWsRef(id, ws); })); break;
+            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.removed.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { fireSchemeWsRef(ref.obj, ws); })); break;
             // fires (ws mon) handles; ws is #f when no special workspace is
             // open on the monitor (upstream crosses nil the same way)
-            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.specialActive.listen([id](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(id, ws, mon); })); break;
-            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.moveToMonitor.listen([id](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(id, ws, mon); })); break;
+            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.specialActive.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
+            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.moveToMonitor.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
             default: break;
         }
-        return id;
+        return 0;
     }
 
-    static int hlSchemeConfigReloadedListen() {
+    static int hlSchemeConfigReloadedListen(ptr record) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.reloaded.listen([id] { fireScheme(id); }));
-        return id;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.reloaded.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
+        return 0;
     }
 
     // config.preReload — upstream maps config.unload onto it
-    static int hlSchemeConfigUnloadListen() {
+    static int hlSchemeConfigUnloadListen(ptr record) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.preReload.listen([id] { fireScheme(id); }));
-        return id;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.preReload.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
+        return 0;
     }
 
     // window.destroy: zero-argument callback (upstream delivers nil — the bus
-    // event is Event<PHLWINDOWREF>; identity belongs to hl-on-window-close)
-    static int hlSchemeWindowDestroyListen() {
+    // event is Event<PHLWINDOWREF>; identity belongs to the window-close notification)
+    static int hlSchemeWindowDestroyListen(ptr record) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.window.destroy.listen([id](PHLWINDOWREF) { fireScheme(id); }));
-        return id;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.window.destroy.listen([ref = SThunkRef(record)](PHLWINDOWREF) { fireScheme(ref.obj); }));
+        return 0;
+    }
+
+    // screenshare.state — callbacks receive (active? type name); upstream
+    // dispatches 3 positional args (LuaEventHandler.cpp:166)
+    static int hlSchemeScreenshareListen(ptr record) {
+        if (!g_up)
+            return -1;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.screenshare.state.listen([ref = SThunkRef(record)](bool state, uint8_t type, const std::string& name) {
+            if (!g_up)
+                return;
+            std::vector<ptr> roots;
+            ptr nm = Sstring_utf8(name.c_str(), name.size());
+            marshRoot(nm, roots);
+            ptr lst = Scons(state ? Strue : Sfalse, Scons(Sinteger((int)type), Scons(nm, Snil)));
+            marshRoot(lst, roots);
+            marshRelease(roots);
+            fireSchemeListRec(ref.obj, lst);   // (active? type name)
+        }));
+        return 0;
+    }
+
+    // input.keyboard.key — high-frequency (every key event); handlers must be
+    // trivial. Observe-only: the bus event is Cancellable, Scheme listeners
+    // never take the cancellation. keycode is +8 (libinput → xkb), as upstream.
+    static int hlSchemeKeyboardKeyListen(ptr record) {
+        if (!g_up)
+            return -1;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.input.keyboard.key.listen([ref = SThunkRef(record)](const IKeyboard::SKeyEvent& keyEvent, Event::SCallbackInfo& _) {
+            if (!g_up)
+                return;
+            fireSchemeListRec(ref.obj, schemeIntList({(int)keyEvent.keycode + 8, (int)keyEvent.timeMs, (int)keyEvent.state}));
+        }));
+        return 0;
     }
 
     // layer.opened / layer.closed — callbacks receive the layer's namespace
-    static int hlSchemeLayerListen(int which) {
+    static int hlSchemeLayerListen(ptr record, int which) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
         if (which == 0)
-            g_windowEventListeners.emplace_back(Event::bus()->m_events.layer.opened.listen([id](PHLLS ls) { if (g_up && ls) fireSchemeStr(id, ls->m_namespace); }));
+            g_windowEventListeners.emplace_back(Event::bus()->m_events.layer.opened.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
         else
-            g_windowEventListeners.emplace_back(Event::bus()->m_events.layer.closed.listen([id](PHLLS ls) { if (g_up && ls) fireSchemeStr(id, ls->m_namespace); }));
-        return id;
+            g_windowEventListeners.emplace_back(Event::bus()->m_events.layer.closed.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
+        return 0;
     }
 
     // handler receives #t when the prop refresh ran as scheduled, #f when it
     // was executed prematurely
-    static int hlSchemePropsRefreshedListen() {
+    static int hlSchemePropsRefreshedListen(ptr record) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.props_refreshed.listen([id](const bool scheduled) { fireSchemeBool(id, scheduled); }));
-        return id;
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.props_refreshed.listen([ref = SThunkRef(record)](const bool scheduled) { fireSchemeBool(ref.obj, scheduled); }));
+        return 0;
     }
 
     // identity, mirroring Lua's windowEq: two handles are the same window
     // iff they lock to the same underlying object. Dead handles are never
     // "the same" as anything.
-    static int hlSchemeWindowSame(int idA, int idB) {
+    static int hlSchemeWindowSame(long long idA, long long idB) {
         if (!g_up)
             return 0;
 
@@ -5331,15 +6625,15 @@ namespace Config::Scheme {
         return Scons(Sinteger((int)pos.x), Sinteger((int)pos.y));   // (x . y)
     }
 
-    static int hlSchemeWorkspaceActiveListen() {
+    static int hlSchemeWorkspaceActiveListen(ptr record) {
         if (!g_up)
             return -1;
 
-        const int id = g_nextBindId++;
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.active.listen([id](PHLWORKSPACE ws) {
-            fireSchemeWs(id, ws);
+        SThunkRef ref(record);
+        g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.active.listen([ref](PHLWORKSPACE ws) {
+            fireSchemeWs(ref.obj, ws);
         }));
-        return id;
+        return 0;
     }
 
     static void reloadScheme() {
@@ -5350,28 +6644,26 @@ namespace Config::Scheme {
         // the fresh config run re-registers everything
         clearSchemeRules();
 
-        // lua config reloads clear every bind in the registry; drop our stale handles.
-        for (const auto& [id, b] : g_binds) {
-            if (Keybinds::mgr())
-                Keybinds::mgr()->removeBind(b);
-        }
-        g_binds.clear();
+        // lua config reloads clear every bind in the registry; that
+        // destruction runs our capture destructors, which release the
+        // record locks — nothing to clean up here (we hold no references)
 
-        // timers from the previous generation must not fire into the new one
+        // timers from the previous generation must not fire into the new one;
+        // destroying them releases their record locks via the capture dtor
         if (g_pEventLoopManager) {
-            for (const auto& [id, t] : g_timers) {
-                t->cancel();
-                g_pEventLoopManager->removeTimer(t);
+            for (auto& [addr, e] : g_timerIndex) {
+                e.timer->cancel();
+                g_pEventLoopManager->removeTimer(e.timer);
             }
+            g_timerIndex.clear();
         }
-        g_timers.clear();
 
         // drop event subscriptions; the new generation re-registers
         g_submapListeners.clear();
         g_windowEventListeners.clear();
 
-        // old-generation window handles die with their generation
-        g_windows.clear();
+        // old-generation handles: their Scheme records became unreachable
+        // with the generation, so the guardian reaps them at the next GC
 
         // layouts unregister + re-register with the new generation
         Layouts::clear();
@@ -5537,12 +6829,17 @@ namespace Config::Scheme {
         g_reloadListener.reset();
         g_lifecycleListeners.clear();
         Layouts::clear();
-        // remove our binds: the compositor keeps running without us
-        for (const auto& [id, b] : g_binds) {
-            if (Keybinds::mgr())
+        // remove our binds before the .so unmaps (their callbacks point
+        // here): ours are the ones tagged "scheme:" in their argument.
+        // Collect first, then remove — erasing invalidates the registry span.
+        if (Keybinds::mgr()) {
+            std::vector<Keybinds::PBind> ours;
+            for (const auto& b : Keybinds::mgr()->registry().binds())
+                if (b && b->metadata().argument.rfind("scheme:", 0) == 0)
+                    ours.push_back(b);
+            for (const auto& b : ours)
                 Keybinds::mgr()->removeBind(b);
         }
-        g_binds.clear();
         // the interpreter stays alive: Chez does not survive a teardown +
         // re-init inside the compositor (the second Sbuild_heap hangs), so
         // a re-load of the plugin re-attaches to the live interpreter
@@ -5561,6 +6858,7 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-workspace-names", (void*)hlSchemeWorkspaceNames);
         Sregister_symbol("hl-scheme-submap-listen", (void*)hlSchemeSubmapListen);
         Sregister_symbol("hl-scheme-active-window-id", (void*)hlSchemeActiveWindowId);
+        Sregister_symbol("hl-handle-free", (void*)hlHandleFree);
         Sregister_symbol("hl-scheme-window-ids", (void*)hlSchemeWindowIds);
         Sregister_symbol("hl-scheme-window-title", (void*)hlSchemeWindowTitle);
         Sregister_symbol("hl-scheme-window-alive", (void*)hlSchemeWindowAlive);
@@ -5583,7 +6881,9 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-config-props-refreshed-listen", (void*)hlSchemePropsRefreshedListen);
         Sregister_symbol("hl-scheme-window-destroy-listen", (void*)hlSchemeWindowDestroyListen);
         Sregister_symbol("hl-scheme-layer-listen", (void*)hlSchemeLayerListen);
-        Sregister_symbol("hl-scheme-unbind", (void*)hlSchemeUnbind);
+        Sregister_symbol("hl-scheme-screenshare-listen", (void*)hlSchemeScreenshareListen);
+        Sregister_symbol("hl-scheme-keyboard-key-listen", (void*)hlSchemeKeyboardKeyListen);
+        Sregister_symbol("hl-scheme-unbind-rec", (void*)hlSchemeUnbindRec);
         Sregister_symbol("hl-scheme-unbind-key", (void*)hlSchemeUnbindKey);
         Sregister_symbol("hl-scheme-window-same", (void*)hlSchemeWindowSame);
         Sregister_symbol("hl-scheme-current-submap", (void*)hlSchemeCurrentSubmap);
@@ -5663,6 +6963,7 @@ namespace Config::Scheme {
         Sregister_symbol("hl-config-last-error", (void*)hlConfigLastError);
         Sregister_symbol("hl-config-get", (void*)hlConfigGet);
         Sregister_symbol("hl-scheme-device-add", (void*)hlSchemeDeviceAdd);
+        Sregister_symbol("hl-exec-with-rule", (void*)hlSchemeExecRule);
         Sregister_symbol("hl-monitor-begin", (void*)hlMonitorBegin);
         Sregister_symbol("hl-monitor-field-str", (void*)hlMonitorFieldStr);
         Sregister_symbol("hl-monitor-field-num", (void*)hlMonitorFieldNum);
@@ -5742,6 +7043,11 @@ namespace Config::Scheme {
         Sregister_symbol("hl-monitor-vrr", (void*)hlMonitorVrr);
         Sregister_symbol("hl-monitor-10bit", (void*)hlMonitor10bit);
         Sregister_symbol("hl-monitor-reserved", (void*)hlMonitorReserved);
+        Sregister_symbol("hl-monitor-serial", (void*)hlMonitorSerial);
+        Sregister_symbol("hl-monitor-physical-size", (void*)hlMonitorPhysicalSize);
+        Sregister_symbol("hl-monitor-mirrors", (void*)hlMonitorMirrors);
+        Sregister_symbol("hl-monitor-available-modes", (void*)hlMonitorAvailableModes);
+        Sregister_symbol("hl-monitor-hardware-details", (void*)hlMonitorHardwareDetails);
         Sregister_symbol("hl-monitor-mirror-of", (void*)hlMonitorMirrorOf);
         Sregister_symbol("hl-monitor-active-workspace", (void*)hlMonitorActiveWorkspace);
         Sregister_symbol("hl-monitor-active-special-workspace", (void*)hlMonitorActiveSpecialWorkspace);
@@ -5750,13 +7056,52 @@ namespace Config::Scheme {
         Sregister_symbol("hl-monitor-selector", (void*)hlMonitorSelector);
         Sregister_symbol("hl-window-fullscreen-handler", (void*)hlWindowFullscreenHandler);
         Sregister_symbol("hl-notify!", (void*)hlNotify);
+        Sregister_symbol("hl-notification-add", (void*)hlNotificationAdd);
+        Sregister_symbol("hl-notification-list", (void*)hlNotificationList);
+        Sregister_symbol("hl-notification-text", (void*)hlNotificationText);
+        Sregister_symbol("hl-notification-timeout", (void*)hlNotificationTimeout);
+        Sregister_symbol("hl-notification-color", (void*)hlNotificationColor);
+        Sregister_symbol("hl-notification-icon", (void*)hlNotificationIcon);
+        Sregister_symbol("hl-notification-font-size", (void*)hlNotificationFontSize);
+        Sregister_symbol("hl-notification-elapsed", (void*)hlNotificationElapsed);
+        Sregister_symbol("hl-notification-age", (void*)hlNotificationAge);
+        Sregister_symbol("hl-notification-alive", (void*)hlNotificationAlive);
+        Sregister_symbol("hl-notification-same", (void*)hlNotificationSame);
+        Sregister_symbol("hl-notification-text-set", (void*)hlNotificationTextSet);
+        Sregister_symbol("hl-notification-timeout-set", (void*)hlNotificationTimeoutSet);
+        Sregister_symbol("hl-notification-color-set", (void*)hlNotificationColorSet);
+        Sregister_symbol("hl-notification-icon-set", (void*)hlNotificationIconSet);
+        Sregister_symbol("hl-notification-font-size-set", (void*)hlNotificationFontSizeSet);
+        Sregister_symbol("hl-notification-paused-set", (void*)hlNotificationPausedSet);
+        Sregister_symbol("hl-notification-paused-q", (void*)hlNotificationPausedQ);
+        Sregister_symbol("hl-notification-dismiss", (void*)hlNotificationDismiss);
         Sregister_symbol("hl-timer-set-enabled", (void*)hlTimerSetEnabled);
         Sregister_symbol("hl-timer-enabled", (void*)hlTimerEnabled);
         Sregister_symbol("hl-timer-set-timeout", (void*)hlTimerSetTimeout);
+        Sregister_symbol("hl-timer-cancel", (void*)hlTimerCancel);
         Sregister_symbol("hl-exec!", (void*)hlSchemeExecRaw);
         Sregister_symbol("hl-exec-shell-with-rules!", (void*)hlSchemeExecWithRules);
         Sregister_symbol("hl-scheme-gesture", (void*)hlSchemeGesture);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
+
+        // window read-side fields (LuaWindow parity)
+        Sregister_symbol("hl-scheme-window-address", (void*)hlSchemeWindowAddress);
+        Sregister_symbol("hl-scheme-window-mapped", (void*)hlSchemeWindowMapped);
+        Sregister_symbol("hl-scheme-window-visible", (void*)hlSchemeWindowVisible);
+        Sregister_symbol("hl-scheme-window-accepts-input", (void*)hlSchemeWindowAcceptsInput);
+        Sregister_symbol("hl-scheme-window-position", (void*)hlSchemeWindowPosition);
+        Sregister_symbol("hl-scheme-window-pin-fullscreened", (void*)hlSchemeWindowPinFullscreened);
+        Sregister_symbol("hl-scheme-window-allowed-over-fullscreen", (void*)hlSchemeWindowAllowedOverFullscreen);
+        Sregister_symbol("hl-scheme-window-tearing-hint", (void*)hlSchemeWindowTearingHint);
+        Sregister_symbol("hl-scheme-window-inhibiting-idle", (void*)hlSchemeWindowInhibitingIdle);
+        Sregister_symbol("hl-scheme-window-focus-history-id", (void*)hlSchemeWindowFocusHistoryId);
+        Sregister_symbol("hl-scheme-window-content-type", (void*)hlSchemeWindowContentType);
+        Sregister_symbol("hl-scheme-window-stable-id", (void*)hlSchemeWindowStableId);
+        Sregister_symbol("hl-scheme-window-tags", (void*)hlSchemeWindowTags);
+        Sregister_symbol("hl-scheme-window-swallowing-id", (void*)hlSchemeWindowSwallowingId);
+        Sregister_symbol("hl-scheme-window-xdg-tag", (void*)hlSchemeWindowXdgTag);
+        Sregister_symbol("hl-scheme-window-xdg-description", (void*)hlSchemeWindowXdgDescription);
+        Sregister_symbol("hl-scheme-window-layout", (void*)hlSchemeWindowLayout);
         Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
         Sregister_symbol("hl-scheme-window-pseudo-query", (void*)hlSchemeWindowPseudoQuery);
         Sregister_symbol("hl-scheme-window-maximized-query", (void*)hlSchemeWindowMaximizedQuery);
@@ -5838,8 +7183,8 @@ namespace Config::Scheme {
                 g_startSeen = true;
                 auto pending = std::move(g_pendingStart);
                 g_pendingStart.clear();
-                for (const auto id : pending)
-                    fireScheme(id);
+                for (const auto& ref : pending)
+                    fireScheme(ref.obj);
             }));
             reloadScheme();
             return;
@@ -5914,14 +7259,14 @@ namespace Config::Scheme {
         // as a plugin we load AFTER the initial config load, so also load now.
         g_reloadListener = Event::bus()->m_events.config.reloaded.listen([] { reloadScheme(); });
 
-        // lifecycle: dispatch hl-on-start handlers on the session's first
+        // lifecycle: dispatch start-notification handlers on the session's first
         // render frame (start fires exactly once, after the first preChecks)
         g_lifecycleListeners.emplace_back(Event::bus()->m_events.start.listen([] {
             g_startSeen = true;
             auto pending = std::move(g_pendingStart);
             g_pendingStart.clear();
-            for (const auto id : pending)
-                fireScheme(id);
+            for (const auto& ref : pending)
+                fireScheme(ref.obj);
         }));
         reloadScheme();
     }

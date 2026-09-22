@@ -2,28 +2,28 @@
 ;; Copy to $XDG_CONFIG_HOME/hypr/hyprland.scm (or point HYPRSCHEME_CONFIG at it).
 
 ;; ---- binds ----------------------------------------------------------------
-;; hl-bind takes a TOKEN LIST (mods first, key last) and a thunk.
+;; hl-bind-add! takes a TOKEN LIST (mods first, key last) and a thunk.
 ;; (kbd ...) is emacs syntax, (hl-kbd ...) is hyprland syntax; both return the list.
-(hl-bind (kbd "s-<Return>") (lambda () (hl-exec "foot")))
-(hl-bind (kbd "s-d")        (lambda () (hl-exec "wofi --show drun")))
-(hl-bind (kbd "s-<Tab>")    (lambda () (hl-window-cycle!)))
+(hl-bind-add! (kbd "s-<Return>") (lambda () (hl-exec "foot")))
+(hl-bind-add! (kbd "s-d")        (lambda () (hl-exec "wofi --show drun")))
+(hl-bind-add! (kbd "s-<Tab>")    (lambda () (hl-window-cycle!)))
 
 ;; options follow the thunk as a plist
-(hl-bind (kbd "s-q") (lambda () (hl-window-close!))
+(hl-bind-add! (kbd "s-q") (lambda () (hl-window-close!))
          'description "Close the focused window")
 
 ;; a submap: binds inside are scoped to it, no modifiers needed
-(hl-bind (kbd "s-g") (lambda () (hl-submap-activate! "resize")))
+(hl-bind-add! (kbd "s-g") (lambda () (hl-submap-activate! "resize")))
 (hl-submap "resize"
   (lambda ()
-    (hl-bind (kbd "left")  (lambda () (hl-window-size-set! #f -20 0 'relative)) 'repeat #t)
-    (hl-bind (kbd "right") (lambda () (hl-window-size-set! #f 20 0 'relative))  'repeat #t)
-    (hl-bind (kbd "g")     (lambda () (hl-submap-exit!)))))
+    (hl-bind-add! (kbd "left")  (lambda () (hl-window-size-set! #f -20 0 'relative)) 'repeat #t)
+    (hl-bind-add! (kbd "right") (lambda () (hl-window-size-set! #f 20 0 'relative))  'repeat #t)
+    (hl-bind-add! (kbd "g")     (lambda () (hl-submap-exit!)))))
 
 ;; ---- events ---------------------------------------------------------------
-(hl-on-window-open (lambda (w)
+(hl-window-open-notification-add! (lambda (w)
   (hl-notify! (string-append "opened: " (hl-window-class w)) 3000)))
-(hl-on-workspace-active (lambda (ws)
+(hl-workspace-active-notification-add! (lambda (ws)
   (hl-notify! (string-append "workspace: " (hl-workspace-name ws)) 1500 'icon "info")))
 
 ;; ---- window rules (a plist; match is a nested plist too) ------------------

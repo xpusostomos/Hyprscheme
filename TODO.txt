@@ -292,10 +292,10 @@ Helpers: schemeIntList + marshRoot/marshRelease (pinning + release), shared
   conceptually with SchemeLayout.cpp's local copy.
 
 == REMAINING SMALL GAPS ==
-Binds: flat-option API cannot express upstream's device { inclusive = false }
-  (LuaBindingsToplevel.cpp:192 — inclusive defaults true, but explicit false
-  is honored upstream; our 'device-inclusive #f is indistinguishable from
-  absence). Device binds are always inclusive for now.
+RESOLVED 2026-09-20: device binds now honor an explicit
+  'device-inclusive #f (hl--plist-has? tells present-from-#f apart from absent;
+  absent + listed devices defaults to inclusive, matching upstream).
+  Tested directly via (hl--bind-flags ...) in t-api.
 Resolved 2026-09-19 — TOGGLE/SET NORMALIZATION (implemented + verified 10/10):
 The toggle/set surface is now ONE convention everywhere: **a `-set!`
 function whose last optional argument is a boolean — no argument =
@@ -323,15 +323,29 @@ old hl--togact ('toggle/'on/'off symbols).
     the focused window's swallow controller (no setter, no state query), so
     #t/#f cannot be expressed — kept as toggle!.
 
+== MONITOR HARDWARE GETTERS (implemented + verified 11/11, 2026-09-20) ==
+The second half of the monitor-fields gap: hl-monitor-serial (EDID
+  serial string), hl-monitor-physical-size ((w . h) mm),
+  hl-monitor-mirrors (handles), hl-monitor-available-modes (list of
+  (width w height h refresh-rate r preferred b) plists), and
+  hl-monitor-hardware-details ((backend "..." hdr b chroma b bt2020 b
+  vrr-capable b) plist) — upstream LuaMonitor field parity
+  (serial/physical_*/available_modes/mirrors/hardware_details).
+  Data sourced from mon->m_output (Aquamarine IOutput) — needs
+  <aquamarine/backend/Backend.hpp> for eBackendType/IBackendImplementation.
+  Verified in t-api against the nested wayland output (serial "" / size
+  (0 . 0) / modes () are the nested headless values — real hardware
+  returns real data; shape asserted).
+The workspace-group-LIST half was DROPPED from parity (Lua has only
+  group_count; no group list) — recorded in TODO-extensions.txt as a
+  candidate for a future extensions.scm (derivable in Scheme today via
+  hl-workspace-windows + hl-window-group?).
+
 == REMAINING SMALL GAPS ==
-- Monitor set_special (upstream mon:set_special_workspace) — we only
-  have toggle_special; an explicit set (open/close, not toggle) is a
-  small addition if wanted.
-- Workspace group LIST and monitor hardware fields (hardware_details,
-  available_modes, serial, physical size, mirrors list) are not exposed —
-  counts and the common fields are; add on demand.
-- auto-consuming Scheme protocol (callback returning #f = decline) — see
-  BINDS below; flag bit already lands.
+Binds: device-inclusive RESOLVED 2026-09-20 — hl--bind-flags honors an
+  explicit 'device-inclusive #f (opts out of inclusivity) via
+  hl--plist-has?; absent = inclusive when devices are listed (upstream
+  LuaBindingsToplevel.cpp:192 parity). Verified in t-api (8192 / 0).
 
 == BINDS: auto-consuming protocol (RESOLVED 2026-09-19 — see batch above) ==
 A bind thunk returning #f DECLINES the key (SBindResult{.success=false});
@@ -374,6 +388,18 @@ Post-mortem window identity (if ever wanted): the upstream-blessed shape
   is (hl-window-address W) (upstream window.address) + stashing it from
   hl-on-window-close — not a destroy payload.
 
+== EXEC WITH RULE OBJECT (implemented + verified 11/11, 2026-09-21) ==
+(hl-exec-with-rule! CMD . FIELDS) — upstream hl.exec rule-object parity
+  (buildRuleFromTable + spawn(SExecRequest{.exec, .rule})). The rule is
+  EFFECTS ONLY (no match: the executor tags the spawned window by pid
+  itself, SExecRequest comment). Maximum reuse: the effect lookup is the
+  same Desktop::Rule::windowEffects()->get() + addEffect(e, string) pair
+  the window-rule path uses; values pass through hl--rule-spec-value
+  (numbers/bools → config strings) Scheme-side. An empty field list
+  spawns plain (upstream: empty rule → spawn(proc)). Returns the pid.
+  BEHAVIORAL test in t-api: spawned foot with 'float #t actually floats;
+  unknown effects rejected with a clear error. Docs: dispatchers.md.
+
 == ACTIONS / DISPATCHERS ==
 Workspace change_id — CA::changeWorkspaceID (written, needs wiring — see
   IN FLIGHT).
@@ -384,9 +410,14 @@ Exec carrying a rule OBJECT — the path is NOT the private spawnWithRules
   163-171). Gap: an alist→CWindowRule builder in the plugin plus the
   SExecRequest spawn form. The "[rules] cmd" string form already works
   via hl-exec-with-rules.
-Per-effect rule handles — rule effects are raw-string based today;
-  per-effect get/set may be wanted (mirrors upstream's set_prop).
-  Decision item.
+Per-effect rule handles — CLOSED 2026-09-21: upstream has no such
+  surface. hl.window_rule({...}) returns nothing method-bearing (no
+  lua_pushcclosure in LuaBindingsConfigRules.cpp); the only post-hoc
+  mutation upstream offers is the enabled flag (we have hl-rule-set-
+  enabled). The real upstream set_prop is WINDOW-level (hl.window.
+  set_prop -> CA::setProp) — mirrored as hl-window-prop-set!, which this
+  batch documented and test-locked. Anything per-rule-handle would be an
+  extension (TODO-extensions.txt).
 RESOLVED (2026-09-19): "Move a window directly to another MONITOR" — no
   direct action exists upstream either (dsp_moveToMonitor resolves the
   monitor and moves to its ACTIVE workspace, LuaBindingsDispatchers.cpp:
@@ -412,13 +443,36 @@ RESOLVED 2026-09-20: per-device CONFIG API lands as (hl-device-add! NAME .
   Docs: device-config.md (full field table) + devices.md + sidebar. Tests in
   t-api. Per-device BINDS remain (device-binds-per-device).
 
-== GESTURES ==
-Live gesture payload enrichment — data exists upstream, we drop it:
-  SPinchUpdateEvent carries scale AND rotation (IPointer.hpp:77), the
-  end events carry cancelled (IPointer.hpp:64); our update fire is
-  std::format("{} {} {}", dx, dy, scale) (SchemeManager.cpp:3711) — no
-  rotation, no cancel state, and the string form cannot say which
-  gesture type it is. Suggest an alist or extra args when touched.
+== GESTURE API UNIFIED (hl-gesture-add! — implemented + verified, 2026-09-21) ==
+hl-gesture and hl-gesture-live (fixed-arity, positional callbacks) are
+  DELETED, replaced by ONE (hl-gesture-add! . FIELDS) — upstream hl.gesture
+  parity (ONE table with arbitrary fields; LuaBindingsConfigRules.cpp:933
+  dispatches action-fn vs action={start,update,finish} exactly like ours).
+  fields: fingers + direction (required), mods/scale/disable-inhibit
+  (optional), and EITHER 'action FN (fires zero-arg on end — upstream
+  legacy single-function form) OR 'start/'update/'finish FNs (live — each
+  applied the gesture event plist as spread args; see the enrichment note
+  below). Unknown fields / missing fingers / direction / action rejected.
+  Callback payloads unchanged (pushGestureEvent parity — see enrichment).
+FOLLOW-UP GAP: built-in action STRINGS (workspace/move/resize/special/
+  close/fullscreen/float/cursor_zoom/scroll_move + unset) are upstream
+  parity but need the built-in gesture classes wired (MoveGesture,
+  FloatGesture, ...) — noted in bind-gestures.md; rejected with a clear
+  error until then. The cursor_zoom examples also use 'zoom-level and
+  'mode fields — accept those alongside the action strings (upstream
+  zoom_level / mode).
+
+== GESTURES (enriched + verified 11/11, 2026-09-21) ==
+Live gesture callbacks now receive the upstream pushGestureEvent payload —
+  a plist APPLIED as spread args (lambda destructures): begin/update =
+  (phase direction type time-ms fingers delta [scale rotation — pinch]),
+  end = (phase direction type time-ms cancelled). Delta is an (x . y)
+  pair; end has no delta/scale/rotation (upstream parity, LuaFunctionGesture
+  .cpp:102-119). The legacy single-thunk hl-gesture stays zero-arg on end
+  (upstream m_legacyEndOnly). fireSchemeNums deleted (subsumed).
+  Docs: bind-gestures.md.
+
+(resolved — see above)
 
 == DOCS (wiki drift in ../Hyprscheme.wiki) ==
 RESOLVED 2026-09-19: the title-change-event claims (window-rules.md,
@@ -431,6 +485,11 @@ RESOLVED 2026-09-19: the title-change-event claims (window-rules.md,
 Remaining drift: none known on these pages.
 
 == TOOLING ==
+Docs-blocks test — a t-*.sh that runs the paren/depth checker over the
+  wiki's ```scheme blocks (balance + hl-name spellcheck against the
+  Sregister_symbol list) so doc examples cannot silently rot. A hand-run
+  of the checker found 2 real doc bugs 2026-09-21 (layer-rules alist
+  fragment, code-snippets layout-cycle block).
 Interactive REPL (hyprctl repl equivalent; hyprctl scheme is one-shot).
 Editor completion stub (a scheme skeleton with all hl- signatures,
   parity with upstream's Lua stubs).
@@ -445,6 +504,209 @@ Tests — tests/ should grow to cover as many scenarios as possible
   current 2-arg hl.bind form. The "wayland-1.lock" log line is normal
   socket-creation noise, not an error. Next: add t-*.sh coverage for the
   handle getters and the newly wired events.
+
+== BIND RESULT PROTOCOL + SET_PROP DOCS (implemented + verified, 2026-09-21) ==
+Bind callbacks now carry the FULL upstream result table (dispatchResult-
+  FromLua parity, ConfigManager.cpp:1380 -> Keybinds::SBindResult,
+  Bind.hpp:58): a thunk may return #f (decline — unchanged), #t or any
+  non-plist value (handled), or a plist:
+    '(pass-event #t)       handled AND forwarded to the focused window
+                           (Keybinds Manager CONSUMES logic consumes the
+                           passEvent flag upstream-side; Manager.cpp:565)
+    '(ok #f 'error "...")  explicit decline with a log message
+    '(request-release #t)  handled + BIND_FOLLOW_UP_TRIGGER_RELEASE
+                           (click/drag/long-press binds)
+  'ok defaults to #t, unknown fields ignored — upstream's defaults.
+  Factoring: hl--bind-result normalizes ANY thunk return to #f or one
+  plist shape (fills 'ok), so fireSchemeBind reads a single shape; the
+  normalization runs INSIDE the fire guard (a malformed return raises
+  into decline, never across the FFI — the first run crashed the
+  compositor when hl--bind-result raised outside it: argument-order bug
+  hl--plist-has? (pl key), caught by the suite).
+  fireSchemeBind (SchemeManager.cpp:2243) maps the plist onto
+  SBindResult{success, passEvent, followUp, error} via a non-allocating
+  walk reusing schemeDatumToStr for keys.
+  Timers ride the same path: '(ok #f) from a repeating thunk stops it
+  (success=false gates re-arm) — end-to-end test in t-api.
+hl-window-prop-set! was ALREADY implemented (getter-audit round, calls
+  Config::Actions::setProp via actionResult, t-api:85/91) — this batch
+  documented it: dispatchers.md row (from lua hl.window.set_prop),
+  window-rules.md dynamic-effects note with a Scheme example, symbol
+  props test-locked ('opacity). Upstream window= is optional (defaults
+  active); our form stays explicit W-first per the no-shape-dispatch
+  rule — compose with (hl-active-window).
+  "Per-effect rule handles" decision item CLOSED (see above — no
+  upstream surface to mirror).
+
+== WINDOW READ-SIDE FIELDS (implemented + verified, 2026-09-21) ==
+LuaWindow field parity (audit item A of the missing-functionality
+  audit): hl-window-address (stable 0x identity — two handles for one
+  window carry one address; test-locked), mapped?, visible? (mapped AND
+  accepts-input AND non-zero alpha, upstream parity), accepts-input?,
+  position (x . y) getter (pairs with position-set!), pin-fullscreened?,
+  allowed-over-fullscreen?, tearing-hint?, inhibiting-idle?,
+  focus-history-id (0 = most recent, -1 = not in history),
+  content-type ("none"/"photo"/"video"/"game"), stable-id (hex string),
+  tags (READ side — round-trips with tag-add!/tags-clear! through
+  Config::Actions::tag into the tag keeper), swallowing (handle or #f),
+  xdg-tag / xdg-description (string or #f), and layout — ONE plist
+  getter for upstream's layout TABLE (is_master/perc_master/perc_size/
+  index/index_in_column/column are NOT separate upstream fields):
+    ('name "master" 'is-master b 'perc-master f 'perc-size f)
+    ('name "scrolling" 'column (index n width f windows (...))
+      'index-in-column n)
+    floating / no tiled target -> #f
+  Includes added: WindowFullscreenPolicy, WindowSwallowController,
+  MasterAlgorithm, ScrollingAlgorithm, protocols/types/ContentType.
+  Tests in t-api (shape + address-identity + tag round-trip); docs:
+  NEW wiki page windows.md (full getter/action tables + layout plists,
+  sidebar + scheme-utilities pointers) in the monitors.md style.
+  Audit items F status: clear-crashed-lockscreen and
+  exec-scheduled-prop-refresh-immediately remain missing; bring-to-top
+  is covered by hl-window-zorder-set!.
+  DOC-TEST TAIL: the first zzz-docs run against the new build also
+  surfaced four stale wiki spots (two had been masked by earlier errors
+  in the same block — e.g. code-snippets smart-gaps died on 'gaps_out'
+  before ever reaching its 'floating match): 'floating -> 'float (the
+  canonical prop, Rule.cpp RULE_PROP_FLOATING), dwindle:pseudotile
+  dropped (option no longer exists upstream), permissions.md
+  hl-permission -> hl-permission-add! (the short name never existed —
+  an earlier audit grep matched the -add! suffix by mistake), and a
+  schematic (lambda () ...) thunk that Chez rejects as "misplaced aux
+  keyword". windows.md's own layout example learned the #f (floating)
+  case the hard way — the doc test running MY new page caught it.
+
+== GUARDIAN HANDLES + NOTIFICATIONS (implemented + verified, 2026-09-21) ==
+HANDLE MODEL REBUILT (audit discussions with Chris — registry removed):
+  windows/workspaces/monitors no longer live in int-keyed unordered_maps.
+  A handle is now a HEAP weak ref (IHandle/SHandle<T>, new'd per mint);
+  the Scheme record carries its address in a guardian CELL
+  ((addr . 0) — cells, not records, are guardian-registered so the drain
+  reads the address without allocating: the rendezvous handler must not
+  cons). (collect-request-handler) is installed at the bootstrap tail to
+  drain + collect — the Scheme translation of upstream's Lua GC __gc.
+  This collects BOTH leak populations exactly (dead objects AND dead
+  handles on live objects — the polling-script case), needs no sweeps,
+  no dedup, and handles reloads for free (the old generation's records
+  become unreachable; the g_windows.clear() teardown line is GONE).
+  FFI: handle args cross as integer-64 (the -1 "active" sentinel still
+  works); mints return doubles (48-bit addrs fit exactly) or Sinteger.
+  FACTS LEARNED THE HARD WAY (suite-driven):
+    - hlSchemeActiveWindowId kept an int return — the 48-bit addr
+      truncated through it (0x5573... -> negative) and the guardian's
+      delete segfaulted. Same class: hlSchemeMonitorNames' vector<int>
+      truncated push_backs. Fixed + both mint paths now validate
+      (errorf on implausible values) and hlHandleFree skips+logs any
+      address >= 2^47 instead of crashing.
+    - collect-request-handler's drain must be allocation-FREE (Chez's
+      reentrancy guard errors on a nested rendezvous).
+    - foreign defs are patched FROM the C++ signatures (a first pass
+      keyed off the wrong set patched 11 unrelated defs — reverted).
+  NOT migrated (kept on id+registry, cleared per generation): binds,
+  timers, rules, layouts — they are config-owned, not compositor
+  objects; no staleness semantics to model.
+NOTIFICATIONS (audit item B — full upstream hl.notification parity):
+  (hl-notification-add! 'text ... 'timeout ms ['icon] ['color]
+  ['font-size]) => hl-notification handle; hl-notifications (list);
+  text/timeout/color/icon/font-size getters+setters; paused-set! [on?]
+  (absent = toggle) + paused? (pause freezes the timeout timer —
+  upstream pause/resume/set_paused/is_paused; per-handle paused bit in
+  SNotificationHandle, released when the handle dies — upstream GC
+  parity); elapsed/age (get_elapsed / get_elapsed_since_creation);
+  dismiss!; alive?; =?. Readbacks: color = raw 0xAARRGGBB int, icon =
+  hyprctl id (names are write-side only, upstream parity). Expired
+  handles read #f, mutate as no-ops. Unknown fields / bad values
+  rejected with an error (device-add parity). Icon+color parsing
+  FACTORED into shared statics used by hl-notify! AND the object API.
+  Tests in t-api (create, round-trips, pause toggle, elapsed<=age,
+  identity, list, rejections). Docs: notifications.md "Notification
+  objects" section (maps upstream obj:method -> Scheme, notes that the
+  methods live in upstream's stub not its wiki page).
+  Audit items F: clear-crashed-lockscreen and
+  exec-scheduled-prop-refresh-immediately still open.
+
+== BIND REGISTRIES REMOVED (record handles + counted locks, 2026-09-21) ==
+The design developed across the session's Q&A with Chris, implemented:
+  hl-bind-add! (renamed from hl-bind) returns an hl-bind RECORD — fields
+  tokens (the token LIST, canonical form; the display string is derived
+  by C++ joining tokens) + thunk. The record IS the association, the
+  Scheme analog of upstream's HL.Keybind userdata. C++ (SBindRef) locks
+  the record while any capture copy lives — Chez's COUNTED locks
+  (gcwrapper.c: locked_objects list, Sunlock removes one occurrence)
+  are the refcount: ctor/copy-ctor lock, dtor unlocks, assignment
+  deleted. The record's PINNED ADDRESS is stamped into the CBind's
+  argument metadata as "scheme:<addr>" — the identity tag.
+  Deleted: hl--binds entries for binds (the list survives ONLY for
+  timers/submaps/layouts — deferred, see below), g_binds (C++ vector),
+  bind ids (g_nextBindId no longer consumed by binds).
+  Unbind, two surfaces (upstream parity):
+    hl-unbind! b    — precise: scan mgr()->registry().binds() for
+                      argument == tag (registry() is public, Manager.hpp:39;
+                      the registry is the only index) -> removeBind(PBind).
+                      Returns #f when gone. Two same-key binds disambiguate
+                      by tag, tested in t-api.
+    hl-unbind-key!  — coarse (renamed from hl-unbind-key): removeBinds(key)
+                      kills every same-key bind, upstream hl.unbind(str)
+                      parity.
+  Unlock is ENTIRELY destruction-driven: unbind/reload clearBinds/plugin
+    shutdown erase registry SPs -> ~CBind -> ~std::function -> capture
+    copies die -> counted locks drain -> Sunlock. No manual unlock sites
+    (the old three erase-site unlocks never existed). reloadScheme's
+    g_binds loop DELETED (the manager's clearBinds does it); shutdown
+    tag-scans for "scheme:"-prefixed binds and removes them before
+    dlclose (collect-then-remove; erasing invalidates the span).
+  DEFERRED (stated on the record): timers/submaps/layout-provider specs
+    still register via hl--register into hl--binds — their fire paths
+    (fireSchemeBind(int)/fireSchemeStr) unchanged; migrating them to
+    records is the natural follow-up (timers additionally need their
+    control-API lookup resolved — record-based or self-erasing index).
+  Fire path: the capture calls fireSchemeBindRec(record) -> Scall1 of
+    hl--bind-fire-rec (new trampoline: extracts (hl-bind-thunk b),
+    guard + watchdog + result normalization identical to hl--bind-fire;
+    the id-path hl--bind-fire stays for timers/legacy gestures).
+  Tests: t-api converted (record shape, precise-unbind disambiguation,
+    double-unbind #f, survivor-fires-after-sibling-unbound, protocol
+    tests through hl--bind-fire-rec); wiki examples renamed globally
+    (t-zzz-docs re-ran every renamed block live); examples/hyprland.scm
+    renamed (t-zz-example).
+  Docs: binds.md Unbind section rewritten (record handle semantics),
+    all mentions renamed.
+
+== RECORD CALLBACKS EVERYWHERE + EVENT RENAMES (2026-09-22) ==
+Completion of the registry purge across ALL callback families (the binds
+  batch did binds; this did the rest). The mechanism everywhere is
+  SThunkRef (now in its own header, src/config/scheme/SThunkRef.hpp):
+  a counted Chez lock carried inside the C++ callback object; construction
+  and copying lock, destruction unlocks, assignment deleted.
+  EVENTS — 20 APIs stay 20 APIs (renamed hl-on-X -> hl-X-notification-add!
+  per Chris): each registration takes the handler, wraps it in an hl-event
+  record (type symbol + thunk), and locks the record inside the bus
+  connection's capture. fireScheme* helpers take the record; the prelude
+  helpers (hl--event-fire, hl--fire-*-rec) extract (hl-event-thunk b).
+  Return value: the RECORD, not a number (our analog of upstream's
+  subscription object). g_pendingStart now holds SThunkRefs. The event
+  vectors (g_windowEventListeners etc.) REMAIN — they are connection
+  owners, wholesale-cleared at reload, which IS the handler lifetime.
+  TIMERS — hl-after/hl-repeat return hl-timer records (interval+thunk);
+  the fire callback carries the locked record; control functions take
+  records via a SELF-ERASING index (one-shot erases its own entry on
+  completion; reload tears down the rest; g_timers/g_timerMs deleted).
+  NEW: hl-timer-cancel! (beyond-upstream, approved in plan discussion).
+  GESTURES — CSchemeGesture carries SThunkRef members (action/begin/
+  update/finish); c-hl-gesture takes the thunks, returns 0. hl-gesture-
+  add! returns #t both forms.
+  LAYOUTS — the provider carries the spec plist LOCKED (SSchemeLayout-
+  Provider.spec is an SThunkRef); hl--layout-event-spec receives it
+  directly; fnId deleted; hl-layout-add! returns the name string.
+  DELETED: hl--register, hl--binds, all bind/timer/gesture/layout ids.
+  Renamed in tests, examples, and the whole wiki (t-zzz-docs re-ran every
+  renamed block live). events.md now maps every event to its upstream
+  hl.on("...") name (standing order).
+  HONEST NOTES: (1) this batch was too wide for one go — the middle of it
+  was a long crash/paren hunt (bootstrap paren count, a lost trampoline,
+  a leftover int return truncating a handle). (2) The Chez scheme.h header
+  has NO include guard, so each TU must include it exactly once — enforced
+  with our own HYPRTHEME_SCHEME_H_SEEN macro.
 
 == AUDIT (2026-09-18 — removed as stale, kept as a record) ==
 - Unbind by key — DONE (hl-unbind-key, commit 1ada231).
@@ -469,3 +731,27 @@ Mouse binds: the "mouse:" key prefix implies the flag natively;
 'mouse #t is optional.
 Special-workspace targeting ("special:NAME") verified end-to-end
 (move + toggle + query).
+
+== DOC-EXAMPLE TEST (t-zzz-docs + wiki-examples.awk, 2026-09-21) ==
+tests/t-zzz-docs.sh extracts every ```scheme block from ../Hyprscheme.wiki
+  (113 blocks; paren-aware tests/wiki-examples.awk) and evals each through
+  hyprctl scheme in document order. Skips live in tests/wiki-examples.skip
+  (every entry carries a reason: schematic placeholders, pending built-in
+  gesture action strings). A missing wiki is a warning, not a failure.
+First run caught SIX real bugs (doc examples rotted where no test looked):
+  1. hl--push-val sent exact ints as doubles — INT options (e.g.
+     binds:drag_threshold) rejected upstream; now push-int for exact.
+  2. Same bug in hl-curve-add!: exact padding zeros in foreign double
+     slots — spring curves never worked. (bezier passed by luck.)
+  3. hl-workspace-rule-add! had no gap branch for scalar values — numeric
+     gaps_in/gaps_out/float_gaps hit the (numeric-only) field validator;
+     only plist gaps worked. Gap fields now route by NAME.
+  4. bind-globals.md example used Lua-style \. regex escaping in a Scheme
+     string (invalid read) — now \\.
+  5. config-options.md showed alist config values / alist getter results —
+     plist forms now.
+  6. window-rules.md named hl-window-tag / hl-window-clear-tags — real
+     names are hl-window-tag-add! / hl-window-tags-clear! (fixed earlier
+     in the docs batch).
+Regression cases for 1-3 live in tests/t-config.sh; 4-6 are covered by
+  t-zzz-docs itself executing the corrected blocks.
