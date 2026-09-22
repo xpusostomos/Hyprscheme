@@ -27,6 +27,12 @@ val '(hl-state-set! (quote api-x) 1)' '1'
 val '(hl-state-ref (quote api-x))' '1'
 val '(hl-state-ref (quote api-missing) (quote dflt))' 'dflt'
 ok '(list? (hl-state-keys))'
+# remove!: gone from ref and keys; removing a missing key is #f
+val '(hl-state-remove! (quote api-never))' '#f'
+val '(hl-state-set! (quote api-gone) 1)' '1'
+ok '(hl-state-remove! (quote api-gone))'
+val '(hl-state-ref (quote api-gone))' '#f'
+ok '(not (memq (quote api-gone) (hl-state-keys)))'
 
 # ---- window queries ---------------------------------------------------------
 ok '(string? (hl-window-title w))'
@@ -141,6 +147,37 @@ ok '(hl-window-group-set! w #f)'
 ok '(boolean? (hl-group-window-active! w 1))'
 ok '(boolean? (hl-group-window-move-next! w))'
 ok '(hl-window-group-set! w)'
+
+# ---- groups as objects (upstream HL.Group parity) ----------------------------
+# deterministic start: release the global group lock (set above), force w and
+# w2 out of any group, then make w a group
+noerr '(begin (hl-groups-lock-set! #f) (hl-window-group-set! w #f) (hl-window-group-set! w2 #f) #t)'
+ok '(begin (hl-window-group-set! w #t) #t)'
+ok '(let* ((gs (hl-workspace-groups (hl-window-workspace w)))
+       (g (and (pair? gs) (car gs))))
+     (and (hl-group? g) (hl-group=? g g)))'
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (= 1 (hl-group-size g)))'
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (begin (hl-group-add! g w2)
+       (and (= 2 (hl-group-size g))
+         (exists (lambda (m) (hl-window=? m w2)) (hl-group-members g)))))'
+ok '(let* ((g (car (hl-workspace-groups (hl-window-workspace w))))
+       (c (hl-group-current g)))
+     (or (not c) (hl-window? c)))'
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (and (integer? (hl-group-current-index g)) (>= (hl-group-current-index g) 1)
+       (boolean? (hl-group-locked? g)) (boolean? (hl-group-denied? g))))'
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (begin (hl-group-remove! g w2)
+       (and (= 1 (hl-group-size g))
+         (hl-group-add! g w2)          ; re-add after remove
+         (hl-group-add! g w2))))       ; ...and again: no-op, not an error'
+# dissolve: remove w, ungroup w2 -> the group dies; old records read stale (#f)
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (begin (hl-group-remove! g w2)          ; group is now {w} alone
+            (hl-window-group-set! w #f)      ; ungroup the last member
+            (not (hl-group-size g))))'       ; -> dissolved, stale record reads #f
 
 # sacrificial window: kill, then close
 $SCHEME '(hl-exec-shell! "foot -a api-kill")' >/dev/null
@@ -358,7 +395,7 @@ $SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" (quote matc
 $SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" (quote match) (quote (namespace "^nope$")) (quote blur) #f))' >/dev/null
 ok '(hl-rule? api-layer-rule)'
 ok '(boolean? (hl-rule-enabled? api-layer-rule))'
-ok '(hl-rule-set-enabled api-layer-rule #f)'
+ok '(hl-rule-enabled-set! api-layer-rule #f)'
 
 # ---- layouts ----------------------------------------------------------------
 ok '(string? (hl-layout-add! "api-layout" (quote recalculate) (lambda (count W H wins) (quote ()))))'
@@ -501,6 +538,44 @@ bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (dis
 [[ "$bad_gest" == *"action is required"* ]] || { echo "FAIL: missing gesture action not rejected => [$bad_gest]"; FAILED=1; }
 ok '(hl-event? (hl-screenshare-state-notification-add! (lambda (a t n) #f)))'
 ok '(hl-event? (hl-keyboard-key-notification-add! (lambda (k t s) #f)))'
+
+# ---- layer surfaces as objects (upstream HL.LayerSurface parity) -------------
+ok '(list? (hl-layers))'
+ok '(let ((ls (hl-layers)))
+     (or (null? ls) (and (hl-layer? (car ls)) (hl-layer-alive? (car ls)))))'
+ok '(let ((ls (hl-layers)))
+     (or (null? ls)
+       (and (string? (hl-layer-namespace (car ls)))
+         (let ((a (hl-layer-address (car ls)))) (or (not a) (equal? (substring a 0 2) "0x"))) (hl-layer-mapped? (car ls))
+         (integer? (hl-layer-level (car ls))) (integer? (hl-layer-kb-interactivity (car ls)))
+         (boolean? (hl-layer-above-fullscreen? (car ls))))))'
+ok '(let ((ls (hl-layers)))
+     (or (null? ls)
+       (let* ((s (car ls)) (pos (hl-layer-position s)) (sz (hl-layer-size s)))
+         (and (or (not pos) (and (number? (car pos)) (number? (cdr pos))))
+           (or (not sz) (and (number? (car sz)) (number? (cdr sz))))))))'
+ok '(let* ((ls (hl-layers))
+       (s (and (pair? ls) (car ls)))
+       (m (and s (hl-layer-monitor s))))
+     (or (not m) (hl-monitor? m)))'
+ok '(let ((ls (hl-layers)))
+     (or (null? ls)
+       (let ((s (car ls)))
+         (and (hl-notification-remove! s) (not (hl-notification-active? s))))))'
+
+# ---- cancel: unlisten parity (upstream subscription:remove / is_active) ------
+ok '(hl-notification-active? (hl-window-title-notification-add! (lambda (w) #f)))'
+ok '(let ((e (hl-window-title-notification-add! (lambda (w) #f))))
+     (and (hl-notification-remove! e) (not (hl-notification-active? e)) (not (hl-notification-remove! e))))'
+# a cancelled handler does NOT fire: register, cancel, open a window, assert silence
+ok '(begin (hl-state-set! (quote ev-cancelled) 0)
+       (hl-notification-remove! (hl-window-open-notification-add!
+          (lambda (w) (hl-state-set! (quote ev-cancelled) 1))))
+       #t)'
+$SCHEME '(hl-exec-shell! "foot -a ev-cancelled")' >/dev/null
+WAIT_FOR 8 '(let ((w (hl-window-from "class:^ev-cancelled$"))) (if w #t #f))' >/dev/null || { echo "FAIL: ev-cancelled fixture never appeared"; FAILED=1; }
+sleep 0.5
+val '(hl-state-ref (quote ev-cancelled))' '0'
 
 # ---- reload (LAST: the animation checks above must precede it) ---------------
 # config-unload fires BEFORE the reload; the flag survives via hl--state

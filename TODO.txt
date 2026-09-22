@@ -278,7 +278,7 @@ longer parses strings; hl--split-lines and hl--unmarshal are deleted.
   - submap context returns a (name . reset) pair.
   - gestures: registration returns ids (list / single id); the live update
     fires a proper (dx dy scale) numeric list via the new hl--fire-list.
-  - hl-layers returns ((monitor . namespace) ...); hl-loaded-plugins a list.
+  - hl-layers returns hl-layer records; hl-loaded-plugins a list.
   - hl-config-get returns the value natively (bool/number/string, tables as
     PLISTS — keys symbolified, integral numbers exact) — mirrors the plist
     form hl-config-add! accepts. hl-monitor-reserved likewise a plist.
@@ -369,7 +369,8 @@ Batch 2026-09-19:
   reload wipes the generation, so the check rides the suite's final
   reload; hl--state carries the flag across generations).
 - hl-on-layer-open / hl-on-layer-close — layer.opened/closed; callback
-  receives the layer NAMESPACE string (no layer handle type exists; the
+  receives the layer NAMESPACE string (the full surface object is reachable
+  via (hl-layers 'namespace NS); the
   namespace is the practical identity). Registration-only coverage.
 - hl-window-monitor-set! W MON — convenience; upstream has no direct
   window→monitor dispatch (it moves to the target's ACTIVE workspace,
@@ -707,6 +708,38 @@ Completion of the registry purge across ALL callback families (the binds
   a leftover int return truncating a handle). (2) The Chez scheme.h header
   has NO include guard, so each TU must include it exactly once — enforced
   with our own HYPRTHEME_SCHEME_H_SEEN macro.
+
+== RULE HANDLES MIGRATED (record + index, 2026-09-22) ==
+The last id+registry family converted: hl-window-rule-add!/hl-layer-
+  rule-add! return hl-rule RECORDS (fields kind 'window/'layer, name).
+  g_ruleHandles (map int->IRule) and g_nextRuleId deleted; replaced by
+  g_ruleIndex keyed by the record's address, each entry holding a
+  SThunkRef LOCK on the record (no user capture keeps a rule handle
+  alive, so the index holds the lock — the timer pattern inverted).
+  Entries erase ONLY at the generation boundary (clearSchemeRules) —
+  rules live for their config generation, so that is their lifetime.
+  hl-rule-enabled-set! (renamed from hl-rule-set-enabled, toggle-
+  convention: absent = toggle) + hl-rule-enabled? take records.
+  Wrapper: hl--window-rule-mk makes the record first and passes it to
+  commit. Renamed in tests, t-rules.sh, wiki (rules/window-rules/
+  layer-rules). Stale records from dead generations fail to resolve
+  (unknown rule) — same contract as timers.
+
+== EVENT CANCEL (unlisten parity, 2026-09-22) ==
+hl-event-cancel! / hl-event-active? — parity after all: upstream's
+  hl.on() returns an HL.EventSubscription with remove()/is_active()
+  (LuaEventSubscription.cpp) — the earlier "beyond parity" note in the
+  timers batch was wrong; per-handler unlistening EXISTS upstream.
+  Implementation: g_windowEventListeners + g_submapListeners (two flat
+  vectors) replaced by ONE map, g_eventConnections (record address ->
+  CHyprSignalListener). Cancel = erase the map entry; the SP drop
+  unregisters from the bus (listen contract: unregistered when the ptr
+  is lost) and the connection's destruction releases the handler's
+  record lock. Reload clears the map wholesale — still the handler
+  lifetime by design. start-notification records are not cancelable
+  (start fires immediately; no connection object exists for them).
+  Behavioral test: register window-open handler -> cancel -> spawn a
+  window -> assert the handler did NOT fire.
 
 == AUDIT (2026-09-18 — removed as stale, kept as a record) ==
 - Unbind by key — DONE (hl-unbind-key, commit 1ada231).

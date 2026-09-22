@@ -9,7 +9,6 @@
 
 namespace Config::Scheme::Internals {
     extern bool g_up;         // interpreter + bootstrap ready
-    extern int  g_nextBindId; // id counter shared by binds/timers/layouts
 
     // mints a window handle: a heap-allocated weak ref whose address crosses
     // to Scheme inside a guardian cell (see SchemeManager.cpp — the guardian

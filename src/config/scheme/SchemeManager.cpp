@@ -469,6 +469,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-keyboard-key-listen (foreign-procedure "hl-scheme-keyboard-key-listen" (scheme-object) int))
 (define c-hl-unbind-rec (foreign-procedure "hl-scheme-unbind-rec" (scheme-object) int))
 (define c-hl-unbind-key (foreign-procedure "hl-scheme-unbind-key" (string) int))
+(define c-hl-event-cancel (foreign-procedure "hl-scheme-event-cancel" (scheme-object) int))
+(define c-hl-event-active (foreign-procedure "hl-scheme-event-active" (scheme-object) int))
 (define c-hl-window-same (foreign-procedure "hl-scheme-window-same" (integer-64 integer-64) int))
 (define c-hl-current-submap (foreign-procedure "hl-scheme-current-submap" () scheme-object))
 (define c-hl-cursor-pos (foreign-procedure "hl-scheme-cursor-pos" () scheme-object))
@@ -476,6 +478,17 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-monitor-event-listen (foreign-procedure "hl-scheme-monitor-event-listen" (scheme-object int) int))
 (define c-hl-workspace-event-listen (foreign-procedure "hl-scheme-workspace-event-listen" (scheme-object int) int))
 (define c-hl-workspace-change-id (foreign-procedure "hl-scheme-workspace-change-id" (string double) int))
+(define c-hl-workspace-groups (foreign-procedure "hl-scheme-workspace-groups" (integer-64) scheme-object))
+(define c-hl-group-members (foreign-procedure "hl-scheme-group-members" (integer-64) scheme-object))
+(define c-hl-group-current (foreign-procedure "hl-scheme-group-current" (integer-64) scheme-object))
+(define c-hl-group-current-idx (foreign-procedure "hl-scheme-group-current-idx" (integer-64) scheme-object))
+(define c-hl-group-size (foreign-procedure "hl-scheme-group-size" (integer-64) scheme-object))
+(define c-hl-group-locked (foreign-procedure "hl-scheme-group-locked" (integer-64) scheme-object))
+(define c-hl-group-denied (foreign-procedure "hl-scheme-group-denied" (integer-64) scheme-object))
+(define c-hl-group-alive (foreign-procedure "hl-scheme-group-alive" (integer-64) int))
+(define c-hl-group-same (foreign-procedure "hl-scheme-group-same" (integer-64 integer-64) int))
+(define c-hl-group-add (foreign-procedure "hl-scheme-group-add" (integer-64 integer-64 integer-64) int))
+(define c-hl-group-remove (foreign-procedure "hl-scheme-group-remove" (integer-64 integer-64) int))
 (define c-hl-layout-add (foreign-procedure "hl-scheme-layout-add" (string scheme-object) int))
 
 ;; pure-function layout; see SchemeLayout.hpp for the contract
@@ -637,10 +650,10 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-rule-match (foreign-procedure "hl-rule-match" (string string) int))
 (define c-hl-window-rule-effect (foreign-procedure "hl-window-rule-effect" (string string) int))
 (define c-hl-layer-rule-effect (foreign-procedure "hl-layer-rule-effect" (string string) int))
-(define c-hl-window-rule-commit (foreign-procedure "hl-window-rule-commit" () double))
-(define c-hl-layer-rule-commit (foreign-procedure "hl-layer-rule-commit" () double))
-(define c-hl-rule-set-enabled (foreign-procedure "hl-rule-set-enabled" (double int) int))
-(define c-hl-rule-enabled (foreign-procedure "hl-rule-enabled" (double) int))
+(define c-hl-window-rule-commit (foreign-procedure "hl-window-rule-commit" (scheme-object) int))
+(define c-hl-layer-rule-commit (foreign-procedure "hl-layer-rule-commit" (scheme-object) int))
+(define c-hl-rule-set-enabled (foreign-procedure "hl-rule-set-enabled" (scheme-object int) int))
+(define c-hl-rule-enabled (foreign-procedure "hl-rule-enabled" (scheme-object) int))
 (define c-hl-workspace-rule-begin (foreign-procedure "hl-workspace-rule-begin" (string int) int))
 (define c-hl-workspace-rule-str (foreign-procedure "hl-workspace-rule-str" (string string) int))
 (define c-hl-workspace-rule-num (foreign-procedure "hl-workspace-rule-num" (string double) int))
@@ -659,7 +672,19 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-active-special-workspace (foreign-procedure "hl-active-special-workspace" () scheme-object))
 (define c-hl-last-workspace (foreign-procedure "hl-last-workspace" () scheme-object))
 (define c-hl-workspace-windows (foreign-procedure "hl-workspace-windows" (string) scheme-object))
-(define c-hl-layers (foreign-procedure "hl-layers" () scheme-object))
+(define c-hl-layers (foreign-procedure "hl-layers" (integer-64 scheme-object) scheme-object))
+(define c-hl-layer-alive (foreign-procedure "hl-layer-alive" (integer-64) int))
+(define c-hl-layer-same (foreign-procedure "hl-layer-same" (integer-64 integer-64) int))
+(define c-hl-layer-address (foreign-procedure "hl-layer-address" (integer-64) scheme-object))
+(define c-hl-layer-pid (foreign-procedure "hl-layer-pid" (integer-64) scheme-object))
+(define c-hl-layer-monitor (foreign-procedure "hl-layer-monitor" (integer-64) scheme-object))
+(define c-hl-layer-namespace (foreign-procedure "hl-layer-namespace" (integer-64) scheme-object))
+(define c-hl-layer-level (foreign-procedure "hl-layer-level" (integer-64) scheme-object))
+(define c-hl-layer-mapped (foreign-procedure "hl-layer-mapped" (integer-64) scheme-object))
+(define c-hl-layer-kb-interactivity (foreign-procedure "hl-layer-kb-interactivity" (integer-64) scheme-object))
+(define c-hl-layer-above-fs (foreign-procedure "hl-layer-above-fs" (integer-64) scheme-object))
+(define c-hl-layer-position (foreign-procedure "hl-layer-position" (integer-64) scheme-object))
+(define c-hl-layer-size (foreign-procedure "hl-layer-size" (integer-64) scheme-object))
 (define c-hl-is-key-down (foreign-procedure "hl-is-key-down" (string) int))
 (define c-hl-loaded-plugins (foreign-procedure "hl-loaded-plugins" () scheme-object))
 (define c-hl-version (foreign-procedure "hl-version" () scheme-object))
@@ -1399,7 +1424,11 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;;   content no_close_for scrolling_width rounding opacity border_color
 ;;   idle_inhibit animation tag min_size max_size ... (the window-rule page
 ;;   has the full list with value forms)
-(define-record-type hl-rule (fields id))
+;; rules: the record IS the handle - the rule KIND ('window or 'layer) and
+;; the NAME (or "" for anonymous). The index C++-side locks the record while
+;; the rule is registered (rules live for their config generation); a stale
+;; record from a dead generation just fails to resolve.
+(define-record-type hl-rule (fields kind name))
 
 (define (hl--rule-spec-value v)
   (cond ((string? v) v)
@@ -1407,16 +1436,17 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         ((number? v) (number->string v))
         (else #f)))
 
-(define (hl--window-rule-mk name spec begin-fn effect-fn commit-fn what)
+(define (hl--window-rule-mk name spec begin-fn effect-fn commit-fn what kind)
   (let ((enabled (hl--plist-get spec 'enabled #t)))
     (if (not (= 0 (begin-fn (if name (hl--str name) "") (if enabled 1 0))))
         (errorf what "~a" (c-hl-config-last-error))
         (let loop ((rest spec))
           (cond ((null? rest)
-                 (let ((id (commit-fn)))
-                   (if (< id 0)
+                 ;; done: make the handle record, commit, index it C++-side
+                 (let ((rec (make-hl-rule kind (or name ""))))
+                   (if (not (= 0 (commit-fn rec)))
                        (errorf what "~a" (c-hl-config-last-error))
-                       (make-hl-rule id))))
+                       rec)))
                 (else
                  (let* ((tail (hl--plist-cdr rest))
                         (k  (hl--str (car rest)))
@@ -1444,18 +1474,82 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                                     (errorf what "~a" (c-hl-config-last-error))))))))))))))
 
 (define (hl-window-rule-add! name . spec)
-  (hl--window-rule-mk name spec c-hl-window-rule-begin c-hl-window-rule-effect c-hl-window-rule-commit 'hl-window-rule-add!))
+  (hl--window-rule-mk name spec c-hl-window-rule-begin c-hl-window-rule-effect c-hl-window-rule-commit 'hl-window-rule-add! 'window))
 
 (define (hl-layer-rule-add! name . spec)
-  (hl--window-rule-mk name spec c-hl-layer-rule-begin c-hl-layer-rule-effect c-hl-layer-rule-commit 'hl-layer-rule-add!))
+  (hl--window-rule-mk name spec c-hl-layer-rule-begin c-hl-layer-rule-effect c-hl-layer-rule-commit 'hl-layer-rule-add! 'layer))
 
-(define (hl-rule-set-enabled rule enabled)
-  (if (= 0 (c-hl-rule-set-enabled (exact->inexact (hl-rule-id rule)) (if enabled 1 0)))
+;; absent -> toggle (via the enabled? query); #t/#f -> explicit set
+(define (hl-rule-enabled-set! rule . on?)
+  (if (= 0 (c-hl-rule-set-enabled rule
+                            (if (if (null? on?) (not (hl-rule-enabled? rule)) (car on?)) 1 0)))
       #t
-      (errorf 'hl-rule-set-enabled "unknown rule")))
+      (errorf 'hl-rule-enabled-set! "unknown rule")))
 
 (define (hl-rule-enabled? rule)
-  (= 1 (c-hl-rule-enabled (exact->inexact (hl-rule-id rule)))))
+  (= 1 (c-hl-rule-enabled rule)))
+
+;; ---- groups as objects (upstream HL.Group parity) ----------------------------
+;; a group is the tabbed-window arrangement on a workspace; groups dissolve
+;; behind our backs, so handles follow the weak-handle model (stale -> #f).
+;; passives only: state reads + two mutators; NO callbacks (upstream parity).
+(define-record-type hl-group (fields cell))
+(define (hl-group-id g) (car (hl-group-cell g)))
+
+(define (hl--mint-group v)
+  (let* ((v (inexact->exact v))
+      (cell (if (and (integer? v) (exact? v) (>= v 0) (< v 140737488355328))
+             (cons v 0)
+             (errorf 'hl--mint-group "implausible handle value ~s" v)))
+      (r (make-hl-group cell)))
+    (hl--handle-guardian cell)
+    r))
+
+;; => list of hl-group records on the workspace
+(define (hl-workspace-groups WS)
+  (let ((l (c-hl-workspace-groups (hl-workspace-id WS))))
+    (if l (map hl--mint-group l) '())))
+
+(define (hl-group-members g)
+  (let ((l (c-hl-group-members (hl-group-id g))))
+    (if l (map hl--mint-window l) '())))
+
+(define (hl-group-size g)
+  (c-hl-group-size (hl-group-id g)))
+
+;; => the currently-focused member as a window handle, or #f
+(define (hl-group-current g)
+  (let ((id (c-hl-group-current (hl-group-id g))))
+    (and id (hl--mint-window id))))
+
+;; => 1-based position of the focused member
+(define (hl-group-current-index g)
+  (c-hl-group-current-idx (hl-group-id g)))
+
+(define (hl-group-locked? g)
+  (eq? (c-hl-group-locked (hl-group-id g)) #t))
+
+(define (hl-group-denied? g)
+  (eq? (c-hl-group-denied (hl-group-id g)) #t))
+
+(define (hl-group-alive? g)
+  (eq? (c-hl-group-alive (hl-group-id g)) #t))
+
+(define (hl-group=? a b)
+  (= 1 (c-hl-group-same (hl-group-id a) (hl-group-id b))))
+
+;; add WINDOW to the group, optionally at a 1-based INDEX; errors when the
+;; group is denied or the window cannot be grouped into it
+(define (hl-group-add! g window . index)
+  (if (= 0 (c-hl-group-add (hl-group-id g) (hl-window-id window)
+                           (if (null? index) -1 (exact (car index)))))
+      #t
+      (errorf 'hl-group-add! "~a" (c-hl-config-last-error))))
+
+(define (hl-group-remove! g window)
+  (if (= 0 (c-hl-group-remove (hl-group-id g) (hl-window-id window)))
+      #t
+      (errorf 'hl-group-remove! "~a" (c-hl-config-last-error))))
 
 ;; workspace rules: (hl-workspace-rule-add! "3" 'monitor "DP-1" 'layout "master")
 ;; fields: monitor default persistent gaps_in gaps_out float_gaps border_size
@@ -1747,8 +1841,72 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (eq? (c-hl-monitor-same (hl-monitor-id a) (hl-monitor-id b)) #t))
 
 ;; => list of (monitor . namespace) pairs
-(define (hl-layers)
-  (or (c-hl-layers) '()))   ; ((monitor . namespace) ...)
+;; ---- layer surfaces as objects (upstream HL.LayerSurface parity) -------------
+;; layer surfaces die independently -> weak handles via the guardian;
+;; every getter returns #f when the surface is gone. NO callbacks.
+;; filters are plist-style: (hl-layers), (hl-layers 'monitor MON),
+;; (hl-layers 'namespace "ns"), or combined.
+(define-record-type hl-layer (fields cell))
+(define (hl-layer-id s) (car (hl-layer-cell s)))
+
+(define (hl--mint-layer v)
+  (let* ((v (inexact->exact v))
+      (cell (if (and (integer? v) (exact? v) (>= v 0) (< v 140737488355328))
+             (cons v 0)
+             (errorf 'hl--mint-layer "implausible handle value ~s" v)))
+      (r (make-hl-layer cell)))
+    (hl--handle-guardian cell)
+    r))
+
+(define (hl-layers . filters)
+  (let* ((mon  (hl--plist-get filters 'monitor #f))
+         (ns   (hl--plist-get filters 'namespace #f))
+         (monId (if (and mon (hl-monitor? mon)) (hl-monitor-id mon) 0))
+         (l (c-hl-layers monId (and ns (hl--str ns)))))
+    (if l (map hl--mint-layer l) '())))
+
+(define (hl-layer-alive? s)
+  (= 1 (c-hl-layer-alive (hl-layer-id s))))
+
+(define (hl-layer=? a b)
+  (= 1 (c-hl-layer-same (hl-layer-id a) (hl-layer-id b))))
+
+;; => stable 0x… identity (same idea as hl-window-address)
+(define (hl-layer-address s)
+  (c-hl-layer-address (hl-layer-id s)))
+
+(define (hl-layer-pid s)
+  (c-hl-layer-pid (hl-layer-id s)))
+
+;; => monitor handle
+(define (hl-layer-monitor s)
+  (let ((id (c-hl-layer-monitor (hl-layer-id s))))
+    (and id (hl--mint-monitor id))))
+
+(define (hl-layer-namespace s)
+  (c-hl-layer-namespace (hl-layer-id s)))
+
+;; => int — shell layer: 0 background / 1 bottom / 2 top / 3 overlay
+(define (hl-layer-level s)
+  (c-hl-layer-level (hl-layer-id s)))
+
+(define (hl-layer-mapped? s)
+  (eq? (c-hl-layer-mapped (hl-layer-id s)) #t))
+
+;; => int — 0 none / 1 exclusive / 2 on-demand (lock screens: exclusive)
+(define (hl-layer-kb-interactivity s)
+  (c-hl-layer-kb-interactivity (hl-layer-id s)))
+
+(define (hl-layer-above-fullscreen? s)
+  (eq? (c-hl-layer-above-fs (hl-layer-id s)) #t))
+
+;; => (x . y), monitor-local
+(define (hl-layer-position s)
+  (c-hl-layer-position (hl-layer-id s)))
+
+;; => (width . height)
+(define (hl-layer-size s)
+  (c-hl-layer-size (hl-layer-id s)))
 
 ;; key by keysym name: (hl-is-key-down "Return")
 (define (hl-is-key-down key)
@@ -2370,6 +2528,13 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-unbind-key! key)
   (= 0 (c-hl-unbind-key (hl--str key))))
 
+;; unlisten: drop the connection; the record goes inert. upstream
+;; HL.EventSubscription:remove parity. #f when already gone.
+(define (hl-notification-remove! rec)
+  (= 0 (c-hl-event-cancel rec)))
+(define (hl-notification-active? rec)
+  (= 1 (c-hl-event-active rec)))
+
 (define (hl-current-submap)
   (or (c-hl-current-submap) ""))
 
@@ -2416,6 +2581,19 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let loop ((l hl--state) (acc '()))
     (if (null? l) (reverse acc) (loop (cddr l) (cons (car l) acc)))))
 
+;; remove KEY from the cross-reload state; #t when it was there, #f if not.
+;; (hyprscheme extension — upstream Lua has no cross-reload state at all)
+(define (hl-state-remove! k)
+  (let loop ((l hl--state) (acc '()))
+    (cond ((null? l)
+           (set! hl--state (reverse acc))
+           #f)
+          ((eq? (car l) k)
+           (set! hl--state (append (reverse acc) (cddr l)))
+           #t)
+          (else (loop (cddr l)
+                      (cons (cadr l) (cons (car l) acc)))))))
+
 (define c-hl-handle-free (foreign-procedure "hl-handle-free" (unsigned-64) int))
 
 ;; deletes the C++ weak ref behind a dead handle's cell. Allocation-free by
@@ -2440,7 +2618,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 namespace Config::Scheme::Internals {
     bool g_up          = false; // interpreter + bootstrap ready
-    int  g_nextBindId  = 0;
 
     // ---- object handles -------------------------------------------------------
     // A handle is a heap-allocated weak ref; the Scheme record carries its
@@ -2480,8 +2657,11 @@ namespace Config::Scheme {
     // (the handler closures travel inside the connections, locked)
     // event subscriptions: C++ owns the listener handles (dropping one
     // unsubscribes); Scheme owns the handler closures by id
-    static std::vector<Hyprutils::Signal::CHyprSignalListener> g_submapListeners;
-    static std::vector<Hyprutils::Signal::CHyprSignalListener> g_windowEventListeners;
+    // event connections: record address -> the subscription that keeps the
+    // handler plugged into the bus (lost ptr = unregistered, per the listen
+    // contract). Entries die three ways: hl-event-cancel!, the reload clear
+    // (generation boundary = handler lifetime), plugin teardown.
+    static std::unordered_map<uintptr_t, Hyprutils::Signal::CHyprSignalListener> g_eventConnections;
 
     // lifecycle: the start event is dispatched by an init-time listener
     // (covers the plugin-auto-loaded-at-startup path, where the config load
@@ -2541,7 +2721,7 @@ namespace Config::Scheme {
         }).detach();
     }
 
-    // defined below (device section); used by the bind result reader
+    // defined below (device/config section); used by the bind result reader
     static std::string schemeDatumToStr(ptr p);
 
     static Keybinds::SBindResult fireSchemeBind(int id) {
@@ -2985,7 +3165,7 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
 
-        g_submapListeners.emplace_back(Event::bus()->m_events.keybinds.submap.listen([ref = SThunkRef(record)](const std::string& name) {
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.keybinds.submap.listen([ref = SThunkRef(record)](const std::string& name) {
             fireSchemeStr(ref.obj, name);
         }));
         return 0;
@@ -4090,6 +4270,158 @@ namespace Config::Scheme {
     static lua_State*  g_configScratch = nullptr;
     static std::string g_configError;
 
+    // ---- groups as objects (upstream HL.Group parity) --------------------------
+    // groups dissolve behind our backs -> weak handles via the guardian (the
+    // record-cell model); every getter returns #f when the group is gone
+    using PHLGROUPREF = Hyprutils::Memory::CWeakPointer<Desktop::View::CGroup>;
+
+    static ptr hlSchemeWorkspaceGroups(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ws = workspaceFromId(id);
+        if (!ws)
+            return Sfalse;
+        ptr                                 l = Snil;
+        std::vector<const Desktop::View::CGroup*> pushed;
+        for (const auto& w : Desktop::windowState()->windows()) {
+            if (w->m_workspace != ws || !w->grouping().group())
+                continue;
+            const auto* g = w->grouping().group().get();
+            if (std::find(pushed.begin(), pushed.end(), g) != pushed.end())
+                continue;
+            pushed.push_back(g);
+            l = Scons(Sinteger((uintptr_t)(new SHandle<PHLGROUPREF>(w->grouping().group()))), l);
+        }
+        // members were collected head-first: reverse for document order
+        ptr out = Snil;
+        for (ptr p = l; Spairp(p); p = Scdr(p))
+            out = Scons(Scar(p), out);
+        return out;
+    }
+
+    static SP<Desktop::View::CGroup> groupFromHandle(long long id) {
+        return reinterpret_cast<SHandle<PHLGROUPREF>*>(id)->wp.lock();
+    }
+
+    static int hlSchemeGroupAlive(long long id) {
+        if (!g_up)
+            return -1;
+        return groupFromHandle(id) ? 1 : 0;
+    }
+
+    static int hlSchemeGroupSame(long long a, long long b) {
+        if (!g_up)
+            return -1;
+        const auto ga = groupFromHandle(a);
+        const auto gb = groupFromHandle(b);
+        return (ga && gb && ga.get() == gb.get()) ? 1 : 0;
+    }
+
+    static ptr hlSchemeGroupMembers(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto group = groupFromHandle(id);
+        if (!group)
+            return Sfalse;
+        ptr l = Snil;
+        for (const auto& grouped : group->windows()) {
+            const auto w = grouped.lock();
+            if (!w)
+                continue;
+            l = Scons(Sinteger(Internals::mintWindowHandle(w)), l);
+        }
+        ptr out = Snil;
+        for (ptr p = l; Spairp(p); p = Scdr(p))
+            out = Scons(Scar(p), out);
+        return out;
+    }
+
+    static ptr hlSchemeGroupCurrent(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto group = groupFromHandle(id);
+        if (!group)
+            return Sfalse;
+        const auto current = group->current();
+        if (!current)
+            return Sfalse;
+        return Sinteger(Internals::mintWindowHandle(current));
+    }
+
+    static ptr hlSchemeGroupCurrentIdx(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto group = groupFromHandle(id);
+        if (!group)
+            return Sfalse;
+        return Sinteger(sc<int64_t>(group->getCurrentIdx()) + 1); // 1-based, upstream parity
+    }
+
+    static ptr hlSchemeGroupSize(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto group = groupFromHandle(id);
+        return group ? Sinteger(sc<int64_t>(group->size())) : Sfalse;
+    }
+
+    static ptr hlSchemeGroupLocked(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto group = groupFromHandle(id);
+        if (!group)
+            return Sfalse;
+        return group->locked() ? Strue : Sfalse;
+    }
+
+    static ptr hlSchemeGroupDenied(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto group = groupFromHandle(id);
+        if (!group)
+            return Sfalse;
+        return group->denied() ? Strue : Sfalse;
+    }
+
+    // index crosses as -1 = append; 1-based otherwise (upstream parity)
+    static int hlSchemeGroupAdd(long long id, long long winId, long long index) {
+        if (!g_up)
+            return -1;
+        const auto group = groupFromHandle(id);
+        if (!group)
+            return -1;
+        const auto window = windowFromId(winId);
+        if (!window)
+            return -1;
+        if (window->grouping().group() == group)
+            return 0; // already a member of THIS group: no-op (upstream parity)
+        if (group->denied()) {
+            g_configError = "hl-group-add!: target group is denied";
+            return -2;
+        }
+        if (!window->grouping().canBeGroupedInto(group)) {
+            g_configError = "hl-group-add!: window cannot be added to group";
+            return -2;
+        }
+        group->add(window, index >= 0 ? std::optional<size_t>(sc<size_t>(index - 1)) : std::nullopt);
+        return 0;
+    }
+
+    static int hlSchemeGroupRemove(long long id, long long winId) {
+        if (!g_up)
+            return -1;
+        const auto group = groupFromHandle(id);
+        if (!group)
+            return -1;
+        const auto window = windowFromId(winId);
+        if (!window || !group->has(window)) {
+            g_configError = "hl-group-remove!: window is not a group member";
+            return -2;
+        }
+        group->remove(window);
+        return 0;
+    }
+
+
     static Config::Lua::ILuaConfigValue* configValueByKey(const char* key) {
         auto* mgr = sc<Lua::CConfigManager*>(Config::mgr().get());
         if (!mgr || !key || !*key)
@@ -4845,8 +5177,11 @@ namespace Config::Scheme {
     static SP<Desktop::Rule::CWindowRule>                                  g_curWindowRule;
     static SP<Desktop::Rule::CLayerRule>                                   g_curLayerRule;
     static std::optional<Config::CWorkspaceRule>                           g_curWorkspaceRule;
-    static std::unordered_map<int, SP<Desktop::Rule::IRule>>               g_ruleHandles;
-    static int                                                             g_nextRuleId = 1;
+    // rule handles: record address -> the rule, with the record LOCKED in the
+    // entry (SThunkRef) — no user capture keeps a rule handle alive, so the
+    // index holds the lock. Entries erase at the generation boundary only:
+    // rules live for their config generation, so that IS their lifetime.
+    static std::unordered_map<uintptr_t, std::pair<SP<Desktop::Rule::IRule>, SThunkRef>> g_ruleIndex;
 
     // called from reloadScheme: the config reload cleared the engine's rules
     static void clearSchemeRules() {
@@ -4861,7 +5196,7 @@ namespace Config::Scheme {
         g_curWindowRule.reset();
         g_curLayerRule.reset();
         g_curWorkspaceRule.reset();
-        g_ruleHandles.clear();
+        g_ruleIndex.clear();
     }
 
     static int hlWindowRuleBegin(const char* name, int enabled) {
@@ -4957,39 +5292,39 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static double hlWindowRuleCommit() {
+    static int hlWindowRuleCommit(ptr record) {
         if (!g_up || !g_curWindowRule)
             return -1;
-        const int id = g_nextRuleId++;
-        g_ruleHandles.emplace(id, g_curWindowRule);
+        g_ruleIndex.emplace(reinterpret_cast<uintptr_t>(record),
+                            std::make_pair(g_curWindowRule, SThunkRef(record)));
         Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_WINDOW_STATES);
         g_curWindowRule.reset();
-        return id;
-    }
-
-    static double hlLayerRuleCommit() {
-        if (!g_up || !g_curLayerRule)
-            return -1;
-        const int id = g_nextRuleId++;
-        g_ruleHandles.emplace(id, g_curLayerRule);
-        Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_RULES);
-        g_curLayerRule.reset();
-        return id;
-    }
-
-    static int hlRuleSetEnabled(double id, int enabled) {
-        if (!g_up)
-            return -1;
-        const auto it = g_ruleHandles.find(sc<int>(id));
-        if (it == g_ruleHandles.end())
-            return -1;
-        it->second->setEnabled(enabled != 0);
         return 0;
     }
 
-    static int hlRuleEnabled(double id) {
-        const auto it = g_ruleHandles.find(sc<int>(id));
-        return (it != g_ruleHandles.end() && it->second->isEnabled()) ? 1 : 0;
+    static int hlLayerRuleCommit(ptr record) {
+        if (!g_up || !g_curLayerRule)
+            return -1;
+        g_ruleIndex.emplace(reinterpret_cast<uintptr_t>(record),
+                            std::make_pair(g_curLayerRule, SThunkRef(record)));
+        Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_RULES);
+        g_curLayerRule.reset();
+        return 0;
+    }
+
+    static int hlRuleSetEnabled(ptr record, int enabled) {
+        if (!g_up)
+            return -1;
+        const auto it = g_ruleIndex.find(reinterpret_cast<uintptr_t>(record));
+        if (it == g_ruleIndex.end())
+            return -1;
+        it->second.first->setEnabled(enabled != 0);
+        return 0;
+    }
+
+    static int hlRuleEnabled(ptr record) {
+        const auto it = g_ruleIndex.find(reinterpret_cast<uintptr_t>(record));
+        return (it != g_ruleIndex.end() && it->second.first->isEnabled()) ? 1 : 0;
     }
 
     // ---- workspace rules -------------------------------------------------------
@@ -5683,74 +6018,42 @@ namespace Config::Scheme {
         return ids.empty() ? Sfalse : schemeIntList(ids);
     }
 
-    // layer surfaces as "monitor\nnamespace\n" pairs
-    static ptr hlLayers() {
+    // bare-thunk/record list fire (gestures, screenshare, keyboard-key)
+    static void fireSchemeListRec(ptr record, ptr lst) {
         if (!g_up)
-            return Sfalse;
-        std::vector<ptr> roots;
-        std::vector<ptr> layers;
-        for (const auto& mon : State::monitorState()->monitors()) {
-            for (const auto& level : mon->m_layerSurfaceLayers) {
-                for (const auto& lsRef : level) {
-                    const auto ls = lsRef.lock();
-                    if (!ls)
-                        continue;
-                    ptr monName = Sstring_utf8(mon->m_name.c_str(), mon->m_name.size());
-                    marshRoot(monName, roots);
-                    ptr nsName = Sstring_utf8(ls->m_namespace.c_str(), ls->m_namespace.size());
-                    marshRoot(nsName, roots);
-                    ptr pair = Scons(monName, nsName);
-                    marshRoot(pair, roots);
-                    layers.push_back(pair);
-                }
-            }
-        }
-        if (layers.empty())
-            return Sfalse;
-        ptr l = Snil;
-        for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
-            l = Scons(*it, l);
-            marshRoot(l, roots);
-        }
-        marshRelease(roots);
-        return l;   // ((monitor . namespace) ...)
+            return;
+        watchdogEnter("handler");
+        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-list-rec")), record, lst);
+        watchdogExit();
     }
 
     static int hlIsKeyDown(const char* key) {
-        if (!g_up || !Keybinds::mgr() || !key || !*key)
-            return 0;
-        const auto sym = xkb_keysym_from_name(key, XKB_KEYSYM_NO_FLAGS);
-        if (sym == XKB_KEY_NoSymbol)
-            return 0;
+        if (!g_up || !Keybinds::mgr())
+            return -1;
+        const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
+        if (!sym)
+            return -1;
         return Keybinds::mgr()->inputState().isKeysymDown(sym) ? 1 : 0;
     }
 
     static ptr hlLoadedPlugins() {
-        if (!g_up || !g_pPluginSystem)
-            return Sfalse;
-        std::vector<ptr> roots;
-        std::vector<ptr> names;
-        for (const auto* plugin : g_pPluginSystem->getAllPlugins()) {
-            ptr n = Sstring_utf8(plugin->m_name.c_str(), plugin->m_name.size());
-            marshRoot(n, roots);
-            names.push_back(n);
-        }
-        if (names.empty())
+        if (!g_up)
             return Sfalse;
         ptr l = Snil;
-        for (auto it = names.rbegin(); it != names.rend(); ++it) {
-            l = Scons(*it, l);
-            marshRoot(l, roots);
+        for (const auto& p : g_pPluginSystem->getAllPlugins()) {
+            if (!p)
+                continue;
+            const std::string name = p->m_name;
+            l = Scons(Sstring_utf8(name.c_str(), name.size()), l);
         }
-        marshRelease(roots);
-        return l;   // ("plugin-a" "plugin-b" ...)
+        return l;
     }
 
     static ptr hlVersion() {
         return Sstring_utf8(HYPRLAND_VERSION, strlen(HYPRLAND_VERSION));
     }
 
-    // windows matching a selector: newline-joined handle ids (like hl-windows)
+    // windows matching a selector: handle ids as a scheme list
     static ptr hlWindowsFrom(const char* sel) {
         if (!g_up)
             return Sfalse;
@@ -5759,7 +6062,7 @@ namespace Config::Scheme {
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!windowMatchesSelector(w, selector))
                 continue;
-            ids.push_back((uintptr_t)(new SHandle<PHLWINDOWREF>(PHLWINDOWREF(w))));
+            ids.push_back((uintptr_t)(new SHandle<PHLWINDOWREF>(w)));
         }
         return ids.empty() ? Sfalse : schemeIntList(ids);
     }
@@ -6196,14 +6499,6 @@ namespace Config::Scheme {
         return l;
     }
 
-    static void fireSchemeListRec(ptr record, ptr lst) {
-        if (!g_up)
-            return;
-        watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-list-rec")), record, lst);
-        watchdogExit();
-    }
-
     // bare-thunk fire with the bind result protocol (gesture legacy end:
     // zero-arg, auto-consuming rules apply)
     static Keybinds::SBindResult fireSchemeThunk(ptr thunk) {
@@ -6400,6 +6695,147 @@ namespace Config::Scheme {
         return (window && window->backend().isX11()) ? 1 : 0;
     }
 
+    // ---- layer surfaces as objects (upstream HL.LayerSurface parity) ----------
+    // layer surfaces die independently -> weak handles via the guardian
+    // (record-cell model); every getter returns #f when the surface is gone
+    using PHLLSGROUPREF = Hyprutils::Memory::CWeakPointer<Desktop::View::CLayerSurface>;
+
+    static SP<Desktop::View::CLayerSurface> layerFromHandle(long long id) {
+        return reinterpret_cast<SHandle<PHLLSGROUPREF>*>(id)->wp.lock();
+    }
+
+    static int hlSchemeLayerAlive(long long id) {
+        if (!g_up)
+            return -1;
+        return layerFromHandle(id) ? 1 : 0;
+    }
+
+    static int hlSchemeLayerSame(long long a, long long b) {
+        if (!g_up)
+            return -1;
+        const auto la = layerFromHandle(a);
+        const auto lb = layerFromHandle(b);
+        return (la && lb && la.get() == lb.get()) ? 1 : 0;
+    }
+
+    static ptr hlSchemeLayerAddress(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return Sfalse;
+        const auto addr = std::format("0x{:x}", reinterpret_cast<uintptr_t>(ls.get()));
+        return Sstring_utf8(addr.c_str(), addr.size());
+    }
+
+    static ptr hlSchemeLayerPid(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        return ls ? Sinteger(sc<int64_t>(ls->getPID())) : Sfalse;
+    }
+
+    static ptr hlSchemeLayerMonitorId(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return Sfalse;
+        const auto mon = ls->m_monitor.lock();
+        if (!mon)
+            return Sfalse;
+        return Sinteger((uintptr_t)(new SHandle<PHLMONITORREF>(mon)));
+    }
+
+    static ptr hlSchemeLayerNamespace(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return Sfalse;
+        return Sstring_utf8(ls->m_namespace.c_str(), ls->m_namespace.size());
+    }
+
+    static ptr hlSchemeLayerLevel(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        return ls ? Sinteger(sc<int64_t>(ls->m_layer)) : Sfalse;
+    }
+
+    static ptr hlSchemeLayerMapped(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return Sfalse;
+        return ls->mapped() ? Strue : Sfalse;
+    }
+
+    static ptr hlSchemeLayerKbInteractivity(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        return ls ? Sinteger(sc<int64_t>(ls->m_keyboardInteractivity)) : Sfalse;
+    }
+
+    static ptr hlSchemeLayerAboveFullscreen(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return Sfalse;
+        return (ls->m_flags & Desktop::View::LAYER_FLAG_ABOVE_FULLSCREEN) ? Strue : Sfalse;
+    }
+
+    static ptr hlSchemeLayerPosition(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return Sfalse;
+        return Scons(Sinteger((int)ls->m_geometry.x), Sinteger((int)ls->m_geometry.y));
+    }
+
+    static ptr hlSchemeLayerSize(long long id) {
+        if (!g_up)
+            return Sfalse;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return Sfalse;
+        return Scons(Sinteger((int)ls->m_geometry.width), Sinteger((int)ls->m_geometry.height));
+    }
+
+    // (monitorFilter, namespaceFilter) — nullptr/empty = no filter; the
+    // monitor crosses as a handle id (0 = none) after Scheme-side coercion
+    static ptr hlLayers(long long monId, ptr nsFilter) {
+        if (!g_up)
+            return Sfalse;
+        const std::string ns = nsFilter && Sstringp(nsFilter) ? schemeDatumToStr(nsFilter) : "";
+        PHLWINDOWREF dummy; // unused; keeps the compiler from warning on the include order
+        (void)dummy;
+        PHLMONITOR monFilter;
+        if (monId > 0)
+            monFilter = reinterpret_cast<SHandle<PHLMONITORREF>*>(monId)->wp.lock();
+
+        std::vector<uintptr_t> ids;
+        for (const auto& mon : State::monitorState()->monitors()) {
+            if (monFilter && mon != monFilter)
+                continue;
+            for (const auto& level : mon->m_layerSurfaceLayers) {
+                for (const auto& lsRef : level) {
+                    const auto ls = lsRef.lock();
+                    if (!ls)
+                        continue;
+                    if (!ns.empty() && ls->m_namespace != ns)
+                        continue;
+                    ids.push_back((uintptr_t)(new SHandle<PHLLSGROUPREF>(ls)));
+                }
+            }
+        }
+        return ids.empty() ? Sfalse : schemeIntList(ids);
+    }
+
     static ptr hlSchemeMonitorNames() {
         if (!g_up)
             return Sfalse;
@@ -6417,19 +6853,19 @@ namespace Config::Scheme {
             return -1;
 
         switch (which) {
-            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openLate.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.close.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.title.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.class_.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 4: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.urgent.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 5: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.pin.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 6: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.fullscreen.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 7: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.moveToWorkspace.listen([ref = SThunkRef(record)](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(ref.obj, w); })); break;
-            case 8: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.active.listen([ref = SThunkRef(record)](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(ref.obj, w); })); break;
-            case 9: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.openEarly.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 10: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.kill.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 11: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.bell.listen([ref = SThunkRef(record)](PHLWINDOW w, Event::SCallbackInfo&) { fireSchemeWin(ref.obj, w); })); break;
-            case 12: g_windowEventListeners.emplace_back(Event::bus()->m_events.window.updateRules.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 0: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.openLate.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 1: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.close.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 2: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.title.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 3: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.class_.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 4: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.urgent.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 5: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.pin.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 6: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.fullscreen.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 7: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.moveToWorkspace.listen([ref = SThunkRef(record)](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(ref.obj, w); })); break;
+            case 8: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.active.listen([ref = SThunkRef(record)](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(ref.obj, w); })); break;
+            case 9: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.openEarly.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 10: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.kill.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 11: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.bell.listen([ref = SThunkRef(record)](PHLWINDOW w, Event::SCallbackInfo&) { fireSchemeWin(ref.obj, w); })); break;
+            case 12: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.updateRules.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
             default: break;
         }
 
@@ -6442,7 +6878,7 @@ namespace Config::Scheme {
             return -1;
 
         SThunkRef ref(record);
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.window.minimize.listen([ref](PHLWINDOW w, bool state) {
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.minimize.listen([ref](PHLWINDOW w, bool state) {
             if (!g_up || !w)
                 return;
             const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(w));
@@ -6470,7 +6906,7 @@ namespace Config::Scheme {
             } else
                 g_pendingStart.emplace_back(record);
         } else
-            g_windowEventListeners.emplace_back(Event::bus()->m_events.exit.listen([ref] { fireScheme(ref.obj); }));
+            g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.exit.listen([ref] { fireScheme(ref.obj); }));
 
         return 0;
     }
@@ -6479,10 +6915,10 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
         switch (which) {
-            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.added.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
-            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.removed.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
-            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.focused.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
-            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.monitor.layoutChanged.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); })); break;
+            case 0: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.monitor.added.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 1: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.monitor.removed.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 2: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.monitor.focused.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 3: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.monitor.layoutChanged.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); })); break;
             default: break;
         }
         return 0;
@@ -6492,7 +6928,7 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
         switch (which) {
-            case 0: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.created.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { auto w = ws.lock(); if (w) fireSchemeWs(ref.obj, w); })); break;
+            case 0: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.created.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { auto w = ws.lock(); if (w) fireSchemeWs(ref.obj, w); })); break;
             // removed fires from ~CHLWorkspace: the payload cannot be locked
             // (hyprutils marks the impl "destroying"), but the data pointer
             // stays valid until the destructor returns, so the name COULD be
@@ -6505,11 +6941,11 @@ namespace Config::Scheme {
             // instant — a later enhancement could snapshot it into the handle
             // at fire time and expose it through (hl-workspace-name), but that
             // would go beyond what Lua offers, so it is deliberately not done.
-            case 1: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.removed.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { fireSchemeWsRef(ref.obj, ws); })); break;
+            case 1: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.removed.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { fireSchemeWsRef(ref.obj, ws); })); break;
             // fires (ws mon) handles; ws is #f when no special workspace is
             // open on the monitor (upstream crosses nil the same way)
-            case 2: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.specialActive.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
-            case 3: g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.moveToMonitor.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
+            case 2: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.specialActive.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
+            case 3: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.moveToMonitor.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
             default: break;
         }
         return 0;
@@ -6519,7 +6955,7 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
 
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.reloaded.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.config.reloaded.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
         return 0;
     }
 
@@ -6528,7 +6964,7 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
 
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.preReload.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.config.preReload.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
         return 0;
     }
 
@@ -6538,7 +6974,7 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
 
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.window.destroy.listen([ref = SThunkRef(record)](PHLWINDOWREF) { fireScheme(ref.obj); }));
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.destroy.listen([ref = SThunkRef(record)](PHLWINDOWREF) { fireScheme(ref.obj); }));
         return 0;
     }
 
@@ -6547,7 +6983,7 @@ namespace Config::Scheme {
     static int hlSchemeScreenshareListen(ptr record) {
         if (!g_up)
             return -1;
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.screenshare.state.listen([ref = SThunkRef(record)](bool state, uint8_t type, const std::string& name) {
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.screenshare.state.listen([ref = SThunkRef(record)](bool state, uint8_t type, const std::string& name) {
             if (!g_up)
                 return;
             std::vector<ptr> roots;
@@ -6567,7 +7003,7 @@ namespace Config::Scheme {
     static int hlSchemeKeyboardKeyListen(ptr record) {
         if (!g_up)
             return -1;
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.input.keyboard.key.listen([ref = SThunkRef(record)](const IKeyboard::SKeyEvent& keyEvent, Event::SCallbackInfo& _) {
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.input.keyboard.key.listen([ref = SThunkRef(record)](const IKeyboard::SKeyEvent& keyEvent, Event::SCallbackInfo& _) {
             if (!g_up)
                 return;
             fireSchemeListRec(ref.obj, schemeIntList({(int)keyEvent.keycode + 8, (int)keyEvent.timeMs, (int)keyEvent.state}));
@@ -6581,9 +7017,9 @@ namespace Config::Scheme {
             return -1;
 
         if (which == 0)
-            g_windowEventListeners.emplace_back(Event::bus()->m_events.layer.opened.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
+            g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.layer.opened.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
         else
-            g_windowEventListeners.emplace_back(Event::bus()->m_events.layer.closed.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
+            g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.layer.closed.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
         return 0;
     }
 
@@ -6593,8 +7029,28 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
 
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.config.props_refreshed.listen([ref = SThunkRef(record)](const bool scheduled) { fireSchemeBool(ref.obj, scheduled); }));
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.config.props_refreshed.listen([ref = SThunkRef(record)](const bool scheduled) { fireSchemeBool(ref.obj, scheduled); }));
         return 0;
+    }
+
+    // unlisten: drop the connection; its destruction unregisters from the
+    // bus and releases the handler record's lock. Upstream HL.EventSub-
+    // scription:remove parity. The record goes inert: cancel again -> -1.
+    static int hlSchemeEventCancel(ptr record) {
+        if (!g_up)
+            return -1;
+        const auto it = g_eventConnections.find(reinterpret_cast<uintptr_t>(record));
+        if (it == g_eventConnections.end())
+            return -1;
+        g_eventConnections.erase(it);
+        return 0;
+    }
+
+    // upstream HL.EventSubscription:is_active parity
+    static int hlSchemeEventActive(ptr record) {
+        if (!g_up)
+            return -1;
+        return g_eventConnections.count(reinterpret_cast<uintptr_t>(record)) ? 1 : 0;
     }
 
     // identity, mirroring Lua's windowEq: two handles are the same window
@@ -6630,7 +7086,7 @@ namespace Config::Scheme {
             return -1;
 
         SThunkRef ref(record);
-        g_windowEventListeners.emplace_back(Event::bus()->m_events.workspace.active.listen([ref](PHLWORKSPACE ws) {
+        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.active.listen([ref](PHLWORKSPACE ws) {
             fireSchemeWs(ref.obj, ws);
         }));
         return 0;
@@ -6658,9 +7114,10 @@ namespace Config::Scheme {
             g_timerIndex.clear();
         }
 
-        // drop event subscriptions; the new generation re-registers
-        g_submapListeners.clear();
-        g_windowEventListeners.clear();
+        // drop event subscriptions; the new generation re-registers. This is
+        // wholesale BY DESIGN — a reload means fresh handlers, and it is the
+        // handler lifetime (each entry's destruction also unlocks its record)
+        g_eventConnections.clear();
 
         // old-generation handles: their Scheme records became unreachable
         // with the generation, so the guardian reaps them at the next GC
@@ -6828,6 +7285,7 @@ namespace Config::Scheme {
         g_ipcReadyListener.reset();
         g_reloadListener.reset();
         g_lifecycleListeners.clear();
+        g_eventConnections.clear();   // user handlers point into this .so
         Layouts::clear();
         // remove our binds before the .so unmaps (their callbacks point
         // here): ours are the ones tagged "scheme:" in their argument.
@@ -6885,6 +7343,21 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-keyboard-key-listen", (void*)hlSchemeKeyboardKeyListen);
         Sregister_symbol("hl-scheme-unbind-rec", (void*)hlSchemeUnbindRec);
         Sregister_symbol("hl-scheme-unbind-key", (void*)hlSchemeUnbindKey);
+        Sregister_symbol("hl-layers", (void*)hlLayers);
+        Sregister_symbol("hl-layer-alive", (void*)hlSchemeLayerAlive);
+        Sregister_symbol("hl-layer-same", (void*)hlSchemeLayerSame);
+        Sregister_symbol("hl-layer-address", (void*)hlSchemeLayerAddress);
+        Sregister_symbol("hl-layer-pid", (void*)hlSchemeLayerPid);
+        Sregister_symbol("hl-layer-monitor", (void*)hlSchemeLayerMonitorId);
+        Sregister_symbol("hl-layer-namespace", (void*)hlSchemeLayerNamespace);
+        Sregister_symbol("hl-layer-level", (void*)hlSchemeLayerLevel);
+        Sregister_symbol("hl-layer-mapped", (void*)hlSchemeLayerMapped);
+        Sregister_symbol("hl-layer-kb-interactivity", (void*)hlSchemeLayerKbInteractivity);
+        Sregister_symbol("hl-layer-above-fs", (void*)hlSchemeLayerAboveFullscreen);
+        Sregister_symbol("hl-layer-position", (void*)hlSchemeLayerPosition);
+        Sregister_symbol("hl-layer-size", (void*)hlSchemeLayerSize);
+        Sregister_symbol("hl-scheme-event-cancel", (void*)hlSchemeEventCancel);
+        Sregister_symbol("hl-scheme-event-active", (void*)hlSchemeEventActive);
         Sregister_symbol("hl-scheme-window-same", (void*)hlSchemeWindowSame);
         Sregister_symbol("hl-scheme-current-submap", (void*)hlSchemeCurrentSubmap);
         Sregister_symbol("hl-scheme-cursor-pos", (void*)hlSchemeCursorPos);
@@ -6918,6 +7391,17 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-window-tag", (void*)hlSchemeWindowTag);
         Sregister_symbol("hl-scheme-window-clear-tags", (void*)hlSchemeWindowClearTags);
         Sregister_symbol("hl-scheme-toggle-swallow", (void*)hlSchemeToggleSwallow);
+        Sregister_symbol("hl-scheme-workspace-groups", (void*)hlSchemeWorkspaceGroups);
+        Sregister_symbol("hl-scheme-group-alive", (void*)hlSchemeGroupAlive);
+        Sregister_symbol("hl-scheme-group-same", (void*)hlSchemeGroupSame);
+        Sregister_symbol("hl-scheme-group-members", (void*)hlSchemeGroupMembers);
+        Sregister_symbol("hl-scheme-group-current", (void*)hlSchemeGroupCurrent);
+        Sregister_symbol("hl-scheme-group-current-idx", (void*)hlSchemeGroupCurrentIdx);
+        Sregister_symbol("hl-scheme-group-size", (void*)hlSchemeGroupSize);
+        Sregister_symbol("hl-scheme-group-locked", (void*)hlSchemeGroupLocked);
+        Sregister_symbol("hl-scheme-group-denied", (void*)hlSchemeGroupDenied);
+        Sregister_symbol("hl-scheme-group-add", (void*)hlSchemeGroupAdd);
+        Sregister_symbol("hl-scheme-group-remove", (void*)hlSchemeGroupRemove);
         Sregister_symbol("hl-scheme-group-toggle", (void*)hlSchemeGroupToggle);
         Sregister_symbol("hl-scheme-group-set", (void*)hlSchemeGroupSet);
         Sregister_symbol("hl-scheme-monitor-set-special", (void*)hlSchemeMonitorSetSpecial);
@@ -7020,8 +7504,6 @@ namespace Config::Scheme {
         Sregister_symbol("hl-workspace-same", (void*)hlWorkspaceSame);
         Sregister_symbol("hl-workspace-selector", (void*)hlWorkspaceSelector);
         Sregister_symbol("hl-workspace-windows", (void*)hlWorkspaceWindows);
-        Sregister_symbol("hl-workspace-windows", (void*)hlWorkspaceWindows);
-        Sregister_symbol("hl-layers", (void*)hlLayers);
         Sregister_symbol("hl-is-key-down", (void*)hlIsKeyDown);
         Sregister_symbol("hl-loaded-plugins", (void*)hlLoadedPlugins);
         Sregister_symbol("hl-version", (void*)hlVersion);
