@@ -18,9 +18,9 @@ WAIT_FOR 10 '(let ((w2 (hl-window-from "class:^api-second$"))) (if w2 #t #f))' >
 $SCHEME '(define w2 (hl-window-from "class:^api-second$"))' >/dev/null
 
 # ---- key specification helpers ---------------------------------------------
-ok '(pair? (kbd "C-M-a"))'
-val '(car (kbd "RET"))' '"Return"'
-val '(list-ref (hl-kbd "SUPER+SHIFT+Q") 2)' '"Q"'
+ok '(pair? (hl-kbd "C-M-a"))'
+val '(car (hl-kbd "RET"))' '"Return"'
+val '(list-ref (hl-key "SUPER+SHIFT+Q") 2)' '"Q"'
 
 # ---- state ------------------------------------------------------------------
 val '(hl-state-set! (quote api-x) 1)' '1'
@@ -402,7 +402,7 @@ ok '(string? (hl-layout-add! "api-layout" (quote recalculate) (lambda (count W H
 noerr '(hl-layout-msg "noop")'
 
 # ---- submaps ----------------------------------------------------------------
-ok '(hl-bind? (hl-submap "api-sub" (lambda () (hl-bind-add! (kbd "g") (lambda () #f)))))'
+ok '(hl-bind? (hl-submap "api-sub" (lambda () (hl-bind-add! (hl-kbd "g") (lambda () #f)))))'
 ok '(hl-submap-activate! "api-sub")'
 val '(hl-current-submap)' '"api-sub"'
 ok '(hl-submap-exit!)'
@@ -415,41 +415,41 @@ val '(hl--bind-flags (quote (devices ("k1"))) "x")' '8192'
 val '(hl--bind-flags (quote (devices ("k1") device-inclusive #f)) "x")' '0'
 val '(hl--bind-flags (quote (device-inclusive #t)) "x")' '8192'
 val '(hl--bind-flags (quote ()) "x")' '0'
-ok '(hl-bind? (hl-bind-add! (kbd "s-<F13>") (lambda () #f)))'
-ok '(hl-bind? (hl-bind-add! (kbd "C-M-<F15>") (lambda () #f)))'
-ok '(hl-bind? (hl-bind-add! (kbd "s-<F16>") (lambda () #f) (quote release) #t (quote description) "api"))'
-ok '(let ((b (hl-bind-add! (kbd "s-<F18>") (lambda () #f)))) (hl-unbind! b))'
-ok '(let ((b (hl-bind-add! (kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key! "SUPER F19"))'
+ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F13>") (lambda () #f)))'
+ok '(hl-bind? (hl-bind-add! (hl-kbd "C-M-<F15>") (lambda () #f)))'
+ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F16>") (lambda () #f) (quote release) #t (quote description) "api"))'
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F18>") (lambda () #f)))) (hl-unbind! b))'
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key! "SUPER F19"))'
 # function keys use emacs' bracketed notation; Hyprland matches key names
 # case-insensitively, so a lowercase emacs spelling resolves the same keysym
-ok '(let ((b (hl-bind-add! (kbd "<f24>") (lambda () #f)))) b (hl-unbind-key! "f24"))'
+ok '(let ((b (hl-bind-add! (hl-kbd "<f24>") (lambda () #f)))) b (hl-unbind-key! "f24"))'
 
 # ---- bind records: the handle carries the token list and the thunk ----------
-ok '(let ((b (hl-bind-add! (kbd "C-M-a") (lambda () #f))))
+ok '(let ((b (hl-bind-add! (hl-kbd "C-M-a") (lambda () #f))))
      (and (hl-bind? b)
        (equal? (hl-bind-tokens b) (quote ("CTRL" "ALT" "a")))
        (procedure? (hl-bind-thunk b))
        (hl-unbind! b)))'
 # precise unbind: two binds on the SAME key; removing the first must leave
 # the second registrable-and-removable (a coarse unbind would kill both)
-ok '(let ((a (hl-bind-add! (kbd "s-<F33>") (lambda () #f)))
-         (c (hl-bind-add! (kbd "s-<F33>") (lambda () #f))))
+ok '(let ((a (hl-bind-add! (hl-kbd "s-<F33>") (lambda () #f)))
+         (c (hl-bind-add! (hl-kbd "s-<F33>") (lambda () #f))))
      (and (hl-unbind! a) (hl-unbind! c)))'
 # double unbind: the second is #f (already gone)
-ok '(let ((b (hl-bind-add! (kbd "s-<F34>") (lambda () #f))))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F34>") (lambda () #f))))
      (and (hl-unbind! b) (not (hl-unbind! b))))'
 # unbinding one of two same-key binds, then firing the survivor through the
 # record path, must still work (the tag, not the key, is the identity)
-ok '(let ((dead (hl-bind-add! (kbd "s-<F35>") (lambda () #f)))
-         (live (hl-bind-add! (kbd "s-<F35>") (lambda () "survivor"))))
+ok '(let ((dead (hl-bind-add! (hl-kbd "s-<F35>") (lambda () #f)))
+         (live (hl-bind-add! (hl-kbd "s-<F35>") (lambda () "survivor"))))
      (and (hl-unbind! dead)
        (equal? (hl--bind-fire-rec live) (quote (ok #t)))
        (hl-unbind! live)))'
 # modless + literal forms of the explicit token list (regression: hl-bind-add!
 # used to auto-dispatch a two-string shorthand; the LIST is the only form)
-ok '(hl-bind? (hl-bind-add! (kbd "<F20>") (lambda () #f)))'
+ok '(hl-bind? (hl-bind-add! (hl-kbd "<F20>") (lambda () #f)))'
 ok "(hl-bind? (hl-bind-add! (quote (\"SUPER\" \"F21\")) (lambda () #f)))"
-ok '(hl-bind? (hl-bind-add! (hl-kbd "SUPER+F22") (lambda () #f)))'
+ok '(hl-bind? (hl-bind-add! (hl-key "SUPER+F22") (lambda () #f)))'
 
 # ---- timers -----------------------------------------------------------------
 ok '(hl-timer? (hl-after 5000 (lambda () #f)))'
@@ -495,25 +495,25 @@ ok '(hl-event? (hl-layer-open-notification-add! (lambda (ns) #f)))'
 ok '(hl-event? (hl-layer-close-notification-add! (lambda (ns) #f)))'
 
 # ---- auto-consuming protocol: a bind thunk returning #f DECLINES the key ---
-ok '(let ((b (hl-bind-add! (kbd "s-<F26>") (lambda () #f) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F26>") (lambda () #f) (quote auto-consuming) #t)))
      (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
-ok '(let ((b (hl-bind-add! (kbd "s-<F27>") (lambda () #t) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F27>") (lambda () #t) (quote auto-consuming) #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
-ok '(let ((b (hl-bind-add! (kbd "s-<F28>") (lambda () (error "boom")) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F28>") (lambda () (error "boom")) (quote auto-consuming) #t)))
      (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
 
 # ---- bind result protocol (upstream {ok, pass_event, error, request_release}) ----
 # a non-plist truthy value normalizes to ok #t, like upstream's non-table returns
-ok '(let ((b (hl-bind-add! (kbd "s-<F29>") (lambda () "done") (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F29>") (lambda () "done") (quote auto-consuming) #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
 # pass-event: handled AND forwarded to the focused window (Keybinds Manager CONSUMES)
-ok '(let ((b (hl-bind-add! (kbd "s-<F30>") (lambda () (quote (pass-event #t))) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F30>") (lambda () (quote (pass-event #t))) (quote auto-consuming) #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t pass-event #t))) (hl-unbind! b)))'
 # explicit decline with an error message
-ok '(let ((b (hl-bind-add! (kbd "s-<F31>") (lambda () (quote (ok #f (quote error) "not now"))) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F31>") (lambda () (quote (ok #f (quote error) "not now"))) (quote auto-consuming) #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #f error "not now"))) (hl-unbind! b)))'
 # request-release: handled; asks the manager to trigger the release event (click/drag binds)
-ok '(let ((b (hl-bind-add! (kbd "s-<F32>") (lambda () (quote (request-release #t))) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F32>") (lambda () (quote (request-release #t))) (quote auto-consuming) #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t request-release #t))) (hl-unbind! b)))'
 
 # the C++ side reads the same plists: ok #f fails the result, which stops a
@@ -529,13 +529,46 @@ sleep 0.5
 val '(hl-state-ref (quote proto-ticks) 0)' '1'
 
 # ---- gestures (registration only; no trackpad in the harness) ----------------
-ok '(hl-gesture-add! (quote fingers) 4 (quote direction) "swipe" (quote action) (lambda () #f))'
-ok '(hl-gesture-add! (quote fingers) 3 (quote direction) "pinch" (quote start) (lambda args #f) (quote update) (lambda args #f) (quote finish) (lambda args #f))'
-ok '(hl-gesture-add! (quote fingers) 2 (quote direction) "up" (quote mods) "SUPER" (quote action) (lambda () #f))'
+# recipes are values: hl-make-* builds an opaque (maker . args) pair
+ok '(hl-gesture-action? (hl-make-workspace-swipe-gesture))'
+ok '(hl-gesture-action? (hl-make-custom-gesture (quote finish) (lambda args #f)))'
+ok '(hl-gesture-action? (hl-make-cursor-zoom-gesture 2.0 (quote live)))'
+# registrations across the spec space (fingers/mods/axis must stay disjoint
+# within this file AND from the doc-test blocks, which self-clean)
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 4 (quote direction) "swipe" (quote action) (hl-make-workspace-swipe-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "pinch" (quote action) (hl-make-move-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 2 (quote direction) "up" (quote mods) "SUPER" (quote action) (hl-make-close-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "down" (quote action) (hl-make-float-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "left" (quote action) (hl-make-special-workspace-gesture "mynotes")))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "right" (quote action) (hl-make-cursor-zoom-gesture 2.0 (quote live))))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "up" (quote mods) "ALT" (quote action) (hl-make-fullscreen-gesture (quote maximize))))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 5 (quote direction) "swipe" (quote action) (hl-make-custom-gesture (quote finish) (lambda args #f))))'
+# mods is a mask: multiple space-separated modifiers are permitted
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote mods) "ALT SHIFT" (quote action) (hl-make-move-gesture)))'
+# one recipe, two registrations — fresh C++ instance each (same recipe value)
+ok '(let ((r (hl-make-scroll-move-gesture))) (and (hl-gesture? (hl-gesture-add! (quote fingers) 6 (quote direction) "horizontal" (quote action) r)) (hl-gesture? (hl-gesture-add! (quote fingers) 6 (quote direction) "vertical" (quote action) r))))'
+# remove!: #t while registered, #f on the second call (spec-keyed removal)
+ok '(let ((g (hl-gesture-add! (quote fingers) 9 (quote direction) "up" (quote action) (hl-make-resize-gesture)))) (and (eq? #t (hl-gesture-remove! g)) (eq? #f (hl-gesture-remove! g))))'
+# removal frees the spec — the overshadowed direction registers afterwards
+ok '(let ((g (hl-gesture-add! (quote fingers) 9 (quote direction) "up" (quote action) (hl-make-resize-gesture)))) (and (hl-gesture-remove! g) (hl-gesture? (hl-gesture-add! (quote fingers) 9 (quote direction) "vertical" (quote action) (hl-make-resize-gesture)))))'
+# errors
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote bogus_field) #t))))')
 [[ "$bad_gest" == *"bogus_field"* ]] || { echo "FAIL: unknown gesture field not rejected => [$bad_gest]"; FAILED=1; }
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up"))))')
 [[ "$bad_gest" == *"action is required"* ]] || { echo "FAIL: missing gesture action not rejected => [$bad_gest]"; FAILED=1; }
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote action) "workspace"))))')
+[[ "$bad_gest" == *"hl-gesture-action"* ]] || { echo "FAIL: string action not rejected => [$bad_gest]"; FAILED=1; }
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-float-gesture (quote bogus)))))')
+[[ "$bad_gest" == *"toggle float tile"* ]] || { echo "FAIL: bad float mode not rejected => [$bad_gest]"; FAILED=1; }
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-custom-gesture))))')
+[[ "$bad_gest" == *"at least one"* ]] || { echo "FAIL: empty custom gesture not rejected => [$bad_gest]"; FAILED=1; }
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-custom-gesture (quote start) "not a thunk"))))')
+[[ "$bad_gest" == *"needs a procedure"* ]] || { echo "FAIL: non-procedure custom field not rejected => [$bad_gest]"; FAILED=1; }
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote action) (hl-make-move-gesture) (quote scale) 0.05))))')
+[[ "$bad_gest" == *"scale"* ]] || { echo "FAIL: degenerate scale not rejected => [$bad_gest]"; FAILED=1; }
+# the manager's overshadow rule now surfaces as an error (was silently dropped)
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 9 (quote direction) "up" (quote action) (hl-make-move-gesture)))))')
+[[ "$bad_gest" == *"overshadowed"* ]] || { echo "FAIL: overshadowed gesture not rejected => [$bad_gest]"; FAILED=1; }
 ok '(hl-event? (hl-screenshare-state-notification-add! (lambda (a t n) #f)))'
 ok '(hl-event? (hl-keyboard-key-notification-add! (lambda (k t s) #f)))'
 

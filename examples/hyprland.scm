@@ -3,22 +3,22 @@
 
 ;; ---- binds ----------------------------------------------------------------
 ;; hl-bind-add! takes a TOKEN LIST (mods first, key last) and a thunk.
-;; (kbd ...) is emacs syntax, (hl-kbd ...) is hyprland syntax; both return the list.
-(hl-bind-add! (kbd "s-<Return>") (lambda () (hl-exec "foot")))
-(hl-bind-add! (kbd "s-d")        (lambda () (hl-exec "wofi --show drun")))
-(hl-bind-add! (kbd "s-<Tab>")    (lambda () (hl-window-cycle!)))
+;; (hl-kbd ...) is emacs syntax, (hl-key ...) is hyprland syntax; both return the list.
+(hl-bind-add! (hl-kbd "s-<Return>") (lambda () (hl-exec "foot")))
+(hl-bind-add! (hl-kbd "s-d")        (lambda () (hl-exec "wofi --show drun")))
+(hl-bind-add! (hl-kbd "s-<Tab>")    (lambda () (hl-window-cycle!)))
 
 ;; options follow the thunk as a plist
-(hl-bind-add! (kbd "s-q") (lambda () (hl-window-close!))
+(hl-bind-add! (hl-kbd "s-q") (lambda () (hl-window-close!))
          'description "Close the focused window")
 
 ;; a submap: binds inside are scoped to it, no modifiers needed
-(hl-bind-add! (kbd "s-g") (lambda () (hl-submap-activate! "resize")))
+(hl-bind-add! (hl-kbd "s-g") (lambda () (hl-submap-activate! "resize")))
 (hl-submap "resize"
   (lambda ()
-    (hl-bind-add! (kbd "left")  (lambda () (hl-window-size-set! #f -20 0 'relative)) 'repeat #t)
-    (hl-bind-add! (kbd "right") (lambda () (hl-window-size-set! #f 20 0 'relative))  'repeat #t)
-    (hl-bind-add! (kbd "g")     (lambda () (hl-submap-exit!)))))
+    (hl-bind-add! (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 'relative)) 'repeat #t)
+    (hl-bind-add! (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 'relative))  'repeat #t)
+    (hl-bind-add! (hl-kbd "g")     (lambda () (hl-submap-exit!)))))
 
 ;; ---- events ---------------------------------------------------------------
 (hl-window-open-notification-add! (lambda (w)

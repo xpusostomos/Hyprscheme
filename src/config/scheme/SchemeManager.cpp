@@ -51,6 +51,15 @@
 #include <src/notification/NotificationOverlay.hpp>
 #include <src/managers/input/trackpad/TrackpadGestures.hpp>
 #include <src/managers/input/trackpad/gestures/ITrackpadGesture.hpp>
+#include <src/managers/input/trackpad/gestures/WorkspaceSwipeGesture.hpp>
+#include <src/managers/input/trackpad/gestures/MoveGesture.hpp>
+#include <src/managers/input/trackpad/gestures/ResizeGesture.hpp>
+#include <src/managers/input/trackpad/gestures/CloseGesture.hpp>
+#include <src/managers/input/trackpad/gestures/FloatGesture.hpp>
+#include <src/managers/input/trackpad/gestures/FullscreenGesture.hpp>
+#include <src/managers/input/trackpad/gestures/SpecialWorkspaceGesture.hpp>
+#include <src/managers/input/trackpad/gestures/CursorZoomGesture.hpp>
+#include <src/managers/input/trackpad/gestures/ScrollMoveGesture.hpp>
 #include <src/state/MonitorState.hpp>
 #include <src/state/WorkspaceState.hpp>
 #include <src/state/workspace/Resolver.hpp>
@@ -291,14 +300,6 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
 (define (hl--fire-list fn lst)
   (guard (e (#t (begin (hl--report e) #f)))
     (hl--guarded-run "handler" (lambda () (apply fn lst)))))
-
-;; bare-thunk fire with the bind result protocol (gesture legacy end:
-;; zero-arg, auto-consuming rules apply)
-(define (hl--thunk-fire fn)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
-                  (hl--guarded-run "callback"
-                    (lambda () (hl--bind-result (fn)))))))
-    (and (not (eq? result hl--wd-aborted)) result)))
 
 ;; evaluate every form of a file into an environment (the explicit env
 ;; argument is the point: plain load always targets the interaction
@@ -697,7 +698,20 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-timer-cancel (foreign-procedure "hl-timer-cancel" (scheme-object) int))
 (define c-hl-exec-raw (foreign-procedure "hl-exec!" (string) int))
 (define c-hl-exec-with-rules (foreign-procedure "hl-exec-shell-with-rules!" (string) int))
-(define c-hl-gesture (foreign-procedure "hl-scheme-gesture" (scheme-object int string int string double int) int))
+;; one maker address per constructor, fetched from its own one-line C
+;; accessor — no name strings, no dispatch
+(define c-hl-gesture-maker-workspace-swipe (foreign-procedure "hl-scheme-gesture-maker-workspace-swipe" () integer-64))
+(define c-hl-gesture-maker-move (foreign-procedure "hl-scheme-gesture-maker-move" () integer-64))
+(define c-hl-gesture-maker-resize (foreign-procedure "hl-scheme-gesture-maker-resize" () integer-64))
+(define c-hl-gesture-maker-close (foreign-procedure "hl-scheme-gesture-maker-close" () integer-64))
+(define c-hl-gesture-maker-scroll-move (foreign-procedure "hl-scheme-gesture-maker-scroll-move" () integer-64))
+(define c-hl-gesture-maker-float (foreign-procedure "hl-scheme-gesture-maker-float" () integer-64))
+(define c-hl-gesture-maker-fullscreen (foreign-procedure "hl-scheme-gesture-maker-fullscreen" () integer-64))
+(define c-hl-gesture-maker-special (foreign-procedure "hl-scheme-gesture-maker-special" () integer-64))
+(define c-hl-gesture-maker-cursor-zoom (foreign-procedure "hl-scheme-gesture-maker-cursor-zoom" () integer-64))
+(define c-hl-gesture-maker-custom (foreign-procedure "hl-scheme-gesture-maker-custom" () integer-64))
+(define c-hl-gesture (foreign-procedure "hl-scheme-gesture" (scheme-object int string string double int) int))
+(define c-hl-gesture-remove (foreign-procedure "hl-scheme-gesture-remove" (int string string double int) int))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -819,19 +833,19 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 ;; hl-bind-add! is the one way to register a bind: TOKENS is a list of key
 ;; tokens — the modifiers first, then the key. Build it with a helper:
-;;   (hl-bind-add! (kbd "C-M-a") THUNK . OPTS)        — emacs syntax
-;;   (hl-bind-add! (hl-kbd "SUPER+A") THUNK . OPTS)   — hyprland syntax
+;;   (hl-bind-add! (hl-kbd "C-M-a") THUNK . OPTS)        — emacs syntax
+;;   (hl-bind-add! (hl-key "SUPER+A") THUNK . OPTS)   — hyprland syntax
 ;; or write the list out literally:
 ;;   (hl-bind-add! '("SUPER" "Q") THUNK . OPTS)
-;; A modless key is still a list: (kbd "g") → ("g"). There is no
+;; A modless key is still a list: (hl-kbd "g") → ("g"). There is no
 ;; two-string shorthand in the core API — define your own wrapper on top
 ;; if you want one (see the wiki, binds).
 (define (hl-bind-add! tokens thunk . opts)
   (apply hl--bind-impl tokens thunk opts))
 
 ;; ---- key specification helpers -----------------------------------------------
-;; (kbd "C-M-a")      — emacs syntax → token list for hl-bind-add!
-;; (hl-kbd "SUPER+SHIFT+Q") — lua/hyprland syntax → token list
+;; (hl-kbd "C-M-a")      — emacs syntax → token list for hl-bind-add!
+;; (hl-key "SUPER+SHIFT+Q") — lua/hyprland syntax → token list
 
 (define hl--emacs-mods
   '(("C" . "CTRL") ("M" . "ALT") ("S" . "SHIFT")
@@ -869,7 +883,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                              (cons (if (char=? c #\-) #\_ c) acc))))))
             name))))
 
-(define (kbd spec)
+(define (hl-kbd spec)
   ;; parse an emacs key specification string → a LIST of key tokens
   ;; e.g. "C-M-a" → ("CTRL" "ALT" "a"), "<f1>" → ("F1")
   (let loop ((str spec) (acc '()))
@@ -882,7 +896,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
                 (reverse (cons (hl--emacs-key str) acc))))
           (reverse (cons (hl--emacs-key str) acc))))))
 
-(define (hl-kbd spec)
+(define (hl-key spec)
   ;; parse a lua/hyprland key specification string → a LIST of key tokens
   ;; e.g. "SUPER+SHIFT+Q" → ("SUPER" "SHIFT" "Q")
   (map hl--trim (hl--split-string spec #\+)))
@@ -2071,21 +2085,92 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (> (c-hl-exec-with-rules cmd) 0))
 
 ;; ---- gestures ----------------------------------------------------------------------
-;; (hl-gesture 3 "swipe" (lambda () ...) ['mods "SUPER"] ['scale 1.0] ['disable-inhibit #t])
-;; the thunk fires when the gesture ends (3+ finger swipes/pinches).
-;; live variant: (hl-gesture-live 3 "swipe" on-begin on-update on-end ...) —
-;; on-update receives (dx dy scale) as a 3-list.
-;; per-gesture registration — upstream hl.gesture parity: ONE call with an
-;; arbitrary plist of fields (LuaBindingsConfigRules.cpp, hl.gesture):
-;;   fingers (int) + direction (string) — required
-;;   mods, scale, disable-inhibit — optional
-;;   action — EITHER a procedure (fires zero-arg when the gesture ends,
-;;   upstream's legacy single-function form) OR 'start/'update/'finish
-;;   procedures (live — each applied the gesture event plist as spread args).
-;; Built-in action STRINGS (workspace/move/close/fullscreen/cursor_zoom/...)
-;; are not yet supported — tracked in the project TODO.
+;; Gesture actions are typed values, not strings: an hl-gesture-action is an
+;; opaque (maker . args) pair built by the hl-make-*-gesture constructors
+;; below — one per upstream built-in action class, plus hl-make-custom-gesture
+;; for callback-backed ones. Built-in and custom actions are indistinguishable
+;; from the caller's side. A recipe is a pure value: registering it under two
+;; different specs (e.g. 2-finger and 3-finger swipes both opening a special
+;; workspace) constructs two independent C++ gestures from the same recipe.
+;;
+;; (hl-gesture-add! 'fingers N 'direction "dir" 'action ACTION
+;;                  ['mods "SUPER"] ['scale 1.0] ['disable-inhibit #t])
+;; fingers + direction required (upstream hl.gesture parity); the optional
+;; fields describe the gesture INPUT, independent of the action. Returns an
+;; hl-gesture handle for (hl-gesture-remove! G) — the manager matches removal
+;; on the registration spec, never on the action (supersedes upstream's
+;; action = "unset" string).
+(define (hl-gesture-action? x)
+  (and (pair? x) (integer? (car x)) (exact? (car x)) (positive? (car x)) (list? (cdr x))))
+
+;; one optional mode argument, restricted to the allowed symbols
+(define (hl--gesture-mode name args allowed default)
+  (cond ((null? args) default)
+        ((and (= 1 (length args)) (memq (car args) allowed)) (car args))
+        (else (errorf name "mode must be one of ~a" allowed))))
+
+(define (hl-make-workspace-swipe-gesture)
+  (cons (c-hl-gesture-maker-workspace-swipe) '()))
+
+(define (hl-make-move-gesture)
+  (cons (c-hl-gesture-maker-move) '()))
+
+(define (hl-make-resize-gesture)
+  (cons (c-hl-gesture-maker-resize) '()))
+
+(define (hl-make-close-gesture)
+  (cons (c-hl-gesture-maker-close) '()))
+
+(define (hl-make-scroll-move-gesture)
+  (cons (c-hl-gesture-maker-scroll-move) '()))
+
+;; 'toggle (default) / 'float / 'tile — force a direction of floating
+(define (hl-make-float-gesture . mode)
+  (let ((m (hl--gesture-mode 'hl-make-float-gesture mode '(toggle float tile) 'toggle)))
+    (cons (c-hl-gesture-maker-float) (list 'mode m))))
+
+;; 'fullscreen (default) / 'maximize
+(define (hl-make-fullscreen-gesture . mode)
+  (let ((m (hl--gesture-mode 'hl-make-fullscreen-gesture mode '(fullscreen maximize) 'fullscreen)))
+    (cons (c-hl-gesture-maker-fullscreen) (list 'mode m))))
+
+;; toggles the named special workspace (empty string = the default special)
+(define (hl-make-special-workspace-gesture name)
+  (unless (string? name)
+    (errorf 'hl-make-special-workspace-gesture "workspace name must be a string, got ~a" name))
+  (cons (c-hl-gesture-maker-special) (list 'name name)))
+
+;; ZOOM (number) / 'toggle (default) / 'mult / 'live — the numeric argument
+;; is unused in live mode, so 1 is a good placeholder there
+(define (hl-make-cursor-zoom-gesture zoom . mode)
+  (unless (real? zoom)
+    (errorf 'hl-make-cursor-zoom-gesture "zoom must be a number, got ~a" zoom))
+  (let ((m (hl--gesture-mode 'hl-make-cursor-zoom-gesture mode '(toggle mult live) 'toggle)))
+    (cons (c-hl-gesture-maker-cursor-zoom) (list 'zoom (exact->inexact zoom) 'mode m))))
+
+;; (hl-make-custom-gesture ['start FN] ['update FN] ['finish FN]) — at least
+;; one procedure required; each is applied the gesture event plist as spread
+;; args (see bind-gestures.md for the fields). The three closures share state
+;; naturally by closing over a let — wrap the constructor in a function to get
+;; fresh state per registration.
+(define (hl-make-custom-gesture . fields)
+  (define known '(start update finish))
+  (when (null? fields)
+    (errorf 'hl-make-custom-gesture "at least one of 'start, 'update, 'finish is required"))
+  (let loop ((l fields))
+    (unless (null? l)
+      (unless (memq (car l) known)
+        (errorf 'hl-make-custom-gesture "unknown field ~a" (car l)))
+      (unless (and (pair? (cdr l)) (procedure? (cadr l)))
+        (errorf 'hl-make-custom-gesture "field ~a needs a procedure" (car l)))
+      (loop (cddr l))))
+  (let build ((l fields) (acc '()))
+    (if (null? l)
+        (cons (c-hl-gesture-maker-custom) acc)
+        (build (cddr l) (cons (cadr l) (cons (car l) acc))))))
+
 (define (hl-gesture-add! . fields)
-  (define known '(fingers direction mods scale disable-inhibit action start update finish))
+  (define known '(fingers direction mods scale disable-inhibit action))
   (for-each (lambda (k)
               (unless (memq k known)
                 (errorf 'hl-gesture-add! "unknown field ~a" k)))
@@ -2094,28 +2179,45 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let* ((fingers   (hl--plist-get fields 'fingers #!eof))
          (direction (hl--plist-get fields 'direction #!eof))
          (action    (hl--plist-get fields 'action #!eof))
-         (start     (hl--plist-get fields 'start #!eof))
-         (update    (hl--plist-get fields 'update #!eof))
-         (finish    (hl--plist-get fields 'finish #!eof))
          (mods      (hl--plist-get fields 'mods ""))
          (scale     (hl--plist-get fields 'scale 1.0))
          (inhibit   (hl--plist-get fields 'disable-inhibit #f)))
     (cond ((eq? fingers #!eof)
            (errorf 'hl-gesture-add! "field 'fingers' is required"))
+          ((not (and (integer? fingers) (exact? fingers) (>= fingers 2)))
+           (errorf 'hl-gesture-add! "field 'fingers' must be an integer >= 2"))
           ((eq? direction #!eof)
            (errorf 'hl-gesture-add! "field 'direction' is required"))
-          ((and (eq? action #!eof) (eq? start #!eof) (eq? update #!eof) (eq? finish #!eof))
-           (errorf 'hl-gesture-add!
-                   "an action is required — 'action LAMBDA or 'start/'update/'finish LAMBDA"))
+          ((not (string? direction))
+           (errorf 'hl-gesture-add! "field 'direction' must be a string"))
+          ((eq? action #!eof)
+           (errorf 'hl-gesture-add! "an action is required — 'action (hl-make-...-gesture ...)"))
+          ((not (hl-gesture-action? action))
+           (errorf 'hl-gesture-add! "field 'action' must be an hl-gesture-action (see the hl-make-*-gesture constructors)"))
+          ((not (or (<= -10.0 scale -0.1) (<= 0.1 scale 10.0)))
+           (errorf 'hl-gesture-add! "field 'scale' must be between -10 and -0.1 or between 0.1 and 10 - it is currently: ~a" scale))
           (else
-           (let* ((live (eq? action #!eof))    ; an explicit action fn takes precedence (upstream dispatch)
-                  (rc (c-hl-gesture (if live (list start update finish) (list action))
-                                    fingers (hl--str direction) (if live 1 0)
-                                    (hl--str mods) (exact->inexact scale)
-                                    (if inhibit 1 0))))
+           (let ((rc (c-hl-gesture action fingers (hl--str direction) (hl--str mods) (exact->inexact scale) (if inhibit 1 0))))
              (cond ((not (= 0 rc))
                     (errorf 'hl-gesture-add! "~a" (c-hl-config-last-error)))
-                   (else #t)))))))
+                   (else
+                    ;; the handle is the exact registration spec — the manager
+                    ;; matches removal on it, so remove! always hits our gesture
+                    (list fingers direction (hl--str mods) scale inhibit))))))))
+
+;; the hl-gesture handle: (fingers direction mods scale disable-inhibit)
+(define (hl-gesture? x)
+  (and (pair? x) (list? x) (= 5 (length x)) (integer? (car x)) (string? (cadr x))))
+
+;; → #t removed / #f nothing registered under that spec / error
+(define (hl-gesture-remove! g)
+  (unless (hl-gesture? g)
+    (errorf 'hl-gesture-remove! "not an hl-gesture handle"))
+  (let ((rc (c-hl-gesture-remove (car g) (cadr g) (caddr g) (exact->inexact (cadddr g))
+                                 (if (list-ref g 4) 1 0))))
+    (cond ((= rc 0) #t)
+          ((= rc 1) #f)
+          (else (errorf 'hl-gesture-remove! "~a" (c-hl-config-last-error))))))
 
 ;; ---- monitors, curves, animations, permissions ------------------------------
 
@@ -6499,41 +6601,6 @@ namespace Config::Scheme {
         return l;
     }
 
-    // bare-thunk fire with the bind result protocol (gesture legacy end:
-    // zero-arg, auto-consuming rules apply)
-    static Keybinds::SBindResult fireSchemeThunk(ptr thunk) {
-        if (!g_up)
-            return {.success = false, .error = "scheme interpreter not initialized"};
-
-        watchdogEnter("bind callback");
-        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--thunk-fire")), thunk);
-        watchdogExit();
-        if (r == Sfalse)
-            return {.success = false, .error = "scheme keybind callback declined"};
-        if (r == Strue || !Spairp(r) || !Ssymbolp(Scar(r)))
-            return {};
-        Keybinds::SBindResult res;
-        ptr l = r;
-        while (Spairp(l) && Spairp(Scdr(l))) {
-            const std::string k = schemeDatumToStr(Scar(l));
-            const ptr        v  = Scar(Scdr(l));
-            if (k == "ok") {
-                if (v == Sfalse)
-                    res.success = false;
-            } else if (k == "pass-event") {
-                if (v == Strue)
-                    res.passEvent = true;
-            } else if (k == "request-release") {
-                if (v == Strue)
-                    res.followUp = Keybinds::BIND_FOLLOW_UP_TRIGGER_RELEASE;
-            } else if (k == "error" && Sstringp(v)) {
-                res.error = schemeDatumToStr(v);
-            }
-            l = Scdr(Scdr(l));
-        }
-        return res;
-    }
-
     // bare-thunk variant: gestures carry their callbacks directly (SThunkRef
     // members), so the fire passes the callable itself; the plist is APPLIED
     // to it (spread args)
@@ -6582,8 +6649,8 @@ namespace Config::Scheme {
         // the callbacks arrive as thunks and are carried locked; Snil means
         // "unused" (the counted lock no-ops on immediates). The gesture
         // manager destroys us at config reload, which unlocks them.
-        CSchemeGesture(ptr action, ptr begin, ptr update, ptr end, const char* direction) :
-            m_action(action), m_begin(begin), m_update(update), m_end(end), m_direction(direction ? direction : "") {}
+        CSchemeGesture(ptr begin, ptr update, ptr end, const char* direction) :
+            m_begin(begin), m_update(update), m_end(end), m_direction(direction ? direction : "") {}
 
         void  begin(const STrackpadGestureBegin& e) override {
             if (!Snullp(m_begin.obj))
@@ -6596,14 +6663,117 @@ namespace Config::Scheme {
         void  end(const STrackpadGestureEnd& e) override {
             if (!Snullp(m_end.obj))
                 fireSchemeGestureEvent(m_end.obj, "end", e, m_direction);
-            else if (!Snullp(m_action.obj))
-                fireSchemeThunk(m_action.obj);   // legacy single-thunk: zero-arg on end (upstream m_legacyEndOnly parity)
         }
 
       private:
-        SThunkRef   m_action, m_begin, m_update, m_end;
+        SThunkRef   m_begin, m_update, m_end;
         std::string m_direction;
     };
+
+    // ---- gesture action recipes (upstream's hl.gesture action strings, done
+    // as typed objects) ------------------------------------------------------
+    // A recipe is a Scheme value (maker . args): maker is the address of one
+    // of the stateless singleton factories below, args a flat plist with
+    // symbol keys (the house plist shape). Built-in and custom actions are
+    // indistinguishable to the caller — hl-gesture-add! asks the factory to
+    // construct the ITrackpadGesture and moves it straight into the manager
+    // (owned from birth, destroyed at reload). The recipe itself is a pure
+    // value: registering it twice constructs two independent instances.
+    static ptr gestureArgGet(ptr args, const char* key) {
+        for (ptr l = args; Spairp(l) && Spairp(Scdr(l)); l = Scdr(Scdr(l)))
+            if (Ssymbolp(Scar(l)) && schemeDatumToStr(Scar(l)) == key)
+                return Scar(Scdr(l));
+        return Sfalse;
+    }
+
+    static std::string gestureArgStr(ptr args, const char* key) {
+        // symbol (mode tags) or string (special workspace name) values
+        const ptr v = gestureArgGet(args, key);
+        return (Ssymbolp(v) || Sstringp(v)) ? schemeDatumToStr(v) : std::string();
+    }
+
+    static double gestureArgDouble(ptr args, const char* key) {
+        const ptr v = gestureArgGet(args, key);
+        return Sflonump(v) ? Sflonum_value(v) : 1.0;
+    }
+
+    class IGestureMaker {
+      public:
+        virtual UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection dir) = 0;
+        virtual ~IGestureMaker() = default;
+    };
+
+    // the five no-argument built-ins
+    template <typename G>
+    class CTrivialGestureMaker final : public IGestureMaker {
+      public:
+        UP<ITrackpadGesture> make(ptr, eTrackpadGestureDirection) override {
+            return makeUnique<G>();
+        }
+    };
+    static CTrivialGestureMaker<CWorkspaceSwipeGesture>     s_workspaceSwipeGestureMaker;
+    static CTrivialGestureMaker<CMoveTrackpadGesture>       s_moveGestureMaker;
+    static CTrivialGestureMaker<CResizeTrackpadGesture>     s_resizeGestureMaker;
+    static CTrivialGestureMaker<CCloseTrackpadGesture>      s_closeGestureMaker;
+    static CTrivialGestureMaker<CScrollMoveTrackpadGesture> s_scrollMoveGestureMaker;
+
+    class CFloatGestureMaker final : public IGestureMaker {
+      public:
+        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection) override {
+            return makeUnique<CFloatTrackpadGesture>(gestureArgStr(args, "mode"));
+        }
+    };
+    static CFloatGestureMaker s_floatGestureMaker;
+
+    class CFullscreenGestureMaker final : public IGestureMaker {
+      public:
+        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection) override {
+            return makeUnique<CFullscreenTrackpadGesture>(gestureArgStr(args, "mode"));
+        }
+    };
+    static CFullscreenGestureMaker s_fullscreenGestureMaker;
+
+    class CSpecialWorkspaceGestureMaker final : public IGestureMaker {
+      public:
+        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection) override {
+            return makeUnique<CSpecialWorkspaceGesture>(gestureArgStr(args, "name"));
+        }
+    };
+    static CSpecialWorkspaceGestureMaker s_specialWorkspaceGestureMaker;
+
+    class CCursorZoomGestureMaker final : public IGestureMaker {
+      public:
+        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection) override {
+            // the underlying ctor parses a zoom string; format our typed number
+            return makeUnique<CCursorZoomTrackpadGesture>(std::format("{}", gestureArgDouble(args, "zoom")), gestureArgStr(args, "mode"));
+        }
+    };
+    static CCursorZoomGestureMaker s_cursorZoomGestureMaker;
+
+    // custom: the args are the three thunks ((start . T) (update . T)
+    // (finish . T)); CSchemeGesture locks them into SThunkRef members
+    class CCustomGestureMaker final : public IGestureMaker {
+      public:
+        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection dir) override {
+            const auto toNil = [](ptr p) { return p == Sfalse ? Snil : p; };
+            return makeUnique<CSchemeGesture>(toNil(gestureArgGet(args, "start")), toNil(gestureArgGet(args, "update")),
+                                              toNil(gestureArgGet(args, "finish")), g_pTrackpadGestures->stringForDir(dir));
+        }
+    };
+    static CCustomGestureMaker s_customGestureMaker;
+
+    // validate an inbound recipe's maker slot: only our ten singletons are
+    // legal values (rejects forged pairs and other handle families' integers)
+    static IGestureMaker* gestureMakerFromAddress(long long addr) {
+        IGestureMaker* makers[] = {&s_workspaceSwipeGestureMaker, &s_moveGestureMaker,       &s_resizeGestureMaker,
+                                   &s_closeGestureMaker,          &s_scrollMoveGestureMaker, &s_floatGestureMaker,
+                                   &s_fullscreenGestureMaker,     &s_specialWorkspaceGestureMaker,
+                                   &s_cursorZoomGestureMaker,     &s_customGestureMaker};
+        for (auto* m : makers)
+            if (addr == sc<long long>(reinterpret_cast<intptr_t>(m)))
+                return m;
+        return nullptr;
+    }
 
     static Input::ModifierMask gestureMods(const char* mods) {
         // space-separated modifier names → mask (SUPER = META)
@@ -6631,11 +6801,12 @@ namespace Config::Scheme {
         return Input::ModifierMask(sc<Input::eKeyboardModifiers>(raw));
     }
 
-    // (record, fingers, direction, live?, mods, scale, disableInhibit) → 0 ok;
-    // the record's thunk field carries the action fn (simple form) or the
-    // three fns (live: start update finish) — carried locked by the gesture,
-    // unlocked when the gesture manager destroys it at config reload
-    static int hlSchemeGesture(ptr record, int fingers, const char* direction, int live, const char* mods, double scale, int disableInhibit) {
+    // (recipe, fingers, direction, mods, scale, disableInhibit) → 0 ok;
+    // recipe is (maker . args) — the maker constructs the ITrackpadGesture
+    // (built-in or custom alike), which moves into the manager, owned from
+    // birth; destroyed at config reload, which also unlocks any thunks it
+    // carried. The addGesture result (overshadow rules) is checked.
+    static int hlSchemeGesture(ptr recipe, int fingers, const char* direction, const char* mods, double scale, int disableInhibit) {
         if (!g_up || !g_pTrackpadGestures)
             return -1;
         const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
@@ -6643,22 +6814,60 @@ namespace Config::Scheme {
             g_configError = std::string("hl-gesture: invalid direction '") + (direction ? direction : "") + "'";
             return -1;
         }
-        // walk the thunks list: (action) or (start update finish)
-        ptr t1 = Snil, t2 = Snil, t3 = Snil;
-        if (Spairp(record)) {
-            t1 = Scar(record);
-            if (Spairp(Scdr(record))) {
-                t2 = Scar(Scdr(record));
-                if (Spairp(Scdr(Scdr(record))))
-                    t3 = Scar(Scdr(Scdr(record)));
-            }
+        if (!Spairp(recipe) || !Sfixnump(Scar(recipe))) {
+            g_configError = "hl-gesture: 'action is not a gesture action (see the hl-make-*-gesture constructors)";
+            return -1;
         }
-        if (live)
-            g_pTrackpadGestures->addGesture(
-                makeUnique<CSchemeGesture>(Snil, t1, t2, t3, direction), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
-        else
-            g_pTrackpadGestures->addGesture(makeUnique<CSchemeGesture>(t1, Snil, Snil, Snil, direction), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale),
-                                            disableInhibit != 0);
+        const auto maker = gestureMakerFromAddress(Sfixnum_value(Scar(recipe)));
+        if (!maker) {
+            g_configError = "hl-gesture: 'action is not a valid gesture action (see the hl-make-*-gesture constructors)";
+            return -1;
+        }
+        auto gesture = maker->make(Scdr(recipe), dir);
+        const auto result =
+            g_pTrackpadGestures->addGesture(std::move(gesture), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
+        if (!result) {
+            g_configError = std::string("hl-gesture: ") + result.error();
+            return -1;
+        }
+        return 0;
+    }
+
+    // one accessor per maker — the recipe's maker slot is fetched by the
+    // hl-make-* constructor that owns it; no dispatch anywhere (adding a
+    // gesture = a subclass + a singleton + one of these one-liners)
+    static long long makerAddr(IGestureMaker* m) {
+        return sc<long long>(reinterpret_cast<intptr_t>(m));
+    }
+    static long long hlSchemeGestureMakerWorkspaceSwipe() { return makerAddr(&s_workspaceSwipeGestureMaker); }
+    static long long hlSchemeGestureMakerMove()           { return makerAddr(&s_moveGestureMaker); }
+    static long long hlSchemeGestureMakerResize()         { return makerAddr(&s_resizeGestureMaker); }
+    static long long hlSchemeGestureMakerClose()          { return makerAddr(&s_closeGestureMaker); }
+    static long long hlSchemeGestureMakerScrollMove()     { return makerAddr(&s_scrollMoveGestureMaker); }
+    static long long hlSchemeGestureMakerFloat()          { return makerAddr(&s_floatGestureMaker); }
+    static long long hlSchemeGestureMakerFullscreen()     { return makerAddr(&s_fullscreenGestureMaker); }
+    static long long hlSchemeGestureMakerSpecial()        { return makerAddr(&s_specialWorkspaceGestureMaker); }
+    static long long hlSchemeGestureMakerCursorZoom()     { return makerAddr(&s_cursorZoomGestureMaker); }
+    static long long hlSchemeGestureMakerCustom()         { return makerAddr(&s_customGestureMaker); }
+
+    // (fingers, direction, mods, scale, disableInhibit) → 0 removed / 1 no
+    // such gesture / -1 error. removeGesture matches on the registration
+    // spec (the manager stores one gesture per spec), never on the action.
+    static int hlSchemeGestureRemove(int fingers, const char* direction, const char* mods, double scale, int disableInhibit) {
+        if (!g_up || !g_pTrackpadGestures)
+            return -1;
+        const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
+        if (dir == TRACKPAD_GESTURE_DIR_NONE) {
+            g_configError = std::string("hl-gesture: invalid direction '") + (direction ? direction : "") + "'";
+            return -1;
+        }
+        const auto result = g_pTrackpadGestures->removeGesture(sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
+        if (!result) {
+            if (result.error() == "Can't remove a non-existent gesture")
+                return 1;
+            g_configError = std::string("hl-gesture: ") + result.error();
+            return -1;
+        }
         return 0;
     }
 
@@ -7564,6 +7773,17 @@ namespace Config::Scheme {
         Sregister_symbol("hl-exec!", (void*)hlSchemeExecRaw);
         Sregister_symbol("hl-exec-shell-with-rules!", (void*)hlSchemeExecWithRules);
         Sregister_symbol("hl-scheme-gesture", (void*)hlSchemeGesture);
+        Sregister_symbol("hl-scheme-gesture-maker-workspace-swipe", (void*)hlSchemeGestureMakerWorkspaceSwipe);
+        Sregister_symbol("hl-scheme-gesture-maker-move", (void*)hlSchemeGestureMakerMove);
+        Sregister_symbol("hl-scheme-gesture-maker-resize", (void*)hlSchemeGestureMakerResize);
+        Sregister_symbol("hl-scheme-gesture-maker-close", (void*)hlSchemeGestureMakerClose);
+        Sregister_symbol("hl-scheme-gesture-maker-scroll-move", (void*)hlSchemeGestureMakerScrollMove);
+        Sregister_symbol("hl-scheme-gesture-maker-float", (void*)hlSchemeGestureMakerFloat);
+        Sregister_symbol("hl-scheme-gesture-maker-fullscreen", (void*)hlSchemeGestureMakerFullscreen);
+        Sregister_symbol("hl-scheme-gesture-maker-special", (void*)hlSchemeGestureMakerSpecial);
+        Sregister_symbol("hl-scheme-gesture-maker-cursor-zoom", (void*)hlSchemeGestureMakerCursorZoom);
+        Sregister_symbol("hl-scheme-gesture-maker-custom", (void*)hlSchemeGestureMakerCustom);
+        Sregister_symbol("hl-scheme-gesture-remove", (void*)hlSchemeGestureRemove);
         Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
 
         // window read-side fields (LuaWindow parity)

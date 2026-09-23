@@ -9,6 +9,6 @@ missing=0
 for a in $apis; do
   grep -q -- "$a" tests/t-*.sh || { echo "API not covered by any test: $a"; missing=1; }
 done
-# kbd has no hl- prefix; pin it explicitly
-grep -q '(kbd ' tests/t-api.sh || { echo "kbd not covered"; missing=1; }
+# hl-kbd has no hl- prefix; pin it explicitly
+grep -q '(hl-kbd ' tests/t-api.sh || { echo "hl-kbd not covered"; missing=1; }
 [[ $missing -eq 0 ]]
