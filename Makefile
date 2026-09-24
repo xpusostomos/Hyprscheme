@@ -28,7 +28,8 @@ CHEZ_BOOT ?= $(CHEZ_WORK)/boot/ta6le
 CHEZ_KERNEL = $(CHEZ_BOOT)/libkernel.a
 
 HYPRLAND_VERSION := $(shell git -C $(HYPRLAND_SRC) describe --tags --always 2>/dev/null || echo $(HYPR_COMMIT))
-CXXFLAGS += -std=c++2b -g -O2 -fPIC -DHYPRLAND_VERSION='"$(HYPRLAND_VERSION)"'
+CXXFLAGS += -std=c++2b -g -O2 -fPIC -DHYPRLAND_VERSION='"$(HYPRLAND_VERSION)"' \
+           -DSOURCE_DIR='"$(CURDIR)"'
 INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            -I$(CHEZ_BOOT) -Isrc/config/scheme \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
@@ -87,9 +88,14 @@ src/plugin-main.o: plugin-main.cpp
 
 # ---- install ---------------------------------------------------------------
 
+SCM_FILES = src/config/scheme/hyprscheme-prelude.scm \
+            src/config/scheme/hyprscheme-bootstrap.scm \
+            src/config/scheme/hyprscheme-defun.scm
+
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 $(SCM_FILES) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 $(CHEZ_BOOT)/petite.boot $(CHEZ_BOOT)/scheme.boot $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	@echo ""
 	@echo "Plugin installed: $(DESTDIR)$(PREFIX)/lib/hyprscheme/scheme-plugin.so"

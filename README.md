@@ -83,7 +83,7 @@ layouts — silent and bad).
 ## Installing
 
 ```sh
-make install                # plugin + boot files: ~/.local/lib/hyprscheme
+make install                # plugin, Scheme sources + boot files: ~/.local/lib/hyprscheme
 make install-compositor     # matched compositor: ~/.local/bin/hyprland-scheme
                             # + a session entry in ~/.local/share/wayland-sessions
 ```
