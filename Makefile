@@ -72,7 +72,10 @@ hyprland:
 
 # ---- the plugin ------------------------------------------------------------
 
-$(TARGET): $(OBJ) $(CHEZ_KERNEL) | $(CHEZ_BOOT)/petite.boot
+# the compositor binary is a prerequisite: a rebuilt Hyprland forces a
+# plugin relink (it resolves Hyprland symbols at load time and must stay
+# in sync with the tree it was compiled against)
+$(TARGET): $(OBJ) $(CHEZ_KERNEL) $(HYPRLAND_SRC)/build/Hyprland | $(CHEZ_BOOT)/petite.boot
 	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(CHEZ_KERNEL) \
 	    $(CHEZ_WORK)/lz4/lib/liblz4.a $(LIBS)
 

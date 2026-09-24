@@ -44,6 +44,7 @@ rm -f /tmp/hyprscheme-soak-last 2>/dev/null; ln -sfn "$WORK" /tmp/hyprscheme-soa
 CLOG="$WORK/compositor.log"
 ELOG="$WORK/soak-errors.log"
 HLOG="$WORK/soak-heartbeat.log"
+TLOG="$WORK/soak-trace.log"
 SLOG="$WORK/soak-summary.txt"
 
 cd "$(dirname "$0")/.."
@@ -108,9 +109,13 @@ eval_scheme() { # eval_scheme CATEGORY EXPR -> echoes output; logs + counts erro
   local cat=$1 expr=$2 out
   EVALS=$((EVALS+1))
   out=$($SCHEME "$expr" 2>&1)
+  if [[ ${SOAK_TRACE:-0} == 1 ]]; then
+    printf '%s cat=%s out=[%s]\n' "$(date +%H:%M:%S.%N | cut -c1-12)" "$cat" "${out:0:80}" >> "$TLOG"
+  fi
   if [[ $out == "error:"* ]]; then
     record_error "$cat" "$expr" "$out"
   fi
+  REPLY=$out
 }
 
 ping_alive() { # returns 0 when the interpreter answers
@@ -190,16 +195,19 @@ while (( SECONDS < END )); do
 
   for _ in $(seq 1 $BATCH_EVALS); do
     # state churn (set! two keys, ref a live one + a missing one with default)
-    out=$(eval_scheme state "(begin (hl-state-set! (quote soak-k) $ITER) (hl-state-set! (quote soak-t) (quote ($ITER))) (hl-state-set! (quote soak-gone) 1) (list (hl-state-ref (quote soak-k)) (hl-state-ref (quote soak-missing) 7) (hl-state-remove! (quote soak-gone)) (null? (hl-state-remove! (quote soak-never)))))")
+    eval_scheme state "(begin (hl-state-set! (quote soak-k) $ITER) (hl-state-set! (quote soak-t) (quote ($ITER))) (hl-state-set! (quote soak-gone) 1) (list (hl-state-ref (quote soak-k)) (hl-state-ref (quote soak-missing) 7) (hl-state-remove! (quote soak-gone)) (null? (hl-state-remove! (quote soak-never)))))"
+    out=$REPLY
     [[ $out == "($ITER 7 #t #f)" ]] || { ERRORS=$((ERRORS+1)); CAT_ERRORS[state]=$((${CAT_ERRORS[state]:-0}+1)); printf '%s iter=%s cat=state expr=state-roundtrip\n  out=%s\n' "$(date +%H:%M:%S)" "$ITER" "$out" >> "$ELOG"; }
 
     # events: register + remove + remove-again semantics; the second remove
     # must report #f (the record is inert)
-    out=$(eval_scheme events "(let ((e (hl-window-title-notification-add! (lambda _ #f)))) (and (hl-notification-remove! e) (not (hl-notification-remove! e))))")
+    eval_scheme events "(let ((e (hl-window-title-notification-add! (lambda _ #f)))) (and (hl-notification-remove! e) (not (hl-notification-remove! e))))"
+    out=$REPLY
     [[ $out == "#t" ]] || { ERRORS=$((ERRORS+1)); CAT_ERRORS[events]=$((${CAT_ERRORS[events]:-0}+1)); printf '%s iter=%s cat=events expr=event-remove-semantics\n  out=%s\n' "$(date +%H:%M:%S)" "$ITER" "$out" >> "$ELOG"; }
     # bubble objects: dismiss! semantics — dismiss returns #t, and the handle
     # reads stale (#f) from every getter afterwards
-    out=$(eval_scheme events2 "(let ((n (hl-notification-add! (quote text) \"soak\" (quote timeout) 10))) (and (hl-notification-dismiss! n) (not (hl-notification-text n))))")
+    eval_scheme events2 "(let ((n (hl-notification-add! (quote text) \"soak\" (quote timeout) 10))) (and (hl-notification-dismiss! n) (not (hl-notification-text n))))"
+    out=$REPLY
     [[ $out == "#t" ]] || { ERRORS=$((ERRORS+1)); CAT_ERRORS[notifs]=$((${CAT_ERRORS[notifs]:-0}+1)); printf '%s iter=%s cat=notifs expr=bubble-remove-semantics\n  out=%s\n' "$(date +%H:%M:%S)" "$ITER" "$out" >> "$ELOG"; }
 
     # timers: one-shot (self-releases) + repeat/cancel in the same eval
@@ -215,10 +223,10 @@ while (( SECONDS < END )); do
     eval_scheme rules "(begin (hl-rule-enabled-set! soak-rule (not (hl-rule-enabled? soak-rule))) #t)"
 
     # notifications: object create + cancel
-    eval_scheme notifs "(begin (hl-notification-remove! (hl-notification-add! (quote text) \"soak\" (quote timeout) 10)) #t)"
+    eval_scheme notifs "(begin (hl-notification-dismiss! (hl-notification-add! (quote text) \"soak\" (quote timeout) 10)) #t)"
 
     # getters + actions on the live window
-    eval_scheme getters "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (hl-window-title w) (hl-window-floating? w) (integer? (hl-window-pid w)) (pair? (hl-window-size w)) #t))"
+    eval_scheme getters "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (string? (hl-window-title w)) (boolean? (hl-window-floating? w)) (integer? (hl-window-pid w)) (pair? (hl-window-size w)) #t))"
     eval_scheme actions "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (begin (hl-window-focus! w) (hl-window-float-set! w) (hl-window-float-set! w #f) (hl-window-position-set! w 10 10 (quote relative)) #t)))"
 
     # exec
@@ -245,7 +253,8 @@ while (( SECONDS < END )); do
     (hl-layout-msg \"narrower\")
     #t)"
   # pool integrity: all five alive, none lost
-  out=$(eval_scheme rearrange-check "(length (hl-windows-from \"class:soak-pool-.*\"))")
+  eval_scheme rearrange-check "(length (hl-windows-from \"class:soak-pool-.*\"))"
+  out=$REPLY
   [[ $out == "5" ]] || { ERRORS=$((ERRORS+1)); CAT_ERRORS[pool]=$((${CAT_ERRORS[pool]:-0}+1)); printf '%s iter=%s cat=pool expr=pool-integrity\n  out=%s\n' "$(date +%H:%M:%S)" "$ITER" "$out" >> "$ELOG"; }
 
   # window churn: spawn a sacrificial, then close it (burst load)
