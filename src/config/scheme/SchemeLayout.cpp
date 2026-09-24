@@ -47,17 +47,27 @@ namespace Config::Scheme::Layouts {
         return l;
     }
 
-    static ptr dispatchLayoutEvent(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider, const std::string& event,
-                                   const std::vector<SP<Layout::ITarget>>& targets, const Vector2D& delta = {}, int corner = 0);
+    static ptr dispatchRecalculate(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
+                                   const std::vector<SP<Layout::ITarget>>& targets);
+    static ptr dispatchResize(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
+                              const std::vector<SP<Layout::ITarget>>& targets, const Vector2D& delta, int corner);
     static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, ptr result);
 
-    static void fireSchemeLayoutWin(SP<SSchemeLayoutProvider> provider, const char* event, PHLWINDOW window) {
+    static ptr schemeSpec(SP<SSchemeLayoutProvider>& p) { return p->spec.obj; }
+    static ptr callScheme1(const char* fn, ptr spec, ptr a) {
+        return Scall2(Stop_level_value(Sstring_to_symbol(fn)), spec, a);
+    }
+
+    static void fireSchemeLayoutWindowOpen(SP<SSchemeLayoutProvider> provider, PHLWINDOW window) {
         if (!provider || !provider->active || !window)
             return;
+        callScheme1("hl--layout-window-open", schemeSpec(provider), Sinteger(Internals::mintWindowHandle(window)));
+    }
 
-        const auto id = Internals::mintWindowHandle(window);
-
-        Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event-spec")), provider->spec.obj, Sstring(event), Sinteger(id));
+    static void fireSchemeLayoutWindowClose(SP<SSchemeLayoutProvider> provider, PHLWINDOW window) {
+        if (!provider || !provider->active || !window)
+            return;
+        callScheme1("hl--layout-window-close", schemeSpec(provider), Sinteger(Internals::mintWindowHandle(window)));
     }
 
     static std::string normalizeName(std::string name) {
@@ -94,8 +104,8 @@ namespace Config::Scheme::Layouts {
             // them; a scheduled refresh re-runs it once the world is assembled
             Config::Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_LAYOUTS);
 
-            g_layoutEventListeners.emplace_back(Event::bus()->m_events.window.openLate.listen([provider](PHLWINDOW w) { fireSchemeLayoutWin(provider, "window-open", w); }));
-            g_layoutEventListeners.emplace_back(Event::bus()->m_events.window.close.listen([provider](PHLWINDOW w) { fireSchemeLayoutWin(provider, "window-close", w); }));
+            g_layoutEventListeners.emplace_back(Event::bus()->m_events.window.openLate.listen([provider](PHLWINDOW w) { fireSchemeLayoutWindowOpen(provider, w); }));
+            g_layoutEventListeners.emplace_back(Event::bus()->m_events.window.close.listen([provider](PHLWINDOW w) { fireSchemeLayoutWindowClose(provider, w); }));
 
             return 0;
         });
@@ -140,9 +150,9 @@ namespace Config::Scheme::Layouts {
 
         // a resize callback adjusts its state and returns boxes, or returns
         // #f meaning "state updated, re-run recalculate"
-        const ptr r = dispatchLayoutEvent(m_parent, m_provider, "resize", targets, delta, sc<int>(corner));
+        const ptr r = dispatchResize(m_parent, m_provider, targets, delta, sc<int>(corner));
         if (r == Sfalse) {
-            const ptr r2 = dispatchLayoutEvent(m_parent, m_provider, "recalculate", targets);
+            const ptr r2 = dispatchRecalculate(m_parent, m_provider, targets);
             if (r2 == Sfalse || !applyBoxes(targets, r2))
                 applyDefaultGrid(targets);
             return;
@@ -247,39 +257,45 @@ namespace Config::Scheme::Layouts {
         return list == Snil;
     }
 
-    // dispatches an event to the provider's scheme callback; the payload
-    // carries the target count, work area, per-target handle ids and event
-    // extras (resize: dx, dy, corner). returns the callback's return ptr,
-    // or Sfalse when the callback is absent or failed.
-    static ptr dispatchEventRaw(SP<SSchemeLayoutProvider> provider, const std::string& event, const std::string& payload) {
-        return Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event-spec")), provider->spec.obj, Sstring(event.c_str()), Sstring_utf8(payload.c_str(), payload.size()));
-    }
-
-    static ptr dispatchLayoutEvent(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider, const std::string& event,
-                                   const std::vector<SP<Layout::ITarget>>& targets, const Vector2D& delta, int corner) {
+    // one dispatcher per callback kind, each calling its own Scheme symbol
+    // directly; ids are one real scheme list. returns the callback's return
+    // ptr, or Sfalse when the callback is absent or failed.
+    // ptr, or Sfalse when the callback is absent or failed.
+    static ptr dispatchRecalculate(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
+                                   const std::vector<SP<Layout::ITarget>>& targets) {
         auto space = parent.lock() ? parent.lock()->space() : nullptr;
         if (!space)
             return Sfalse;
 
         const auto AREA = space->workArea();
 
-        // the payload is one real scheme list: (count W H id… [dx dy corner])
-        std::vector<uintptr_t> vals = {targets.size(), (uintptr_t)AREA.w, (uintptr_t)AREA.h};
-        if (event == "resize") {
-            vals.push_back((int)delta.x);
-            vals.push_back((int)delta.y);
-            vals.push_back(corner);
-        }
+        // payload = (count W H id ...) — the Scheme entry's fixed shape
+        std::vector<uintptr_t> vals = {(uintptr_t)targets.size(), (uintptr_t)AREA.w, (uintptr_t)AREA.h};
         for (const auto& t : targets) {
             const auto window = t->window();
-            if (!window) {
-                vals.push_back(0);
-                continue;
-            }
-            vals.push_back(Internals::mintWindowHandle(window));
+            vals.push_back(window ? Internals::mintWindowHandle(window) : 0);
         }
 
-        return Scall3(Stop_level_value(Sstring_to_symbol("hl--layout-event-spec")), provider->spec.obj, Sstring(event.c_str()), schemeIntList(vals));
+        return callScheme1("hl--layout-recalculate", schemeSpec(provider), schemeIntList(vals));
+    }
+
+    static ptr dispatchResize(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
+                              const std::vector<SP<Layout::ITarget>>& targets, const Vector2D& delta, int corner) {
+        auto space = parent.lock() ? parent.lock()->space() : nullptr;
+        if (!space)
+            return Sfalse;
+
+        const auto AREA = space->workArea();
+
+        // payload = (count W H dx dy corner id ...) — the Scheme entry's fixed shape
+        std::vector<uintptr_t> vals = {(uintptr_t)targets.size(), (uintptr_t)AREA.w, (uintptr_t)AREA.h,
+                                       (uintptr_t)(int)delta.x, (uintptr_t)(int)delta.y, (uintptr_t)corner};
+        for (const auto& t : targets) {
+            const auto window = t->window();
+            vals.push_back(window ? Internals::mintWindowHandle(window) : 0);
+        }
+
+        return callScheme1("hl--layout-resize", schemeSpec(provider), schemeIntList(vals));
     }
 
     static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, ptr result) {
@@ -297,7 +313,7 @@ namespace Config::Scheme::Layouts {
         if (!m_provider || !m_provider->active)
             return false;
 
-        const ptr r = dispatchLayoutEvent(m_parent, m_provider, "recalculate", targets);
+        const ptr r = dispatchRecalculate(m_parent, m_provider, targets);
         if (r == Sfalse || !applyBoxes(targets, r)) {
             reportError("layout callback failed or returned a malformed box list");
             return false;
@@ -353,7 +369,7 @@ namespace Config::Scheme::Layouts {
         if (!m_provider || !m_provider->active)
             return {};
 
-        const ptr r = dispatchEventRaw(m_provider, "layout-msg", std::string(sv));
+        const ptr r = callScheme1("hl--layout-msg", schemeSpec(m_provider), Sstring_utf8(sv.data(), sv.size()));
 
         std::string out;
         if (Sstringp(r)) {

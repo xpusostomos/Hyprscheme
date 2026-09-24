@@ -157,7 +157,7 @@ Mutating APIs with PLAIN names — candidates for !, grouped:
 - misc: hl-notify, hl-cursor-move, hl-cursor-corner, hl-pass,
   hl-send-shortcut, hl-send-key-state, hl-event, hl-global,
   hl-force-idle, hl-force-renderer-reload, hl-release-input-capture,
-  hl-exec, hl-exec-raw, hl-exec-with-rules, hl-mouse
+  hl-exec!, hl-exec-raw, hl-exec-with-rules, hl-mouse
 Note: verbs like close/kill/focus arguably read as commands, not
   mutations — where ! lands is a taste line (e.g. Scheme's own set!
   marks BINDING mutation; display mutates ports without !). Chris's call.
@@ -390,7 +390,7 @@ Post-mortem window identity (if ever wanted): the upstream-blessed shape
   hl-on-window-close — not a destroy payload.
 
 == EXEC WITH RULE OBJECT (implemented + verified 11/11, 2026-09-21) ==
-(hl-exec-with-rule! CMD . FIELDS) — upstream hl.exec rule-object parity
+(hl-exec! CMD . FIELDS) — upstream hl.exec rule-object parity
   (buildRuleFromTable + spawn(SExecRequest{.exec, .rule})). The rule is
   EFFECTS ONLY (no match: the executor tags the spawned window by pid
   itself, SExecRequest comment). Maximum reuse: the effect lookup is the
@@ -404,13 +404,14 @@ Post-mortem window identity (if ever wanted): the upstream-blessed shape
 == ACTIONS / DISPATCHERS ==
 Workspace change_id — CA::changeWorkspaceID (written, needs wiring — see
   IN FLIGHT).
-Exec carrying a rule OBJECT — the path is NOT the private spawnWithRules
-  overload (that was the old guess). Upstream Lua builds an
-  SP<CWindowRule> from a table via Internal::buildRuleFromTable and calls
-  the public spawn(SExecRequest{.exec, .rule}) (LuaBindingsDispatchers.cpp:
-  163-171). Gap: an alist→CWindowRule builder in the plugin plus the
-  SExecRequest spawn form. The "[rules] cmd" string form already works
-  via hl-exec-with-rules.
+Exec carrying a rule OBJECT — CLOSED (was stale): implemented as
+  (hl-exec! CMD . EFFECTS) — the plist→CWindowRule builder
+  (hlSchemeExecRule, effects validated against the windowEffects registry,
+  values via hl--rule-spec coercion) feeding the public
+  spawn(SExecRequest{.exec, .rule}); the executor tags the spawned window
+  by pid/token itself (effects only, no match). Returns the pid.
+  Documented in dispatchers.md; re-confirmed against
+  buildRuleFromTable/LuaBindingsToplevel.cpp:301-316 on 2026-09-24.
 Per-effect rule handles — CLOSED 2026-09-21: upstream has no such
   surface. hl.window_rule({...}) returns nothing method-bearing (no
   lua_pushcclosure in LuaBindingsConfigRules.cpp); the only post-hoc
@@ -570,7 +571,8 @@ LuaWindow field parity (audit item A of the missing-functionality
   NEW wiki page windows.md (full getter/action tables + layout plists,
   sidebar + scheme-utilities pointers) in the monitors.md style.
   Audit items F status: clear-crashed-lockscreen and
-  exec-scheduled-prop-refresh-immediately remain missing; bring-to-top
+  exec-scheduled-prop-refresh-immediately — IMPLEMENTED 2026-09-24 (see
+  the LOCKSCREEN + PROP-REFRESH entry below); bring-to-top
   is covered by hl-window-zorder-set!.
   DOC-TEST TAIL: the first zzz-docs run against the new build also
   surfaced four stale wiki spots (two had been masked by earlier errors
@@ -630,8 +632,24 @@ NOTIFICATIONS (audit item B — full upstream hl.notification parity):
   identity, list, rejections). Docs: notifications.md "Notification
   objects" section (maps upstream obj:method -> Scheme, notes that the
   methods live in upstream's stub not its wiki page).
-  Audit items F: clear-crashed-lockscreen and
-  exec-scheduled-prop-refresh-immediately still open.
+  Audit items F: both IMPLEMENTED 2026-09-24 (see the LOCKSCREEN +
+  PROP-REFRESH entry below).
+
+== LOCKSCREEN ESCAPE HATCH + SCHEDULED PROP REFRESH (implemented + verified, 2026-09-24) ==
+(hl-clear-crashed-lockscreen!) — upstream hl.clear_crashed_lockscreen
+  parity: clears a crashed lock screen's session lock (CSessionLockManager
+  ::forceUnlock) while refusing (errorf, upstream's exact three messages)
+  when the manager is absent, the session isn't locked, or a lock client
+  is attached/denied — it can never unlock a genuinely locked machine.
+(hl-exec-scheduled-prop-refresh-immediately) — upstream
+  hl.exec_scheduled_prop_refresh_immediately parity: forwards to
+  CPropRefresher::executeScheduledRefreshImmediately; returns #t when the
+  pending refresh ran. Docs: scheme-utilities.md (Prop Refresh section
+  now mirrors upstream's, WARNING against overuse + the
+  props-refreshed-event pointer; new "Lock screen escape hatch" section).
+  Tests: refusal when unlocked (the harness is never locked), refresh
+  returns a boolean; the lockscreen doc example is skip-listed (its
+  refusal IS the behavior). Both audit mentions closed.
 
 == BIND REGISTRIES REMOVED (record handles + counted locks, 2026-09-21) ==
 The design developed across the session's Q&A with Chris, implemented:
@@ -777,7 +795,7 @@ poked from a side thread (verified, signal 6) — keep the watchdog
 log-only, or schedule notifications from the MAIN loop if ever wanted.
 
 == VERIFY (all resolved in the tail sweep — kept as a record) ==
-hl-exec runs through /bin/sh -c (execl in spawnRawProc) — quotes,
+hl-exec! runs through /bin/sh -c (execl in spawnRawProc) — quotes,
 pipes and redirects work.
 Mouse binds: the "mouse:" key prefix implies the flag natively;
 'mouse #t is optional.
@@ -807,3 +825,26 @@ First run caught SIX real bugs (doc examples rotted where no test looked):
      in the docs batch).
 Regression cases for 1-3 live in tests/t-config.sh; 4-6 are covered by
   t-zzz-docs itself executing the corrected blocks.
+
+== EXEC CONSOLIDATED TO ONE FUNCTION (2026-09-24) ==
+(hl-exec! CMD . EFFECTS) — the ONE exec, upstream hl.dsp.exec_cmd parity.
+  No effects → executor()->spawn(cmd) — async /bin/sh -c, and the legacy
+  "[rules] cmd" bracket prefix still parses on that path (C++ layer).
+  With EFFECTS → the plist builds a one-shot CWindowRule (validated against
+  the windowEffects registry, values via hl--rule-spec coercion) and spawns
+  via SExecRequest{.exec, .rule}; the executor tags the spawned window by
+  pid itself. Returns the pid. DELETED: hl-exec, hl-exec-shell!,
+  hl-exec-shell-with-rules!, hl-exec-with-rule!, and the raw hl-exec! —
+  five names for what upstream's dsp_execCmd/dsp_execRaw front with two.
+  Grounded in the executor source: spawn(string) → spawnWithRules(args)
+  and spawnRaw(args) converge on the IDENTICAL spawnRawProc(args, nullptr,
+  "") call when no rules exist (Executor.cpp:89-90,117-129), and even
+  spawnRaw shells out (execl /bin/sh -c, Executor.cpp:200) — the old "raw
+  = no shell, execvp" doc claim was false and is gone. exec_raw folds in
+  because it IS the no-rule path. os.execute() is no substitute (blocking
+  system() on the config thread, no env injection, no rules, no
+  execOnce/execShutdown lifecycle). Rename sweep protected
+  hl-exec-scheduled-prop-refresh-immediately from the bare-name pass.
+  Tests: t-exec (pid returns, bracket rules, plist rule + live float
+  check), t-api (pid assertions, unknown-effect rejection). Docs:
+  dispatchers.md single row, scheme-utilities.md convenience list.

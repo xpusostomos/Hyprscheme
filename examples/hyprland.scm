@@ -4,8 +4,8 @@
 ;; ---- binds ----------------------------------------------------------------
 ;; hl-bind-add! takes a TOKEN LIST (mods first, key last) and a thunk.
 ;; (hl-kbd ...) is emacs syntax, (hl-key ...) is hyprland syntax; both return the list.
-(hl-bind-add! (hl-kbd "s-<Return>") (lambda () (hl-exec "foot")))
-(hl-bind-add! (hl-kbd "s-d")        (lambda () (hl-exec "wofi --show drun")))
+(hl-bind-add! (hl-kbd "s-<Return>") (lambda () (hl-exec! "foot")))
+(hl-bind-add! (hl-kbd "s-d")        (lambda () (hl-exec! "wofi --show drun")))
 (hl-bind-add! (hl-kbd "s-<Tab>")    (lambda () (hl-window-cycle!)))
 
 ;; options follow the thunk as a plist
@@ -74,7 +74,7 @@
 (hl-repeat 60000 (lambda ()
   (let ((w (hl-active-window)))
     (when (and w (equal? (hl-window-class w) "foot"))
-      (hl-exec "notify-send 'still there?'")))))
+      (hl-exec! "notify-send 'still there?'")))))
 
 ;; ---- state surviving reloads ----------------------------------------------
 (hl-state-set! (quote loaded-at) "boot")

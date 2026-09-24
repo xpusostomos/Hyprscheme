@@ -8,12 +8,12 @@ val()   { out=$($SCHEME "$1" 2>&1); [[ "$out" == "$2" ]] || { echo "FAIL: $1 => 
 idok()  { out=$($SCHEME "$1" 2>&1); [[ "$out" =~ ^[0-9]+$ ]] || { echo "FAIL: $1 => [$out] want id"; FAILED=1; }; }
 
 # ---- fixtures: one window under test, one sacrificial ----------------------
-$SCHEME '(hl-exec-shell! "foot -a api-main")' >/dev/null
+$SCHEME '(hl-exec! "foot -a api-main")' >/dev/null
 WAIT_FOR 10 '(let ((w (hl-window-from "class:^api-main$"))) (if w #t #f))' >/dev/null || { echo "fixture window never appeared"; exit 1; }
 $SCHEME '(define w (hl-window-from "class:^api-main$"))
 (define aw (hl-active-workspace))
 (define am (hl-active-monitor))
-(define w2 (begin (hl-exec-shell! "foot -a api-second") #t))' >/dev/null
+(define w2 (begin (hl-exec! "foot -a api-second") #t))' >/dev/null
 WAIT_FOR 10 '(let ((w2 (hl-window-from "class:^api-second$"))) (if w2 #t #f))' >/dev/null
 $SCHEME '(define w2 (hl-window-from "class:^api-second$"))' >/dev/null
 
@@ -21,6 +21,12 @@ $SCHEME '(define w2 (hl-window-from "class:^api-second$"))' >/dev/null
 ok '(pair? (hl-kbd "C-M-a"))'
 val '(car (hl-kbd "RET"))' '"Return"'
 val '(list-ref (hl-key "SUPER+SHIFT+Q") 2)' '"Q"'
+# the terminal slot is the KEY even when it spells like a modifier letter;
+# a TRAILING DASH makes the spec a pure modifier list
+val '(hl-kbd "s-M")' '("SUPER" "M")'
+val '(hl-kbd "C-M-")' '("CTRL" "ALT")'
+val '(hl-key "CTRL+ALT")' '("CTRL" "ALT")'
+val '(hl-key "SUPER")' '("SUPER")'
 
 # ---- state ------------------------------------------------------------------
 val '(hl-state-set! (quote api-x) 1)' '1'
@@ -180,7 +186,7 @@ ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
             (not (hl-group-size g))))'       ; -> dissolved, stale record reads #f
 
 # sacrificial window: kill, then close
-$SCHEME '(hl-exec-shell! "foot -a api-kill")' >/dev/null
+$SCHEME '(hl-exec! "foot -a api-kill")' >/dev/null
 WAIT_FOR 10 '(let ((k (hl-window-from "class:^api-kill$"))) (if k #t #f))' >/dev/null || { echo "api-kill fixture never appeared"; FAILED=1; }
 $SCHEME '(define api-kill-w (hl-window-from "class:^api-kill$"))' >/dev/null
 echo "sacrificial: handle => [$($SCHEME '(if api-kill-w "have" "NONE")' 2>&1)]"
@@ -300,17 +306,17 @@ noerr '(hl-cursor-pos)'
 ok '(hl-cursor-move! 40 40)'
 ok '(hl-cursor-move-to-corner! w 0)'
 
-# ---- exec -------------------------------------------------------------------
-ok '(> (hl-exec-shell! "true") 0)'
-ok '(hl-exec! "true")'
-ok '(hl-exec-shell-with-rules! "[float] true")'
+# ---- exec (one function: (hl-exec! cmd . effects) → pid) ---------------------
+ok '(> (hl-exec! "true") 0)'
+ok '(integer? (hl-exec! "true"))'
+ok '(integer? (hl-exec! "[float] true"))'
 # exec-with-rule: spawn under a one-shot effects rule (no match — the executor
 # tags the spawned window by pid)
-idok '(hl-exec-with-rule! "foot -a exec-rule" (quote float) #t)'
+idok '(hl-exec! "foot -a exec-rule" (quote float) #t)'
 WAIT_FOR 10 '(let ((w (hl-window-from "class:^exec-rule$"))) (if w #t #f))' >/dev/null || { echo "exec-rule fixture never appeared"; FAILED=1; }
 $SCHEME '(define exec-rule-w (hl-window-from "class:^exec-rule$"))' >/dev/null
 ok '(begin (hl-window-focus! exec-rule-w) (hl-window-floating? exec-rule-w))'
-bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-exec-with-rule! "true" (quote bogus_effect) #t))))')
+bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-exec! "true" (quote bogus_effect) #t))))')
 [[ "$bad_exec" == *"bogus_effect"* ]] || { echo "FAIL: unknown exec effect not rejected => [$bad_exec]"; FAILED=1; }
 
 # ---- live notifications (upstream hl.notification object parity) ------------
@@ -362,8 +368,13 @@ ok '(list? (hl-loaded-plugins))'
 ok '(string? (hl-version))'
 ok '(list? (hl-layers))'
 ok '(boolean? (hl-window-pass-shortcut! w))'
-ok '(boolean? (hl-window-send-shortcut! "SUPER" "F10" w))'
-ok '(boolean? (hl-window-send-key-state! "SUPER" "F10" 1 w))'
+ok '(boolean? (hl-window-send-shortcut! (hl-key "SUPER") "F10" w))'
+ok '(boolean? (hl-window-send-key-state! (hl-key "SUPER") "F10" 1 w))'
+ok '(boolean? (hl-window-send-shortcut! (quote ()) "F10" w))'
+bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-window-send-shortcut! "SUPER" "F10" w))))')
+[[ "$bad_ss" == *"list of modifier tokens"* ]] || { echo "FAIL: string mods not rejected by send-shortcut => [$bad_ss]"; FAILED=1; }
+bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-window-send-shortcut! 64 "F10" w))))')
+[[ "$bad_ss" == *"list of modifier tokens"* ]] || { echo "FAIL: mask-int mods not rejected by send-shortcut => [$bad_ss]"; FAILED=1; }
 ok '(boolean? (hl-event! "apicoverage"))'
 ok '(boolean? (hl-force-idle! 0))'
 ok '(boolean? (hl-force-renderer-reload!))'
@@ -415,6 +426,15 @@ val '(hl--bind-flags (quote (devices ("k1"))) "x")' '8192'
 val '(hl--bind-flags (quote (devices ("k1") device-inclusive #f)) "x")' '0'
 val '(hl--bind-flags (quote (device-inclusive #t)) "x")' '8192'
 val '(hl--bind-flags (quote ()) "x")' '0'
+# exclusivity rules (upstream's three checks at the binding layer)
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags (quote (click #t drag #t)) "x"))))')
+[[ "$bad_bf" == *"click and drag are exclusive"* ]] || { echo "FAIL: click+drag not rejected => [$bad_bf]"; FAILED=1; }
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags (quote (release #t repeat #t)) "x"))))')
+[[ "$bad_bf" == *"incompatible with repeat"* ]] || { echo "FAIL: release+repeat not rejected => [$bad_bf]"; FAILED=1; }
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags (quote (long-press #t repeat #t)) "x"))))')
+[[ "$bad_bf" == *"incompatible with repeat"* ]] || { echo "FAIL: long-press+repeat not rejected => [$bad_bf]"; FAILED=1; }
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags (quote (mouse #t repeat #t)) "x"))))')
+[[ "$bad_bf" == *"mouse is exclusive"* ]] || { echo "FAIL: mouse+repeat not rejected => [$bad_bf]"; FAILED=1; }
 ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F13>") (lambda () #f)))'
 ok '(hl-bind? (hl-bind-add! (hl-kbd "C-M-<F15>") (lambda () #f)))'
 ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F16>") (lambda () #f) (quote release) #t (quote description) "api"))'
@@ -537,14 +557,14 @@ ok '(hl-gesture-action? (hl-make-cursor-zoom-gesture 2.0 (quote live)))'
 # within this file AND from the doc-test blocks, which self-clean)
 ok '(hl-gesture? (hl-gesture-add! (quote fingers) 4 (quote direction) "swipe" (quote action) (hl-make-workspace-swipe-gesture)))'
 ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "pinch" (quote action) (hl-make-move-gesture)))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 2 (quote direction) "up" (quote mods) "SUPER" (quote action) (hl-make-close-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 2 (quote direction) "up" (quote mods) (hl-key "SUPER") (quote action) (hl-make-close-gesture)))'
 ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "down" (quote action) (hl-make-float-gesture)))'
 ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "left" (quote action) (hl-make-special-workspace-gesture "mynotes")))'
 ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "right" (quote action) (hl-make-cursor-zoom-gesture 2.0 (quote live))))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "up" (quote mods) "ALT" (quote action) (hl-make-fullscreen-gesture (quote maximize))))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "up" (quote mods) (hl-key "ALT") (quote action) (hl-make-fullscreen-gesture (quote maximize))))'
 ok '(hl-gesture? (hl-gesture-add! (quote fingers) 5 (quote direction) "swipe" (quote action) (hl-make-custom-gesture (quote finish) (lambda args #f))))'
 # mods is a mask: multiple space-separated modifiers are permitted
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote mods) "ALT SHIFT" (quote action) (hl-make-move-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote mods) (hl-key "ALT+SHIFT") (quote action) (hl-make-move-gesture)))'
 # one recipe, two registrations — fresh C++ instance each (same recipe value)
 ok '(let ((r (hl-make-scroll-move-gesture))) (and (hl-gesture? (hl-gesture-add! (quote fingers) 6 (quote direction) "horizontal" (quote action) r)) (hl-gesture? (hl-gesture-add! (quote fingers) 6 (quote direction) "vertical" (quote action) r))))'
 # remove!: #t while registered, #f on the second call (spec-keyed removal)
@@ -566,9 +586,21 @@ bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (dis
 [[ "$bad_gest" == *"needs a procedure"* ]] || { echo "FAIL: non-procedure custom field not rejected => [$bad_gest]"; FAILED=1; }
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote action) (hl-make-move-gesture) (quote scale) 0.05))))')
 [[ "$bad_gest" == *"scale"* ]] || { echo "FAIL: degenerate scale not rejected => [$bad_gest]"; FAILED=1; }
+# 'mods is a token list — a string or an unknown token is rejected
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote mods) "SUPER" (quote action) (hl-make-move-gesture)))))')
+[[ "$bad_gest" == *"list of modifier tokens"* ]] || { echo "FAIL: string mods not rejected => [$bad_gest]"; FAILED=1; }
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote mods) (list "SUPR") (quote action) (hl-make-move-gesture)))))')
+[[ "$bad_gest" == *"unknown modifier token"* ]] || { echo "FAIL: unknown mod token not rejected => [$bad_gest]"; FAILED=1; }
 # the manager's overshadow rule now surfaces as an error (was silently dropped)
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 9 (quote direction) "up" (quote action) (hl-make-move-gesture)))))')
 [[ "$bad_gest" == *"overshadowed"* ]] || { echo "FAIL: overshadowed gesture not rejected => [$bad_gest]"; FAILED=1; }
+
+# ---- session lock escape hatch + scheduled prop refresh ----------------------
+# the harness session is never locked: the lock-screen hatch must refuse,
+# and the prop refresh runs trivially
+bad_lock=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-clear-crashed-lockscreen!))))')
+[[ "$bad_lock" == *"session is not locked"* ]] || { echo "FAIL: clear-crashed-lockscreen did not refuse when unlocked => [$bad_lock]"; FAILED=1; }
+ok '(boolean? (hl-exec-scheduled-prop-refresh-immediately))'
 ok '(hl-event? (hl-screenshare-state-notification-add! (lambda (a t n) #f)))'
 ok '(hl-event? (hl-keyboard-key-notification-add! (lambda (k t s) #f)))'
 
@@ -605,7 +637,7 @@ ok '(begin (hl-state-set! (quote ev-cancelled) 0)
        (hl-notification-remove! (hl-window-open-notification-add!
           (lambda (w) (hl-state-set! (quote ev-cancelled) 1))))
        #t)'
-$SCHEME '(hl-exec-shell! "foot -a ev-cancelled")' >/dev/null
+$SCHEME '(hl-exec! "foot -a ev-cancelled")' >/dev/null
 WAIT_FOR 8 '(let ((w (hl-window-from "class:^ev-cancelled$"))) (if w #t #f))' >/dev/null || { echo "FAIL: ev-cancelled fixture never appeared"; FAILED=1; }
 sleep 0.5
 val '(hl-state-ref (quote ev-cancelled))' '0'

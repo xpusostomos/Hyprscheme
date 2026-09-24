@@ -389,56 +389,55 @@ static constexpr const char* SCHEME_PRELUDE = R"scm(
           ((and (< s e) (char-whitespace? (string-ref str (- e 1)))) (loop s (- e 1)))
           (else (substring str s e)))))
 
-;; layout event dispatch. a layout provider is a PLIST of callbacks:
-;;   ((recalculate . fn) (resize . fn) (window-open . fn) (window-close . fn))
-;; recalculate/resize fn: (count W H windows [dx dy corner]) -> ((x y w h) ...)
-;; window callbacks: (window) -> ignored. #f when absent or on error.
-(define (hl--layout-event-spec spec event payload)
-  (let* ((cbs spec))
-    (if (not cbs)
-        #f
-        (guard (e (#t (hl--report e)))
-          (cond
-            ((equal? event "window-open")
-             (let ((cb (hl--plist-get cbs 'window-open #f)))
-               (if cb (cb (hl--mint-window payload)) #f)))
-            ((equal? event "window-close")
-             (let ((cb (hl--plist-get cbs 'window-close #f)))
-               (if cb (cb (hl--mint-window payload)) #f)))
-            ((equal? event "layout-msg")
-             (let ((cb (hl--plist-get cbs 'layout-msg #f)))
-               (if (not cb)
-                   ""
-                   (let ((r (cb payload)))
-                     (cond ((not r) "rejected")
-                           ((string? r) r)
-                           (else ""))))))
-            (else
-             ;; payload is a real list: (count W H id... [dx dy corner] for resize)
-             (let* ((count (car payload))
-                    (W     (cadr payload))
-                    (H     (caddr payload))
-                    (tail  (cdddr payload)))
-               (if (equal? event "resize")
-                   (let* ((n    (length tail))
-                          (cb   (or (hl--plist-get cbs 'resize #f) (hl--plist-get cbs 'recalculate #f))))
-                     (if cb
-                         (apply cb
-                                (list count W H
-                                      (map hl--mint-window (list-head tail (- n 3)))
-                                      (list-ref tail (- n 3))
-                                      (list-ref tail (- n 2))
-                                      (list-ref tail (- n 1))))
-                         #f))
-                   (let ((cb (hl--plist-get cbs 'recalculate #f)))
-                     (if cb (cb count W H (map hl--mint-window tail)) #f))))))))))
+;; layout event dispatch. spec is a flat PLIST of callbacks (see
+;; hl-layout-add!): 'recalculate 'resize 'window-open 'window-close
+;; 'layout-msg. recalculate/resize fn: (count W H windows [dx dy corner])
+;; -> ((x y w h) ...); window callbacks: (window) -> ignored; layout-msg
+;; fn: (message) -> response string. #f when absent or on error.
+;; Five direct entry points (one per callback kind) — no event strings,
+;; no dispatching cond.
+(define (hl--layout-call spec tag . args)
+  (let ((cb (hl--plist-get spec tag #f)))
+    (and cb (guard (e (#t (hl--report e)))
+              (apply cb args)))))
+
+(define (hl--layout-window-open spec id)
+  (hl--layout-call spec 'window-open (hl--mint-window id)))
+
+(define (hl--layout-window-close spec id)
+  (hl--layout-call spec 'window-close (hl--mint-window id)))
+
+(define (hl--layout-msg spec msg)
+  (let ((r (hl--layout-call spec 'layout-msg msg)))
+    (cond ((not r) "rejected")
+          ((string? r) r)
+          (else ""))))
+
+;; recalculate: payload = (count W H id ...)
+(define (hl--layout-recalculate spec payload)
+  (hl--layout-call spec 'recalculate (car payload) (cadr payload) (caddr payload)
+                   (map hl--mint-window (cdddr payload))))
+
+;; resize: payload = (count W H dx dy corner id ...); a spec without a
+;; 'resize callback falls back to 'recalculate (documented behavior)
+(define (hl--layout-resize spec payload)
+  (let* ((count (list-ref payload 0))
+         (W     (list-ref payload 1))
+         (H     (list-ref payload 2))
+         (dx    (list-ref payload 3))
+         (dy    (list-ref payload 4))
+         (corner (list-ref payload 5))
+         (ids   (list-tail payload 6))
+         (cb    (or (hl--plist-get spec 'resize #f) (hl--plist-get spec 'recalculate #f))))
+    (and cb
+         (guard (e (#t (hl--report e)))
+           (cb count W H (map hl--mint-window ids) dx dy corner)))))
 )scm";
 
 static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; hl-bind-add!: record first (locked + tagged C++-side), then the tokens
 ;; the bind is built from, flags, description, devices
-(define c-hl-bind (foreign-procedure "hl-scheme-bind" (scheme-object scheme-object int string string) int))
-(define c-hl-exec (foreign-procedure "hl-scheme-exec" (string) int))
+(define c-hl-bind (foreign-procedure "hl-scheme-bind" (scheme-object scheme-object int string scheme-object) int))
 (define c-hl-timer (foreign-procedure "hl-scheme-timer" (scheme-object int int) int))
 (define c-hl-active-title (foreign-procedure "hl-scheme-active-title" () scheme-object))
 (define c-hl-workspace-names (foreign-procedure "hl-scheme-workspace-names" () scheme-object))
@@ -618,9 +617,11 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-global (foreign-procedure "hl-scheme-global" (string) int))
 (define c-hl-event (foreign-procedure "hl-scheme-event" (string) int))
 (define c-hl-pass (foreign-procedure "hl-scheme-pass" (integer-64) int))
-(define c-hl-send-shortcut (foreign-procedure "hl-scheme-send-shortcut" (string string integer-64) int))
-(define c-hl-send-key-state (foreign-procedure "hl-scheme-send-key-state" (string string int integer-64) int))
+(define c-hl-send-shortcut (foreign-procedure "hl-scheme-send-shortcut" (scheme-object string integer-64) int))
+(define c-hl-send-key-state (foreign-procedure "hl-scheme-send-key-state" (scheme-object string int integer-64) int))
 (define c-hl-mouse (foreign-procedure "hl-scheme-mouse" (string) int))
+(define c-hl-clear-crashed-lockscreen (foreign-procedure "hl-scheme-clear-crashed-lockscreen" () int))
+(define c-hl-scheduled-prop-refresh-immediately (foreign-procedure "hl-scheme-scheduled-prop-refresh-immediately" () int))
 (define c-hl-release-input-capture (foreign-procedure "hl-scheme-release-input-capture" () int))
 (define c-hl-window-fullscreen-state (foreign-procedure "hl-scheme-window-fullscreen-state" (integer-64 int int int) int))
 (define c-hl-layout-message (foreign-procedure "hl-scheme-layout-message" (string) int))
@@ -696,8 +697,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-timer-enabled (foreign-procedure "hl-timer-enabled" (scheme-object) int))
 (define c-hl-timer-set-timeout (foreign-procedure "hl-timer-set-timeout" (scheme-object double) int))
 (define c-hl-timer-cancel (foreign-procedure "hl-timer-cancel" (scheme-object) int))
-(define c-hl-exec-raw (foreign-procedure "hl-exec!" (string) int))
-(define c-hl-exec-with-rules (foreign-procedure "hl-exec-shell-with-rules!" (string) int))
+(define c-hl-exec! (foreign-procedure "hl-exec!" (string scheme-object) int))
 ;; one maker address per constructor, fetched from its own one-line C
 ;; accessor — no name strings, no dispatch
 (define c-hl-gesture-maker-workspace-swipe (foreign-procedure "hl-scheme-gesture-maker-workspace-swipe" () integer-64))
@@ -710,8 +710,8 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define c-hl-gesture-maker-special (foreign-procedure "hl-scheme-gesture-maker-special" () integer-64))
 (define c-hl-gesture-maker-cursor-zoom (foreign-procedure "hl-scheme-gesture-maker-cursor-zoom" () integer-64))
 (define c-hl-gesture-maker-custom (foreign-procedure "hl-scheme-gesture-maker-custom" () integer-64))
-(define c-hl-gesture (foreign-procedure "hl-scheme-gesture" (scheme-object int string string double int) int))
-(define c-hl-gesture-remove (foreign-procedure "hl-scheme-gesture-remove" (int string string double int) int))
+(define c-hl-gesture (foreign-procedure "hl-scheme-gesture" (scheme-object int string scheme-object double int) int))
+(define c-hl-gesture-remove (foreign-procedure "hl-scheme-gesture-remove" (int string scheme-object double int) int))
 
 ;; helpers for the action wrappers: window #f = active; actions 'toggle/'on/'off;
 ;; directions "l"/"r"/"u"/"d" or the symbols left/right/up/down
@@ -801,6 +801,9 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
         (devices (hl--plist-get pl 'devices #f)))
     (when (and click drag)
       (errorf 'hl-bind-add! "click and drag are exclusive"))
+    (when (and (or (hl--plist-get pl 'long-press #f) (hl--plist-get pl 'release #f))
+               (hl--plist-get pl 'repeat #f))
+      (errorf 'hl-bind-add! "long-press / release is incompatible with repeat"))
     (when (and (hl--plist-get pl 'mouse #f)
                (or (hl--plist-get pl 'repeat #f) (hl--plist-get pl 'locked #f) (hl--plist-get pl 'release #f)))
       (errorf 'hl-bind-add! "mouse is exclusive with repeat/locked/release"))
@@ -813,24 +816,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
        (if (equal? key "catchall") 16384 0)      ; upstream: key "catchall" ⇒ BIND_FLAG_CATCH_ALL
        (hl--plist-fold (lambda (opt bit acc) (+ acc (if (hl--plist-get pl opt #f) bit 0))) 0 hl--flag-bits))))
 
-(define (hl--bind-impl tokens thunk . opts)
-  (let* ((key (car (reverse tokens)))
-         (rec (make-hl-bind tokens thunk))
-         (rc (c-hl-bind rec
-                        tokens
-                        (hl--bind-flags opts key)
-                        (hl--plist-get opts 'description "")
-                        (let ((ds (hl--plist-get opts 'devices #f)))
-                          (if (list? ds)
-                              (let loop ((rest ds) (acc ""))
-                                (cond ((null? rest) acc)
-                                      ((null? (cdr rest)) (string-append acc (car rest)))
-                                      (else (loop (cdr rest) (string-append acc (car rest) ",")))))
-                              "")))))
-    (if (= 0 rc)
-        rec
-        (errorf 'hl-bind-add! "bind ~a rejected, see compositor log" tokens))))
-
 ;; hl-bind-add! is the one way to register a bind: TOKENS is a list of key
 ;; tokens — the modifiers first, then the key. Build it with a helper:
 ;;   (hl-bind-add! (hl-kbd "C-M-a") THUNK . OPTS)        — emacs syntax
@@ -841,7 +826,17 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; two-string shorthand in the core API — define your own wrapper on top
 ;; if you want one (see the wiki, binds).
 (define (hl-bind-add! tokens thunk . opts)
-  (apply hl--bind-impl tokens thunk opts))
+  (let* ((key (car (reverse tokens)))
+         (rec (make-hl-bind tokens thunk))
+         (rc (c-hl-bind rec
+                        tokens
+                        (hl--bind-flags opts key)
+                        (hl--plist-get opts 'description "")
+                        (let ((ds (hl--plist-get opts 'devices #f)))
+                          (if (list? ds) ds '())))))
+    (if (= 0 rc)
+        rec
+        (errorf 'hl-bind-add! "~a" (c-hl-config-last-error)))))
 
 ;; ---- key specification helpers -----------------------------------------------
 ;; (hl-kbd "C-M-a")      — emacs syntax → token list for hl-bind-add!
@@ -885,14 +880,20 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 (define (hl-kbd spec)
   ;; parse an emacs key specification string → a LIST of key tokens
-  ;; e.g. "C-M-a" → ("CTRL" "ALT" "a"), "<f1>" → ("F1")
+  ;; e.g. "C-M-a" → ("CTRL" "ALT" "a"), "<f1>" → ("F1"). The LAST token is
+  ;; the key, even when it spells like a modifier letter ("s-M" →
+  ;; ("SUPER" "M") — Super+M the key, not Super+Alt). A TRAILING DASH makes
+  ;; it a pure modifier list: "C-M-" → ("CTRL" "ALT").
   (let loop ((str spec) (acc '()))
     (let ((dash (hl--string-index str #\-)))
       (if (and dash (> dash 0))
           (let ((prefix (substring str 0 dash)))
             (if (assoc prefix hl--emacs-mods)
-                (loop (substring str (+ dash 1) (string-length str))
-                      (cons (cdr (assoc prefix hl--emacs-mods)) acc))
+                ;; a spec ending in the dash ("C-M-") is a pure modifier list
+                (let ((rest (substring str (+ dash 1) (string-length str))))
+                  (if (= 0 (string-length rest))
+                      (reverse (cons (cdr (assoc prefix hl--emacs-mods)) acc))
+                      (loop rest (cons (cdr (assoc prefix hl--emacs-mods)) acc))))
                 (reverse (cons (hl--emacs-key str) acc))))
           (reverse (cons (hl--emacs-key str) acc))))))
 
@@ -900,9 +901,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   ;; parse a lua/hyprland key specification string → a LIST of key tokens
   ;; e.g. "SUPER+SHIFT+Q" → ("SUPER" "SHIFT" "Q")
   (map hl--trim (hl--split-string spec #\+)))
-
-(define (hl-exec-shell! cmd)
-  (c-hl-exec cmd))
 
 ;; hl-after/hl-repeat return hl-timer RECORDS; these control them afterwards.
 ;; A one-shot releases its own record lock when it completes; a repeating
@@ -1331,17 +1329,36 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-window-pass-shortcut! w)
   (= 0 (c-hl-pass (hl--wid w))))
 
-;; mods: mask int (SHIFT 1 CAPS 2 CTRL 4 ALT 8 MOD2 16 MOD3 32 META 64 MOD5 128)
-;; key: xkb keycode
+;; MODS is a list of modifier tokens, as built by hl-kbd/hl-key
+;; (e.g. (hl-key "SUPER")), the same shape every mods-taking API takes;
+;; key is an xkb keysym name
 (define (hl-window-send-shortcut! mods key . w)
+  (unless (and (list? mods) (andmap (lambda (m) (string? m)) mods))
+    (errorf 'hl-window-send-shortcut! "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
   (= 0 (c-hl-send-shortcut mods key (if (null? w) -1 (hl--wid (car w))))))
 
 (define (hl-window-send-key-state! mods key state . w)
+  (unless (and (list? mods) (andmap (lambda (m) (string? m)) mods))
+    (errorf 'hl-window-send-key-state! "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
   (= 0 (c-hl-send-key-state mods key state (if (null? w) -1 (hl--wid (car w))))))
 
 ;; interactive drag/resize for mouse binds: (hl-mouse-action! "drag") / (hl-mouse-action! "resize")
 (define (hl-mouse-action! action)
   (= 0 (c-hl-mouse (hl--str action))))
+
+;; (upstream hl.clear_crashed_lockscreen) — manual escape hatch when a lock
+;; screen has crashed: clears the session lock so the session is usable
+;; again. Refused (error) while a lock client is attached, or when the
+;; session isn't locked at all — it can never unlock a live lock screen.
+(define (hl-clear-crashed-lockscreen!)
+  (let ((rc (c-hl-clear-crashed-lockscreen)))
+    (if (= 0 rc) #t (errorf 'hl-clear-crashed-lockscreen! "~a" (c-hl-config-last-error)))))
+
+;; (upstream hl.exec_scheduled_prop_refresh_immediately) — config-time
+;; changes (rules, props, layouts, ...) schedule a deferred refresh pass;
+;; this runs it NOW. #t when it executed (as-scheduled bit), #f otherwise.
+(define (hl-exec-scheduled-prop-refresh-immediately)
+  (= 0 (c-hl-scheduled-prop-refresh-immediately)))
 
 (define (hl-release-input-capture!)
   (= 0 (c-hl-release-input-capture)))
@@ -1403,23 +1420,27 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
       #t
       (errorf 'hl-device-add! "~a" (c-hl-config-last-error))))
 
-(define c-hl-exec-with-rule (foreign-procedure "hl-exec-with-rule" (string scheme-object) int))
 
-;; spawn CMD under a one-shot rule built from an effects PLIST ('float #t
-;; 'workspace "games" ...). effects only — no match: the executor tags the
-;; spawned window by pid itself. values go through the same rule-spec
-;; coercion as hl-window-rule-add! (numbers/bools → config strings).
-(define (hl-exec-with-rule! cmd . fields)
+;; (hl-exec! "cmd") — the ONE exec (upstream hl.dsp.exec_cmd parity; its
+;; exec_raw is the identical no-rule path, so it folds in here). Spawns
+;; asynchronously through the compositor's executor — shell, env injection,
+;; never blocks the config. Optional rule EFFECTS as a plist build a one-shot
+;; window rule pinned to the spawned window by pid (upstream
+;; hl.exec_cmd(cmd, ruleTable)); values go through the same rule-spec
+;; coercion as hl-window-rule-add!. With no effects the command may still
+;; carry the legacy inline rule prefix ("[float size 800 500] mygame") —
+;; the C++ layer parses it on the plain path. Returns the new pid.
+(define (hl-exec! cmd . effects)
   (define (flat l)
     (cond ((null? l) '())
-          ((null? (cdr l)) (errorf 'hl-exec-with-rule! "odd plist of effects"))
+          ((null? (cdr l)) (errorf 'hl-exec! "odd plist of rule effects"))
           (else (list* (hl--str (car l))
                        (hl--rule-spec-value (cadr l))
                        (flat (cddr l))))))
-  (let ((pid (c-hl-exec-with-rule (hl--str cmd) (flat fields))))
+  (let ((pid (c-hl-exec! (hl--str cmd) (flat effects))))
     (if (> pid 0)
         pid
-        (errorf 'hl-exec-with-rule! "~a" (c-hl-config-last-error)))))
+        (errorf 'hl-exec! "~a" (c-hl-config-last-error)))))
 
 ;; ---- rules -------------------------------------------------------------------
 ;; window/layer rules: a plist with 'match (a plist of property → value),
@@ -2076,13 +2097,6 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 (define (hl-timer-cancel! t)
   (= 0 (c-hl-timer-cancel t)))
 
-;; ---- exec variants ----------------------------------------------------------------
-;; (hl-exec! "cmd") — no shell; the string is execvp'd (space-split)
-;; (hl-exec-shell-with-rules! "[float size 800 500] mygame") — classic exec rules
-(define (hl-exec! cmd)
-  (> (c-hl-exec-raw cmd) 0))
-(define (hl-exec-shell-with-rules! cmd)
-  (> (c-hl-exec-with-rules cmd) 0))
 
 ;; ---- gestures ----------------------------------------------------------------------
 ;; Gesture actions are typed values, not strings: an hl-gesture-action is an
@@ -2094,7 +2108,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 ;; workspace) constructs two independent C++ gestures from the same recipe.
 ;;
 ;; (hl-gesture-add! 'fingers N 'direction "dir" 'action ACTION
-;;                  ['mods "SUPER"] ['scale 1.0] ['disable-inhibit #t])
+;;                  ['mods (hl-key "SUPER")] ['scale 1.0] ['disable-inhibit #t])
 ;; fingers + direction required (upstream hl.gesture parity); the optional
 ;; fields describe the gesture INPUT, independent of the action. Returns an
 ;; hl-gesture handle for (hl-gesture-remove! G) — the manager matches removal
@@ -2179,7 +2193,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
   (let* ((fingers   (hl--plist-get fields 'fingers #!eof))
          (direction (hl--plist-get fields 'direction #!eof))
          (action    (hl--plist-get fields 'action #!eof))
-         (mods      (hl--plist-get fields 'mods ""))
+         (mods      (hl--plist-get fields 'mods '()))
          (scale     (hl--plist-get fields 'scale 1.0))
          (inhibit   (hl--plist-get fields 'disable-inhibit #f)))
     (cond ((eq? fingers #!eof)
@@ -2194,20 +2208,22 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
            (errorf 'hl-gesture-add! "an action is required — 'action (hl-make-...-gesture ...)"))
           ((not (hl-gesture-action? action))
            (errorf 'hl-gesture-add! "field 'action' must be an hl-gesture-action (see the hl-make-*-gesture constructors)"))
+          ((not (and (list? mods) (andmap (lambda (m) (string? m)) mods)))
+           (errorf 'hl-gesture-add! "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\") or '(\"SUPER\" \"SHIFT\")"))
           ((not (or (<= -10.0 scale -0.1) (<= 0.1 scale 10.0)))
            (errorf 'hl-gesture-add! "field 'scale' must be between -10 and -0.1 or between 0.1 and 10 - it is currently: ~a" scale))
           (else
-           (let ((rc (c-hl-gesture action fingers (hl--str direction) (hl--str mods) (exact->inexact scale) (if inhibit 1 0))))
+           (let ((rc (c-hl-gesture action fingers (hl--str direction) mods (exact->inexact scale) (if inhibit 1 0))))
              (cond ((not (= 0 rc))
                     (errorf 'hl-gesture-add! "~a" (c-hl-config-last-error)))
                    (else
                     ;; the handle is the exact registration spec — the manager
                     ;; matches removal on it, so remove! always hits our gesture
-                    (list fingers direction (hl--str mods) scale inhibit))))))))
+                    (list fingers direction mods scale inhibit))))))))
 
 ;; the hl-gesture handle: (fingers direction mods scale disable-inhibit)
 (define (hl-gesture? x)
-  (and (pair? x) (list? x) (= 5 (length x)) (integer? (car x)) (string? (cadr x))))
+  (and (pair? x) (list? x) (= 5 (length x)) (integer? (car x)) (string? (cadr x)) (list? (caddr x))))
 
 ;; → #t removed / #f nothing registered under that spec / error
 (define (hl-gesture-remove! g)
@@ -2720,6 +2736,7 @@ static constexpr const char* SCHEME_BOOTSTRAP = R"scm(
 
 namespace Config::Scheme::Internals {
     bool g_up          = false; // interpreter + bootstrap ready
+    static std::string g_configError; // last config error, read via c-hl-config-last-error
 
     // ---- object handles -------------------------------------------------------
     // A handle is a heap-allocated weak ref; the Scheme record carries its
@@ -2920,7 +2937,7 @@ namespace Config::Scheme {
 
     static Keybinds::SBindResult fireSchemeBindRec(ptr record); // defined below
 
-    static int hlSchemeBind(ptr record, ptr tokens, int flags, const char* desc, const char* devices) {
+    static int hlSchemeBind(ptr record, ptr tokens, int flags, const char* desc, ptr devices) {
         if (!g_up)
             return -1;
 
@@ -2949,11 +2966,14 @@ namespace Config::Scheme {
             args.metadata.description = desc;
         args.metadata.submap      = g_regSubmap;
         args.metadata.submapReset = g_regSubmapReset;
-        if (devices && *devices) {
-            std::istringstream ds(devices);
-            for (std::string dev; std::getline(ds, dev, ',');)
-                if (!dev.empty())
-                    args.devices.emplace(dev);
+        // devices arrive as a real list of name strings; a non-list element
+        // or a non-string device is rejected
+        for (ptr p = devices; Spairp(p) && p != Snil; p = Scdr(p)) {
+            if (!Sstringp(Scar(p))) {
+                g_configError = "hl-bind-add!: 'devices must be a list of device name strings";
+                return -1;
+            }
+            args.devices.emplace(schemeDatumToStr(Scar(p)));
         }
 
         auto bind = Keybinds::CBind::make(std::move(keys), sc<Keybinds::BindFlags>(flags), [ref] { return fireSchemeBindRec(ref.obj); }, std::move(args));
@@ -3028,14 +3048,6 @@ namespace Config::Scheme {
                 return 0;
             }
         return -1; // not registered (already unbound, or a stale handle)
-    }
-
-    // called from Scheme via foreign-procedure
-    static int hlSchemeExec(const char* cmd) {
-        if (!g_up || !cmd)
-            return -1;
-
-        return (int)Config::Supplementary::executor()->spawn(cmd).value_or(-1);
     }
 
     // fires a handler registered for id with a string payload; all errors are
@@ -4310,26 +4322,33 @@ namespace Config::Scheme {
         return actionResult("pass", Config::Actions::pass(actionWindow(id)));
     }
 
-    static Input::ModifierMask gestureMods(const char* mods); // defined below
+    static std::optional<Input::ModifierMask> modsMaskFromTokens(ptr mods); // defined below
 
-    // mods/key arrive as the same strings binds take (e.g. "SUPER" "F10");
-    // resolve to mask + keysym here so the Scheme surface stays string-based
-    static int hlSchemeSendShortcut(const char* mods, const char* key, long long id) {
+    // mods arrive as a LIST of modifier tokens (as built by hl-kbd/hl-key),
+    // the same shape every mods-taking API takes; only the key is resolved
+    // from its string name here
+    static int hlSchemeSendShortcut(ptr mods, const char* key, long long id) {
         if (!g_up)
+            return -1;
+        const auto mask = modsMaskFromTokens(mods);
+        if (!mask)
             return -1;
         const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
         if (sym == 0)
             return -1;
-        return actionResult("send-shortcut", Config::Actions::pass(gestureMods(mods), sc<uint32_t>(sym), actionWindow(id)));
+        return actionResult("send-shortcut", Config::Actions::pass(*mask, sc<uint32_t>(sym), actionWindow(id)));
     }
 
-    static int hlSchemeSendKeyState(const char* mods, const char* key, int state, long long id) {
+    static int hlSchemeSendKeyState(ptr mods, const char* key, int state, long long id) {
         if (!g_up)
+            return -1;
+        const auto mask = modsMaskFromTokens(mods);
+        if (!mask)
             return -1;
         const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
         if (sym == 0)
             return -1;
-        return actionResult("send-key-state", Config::Actions::sendKeyState(gestureMods(mods), sc<uint32_t>(sym), sc<uint32_t>(state), actionWindow(id)));
+        return actionResult("send-key-state", Config::Actions::sendKeyState(*mask, sc<uint32_t>(sym), sc<uint32_t>(state), actionWindow(id)));
     }
 
     static int hlSchemeMouse(const char* action) {
@@ -4370,7 +4389,75 @@ namespace Config::Scheme {
     // hyprctl eval 'hl.config(...)'.
 
     static lua_State*  g_configScratch = nullptr;
-    static std::string g_configError;
+
+    // (upstream hl.clear_crashed_lockscreen) — manual escape hatch for a
+    // crashed lock screen: clears the session lock ONLY while no lock client
+    // is attached (unlocking a genuinely locked machine is refused)
+    static int hlSchemeClearCrashedLockscreen() {
+        if (!g_up)
+            return -1;
+        if (!g_pSessionLockManager)
+            g_configError = "hl-clear-crashed-lockscreen!: sessionLockMgr not init'd yet";
+        else if (!g_pSessionLockManager->isSessionLocked())
+            g_configError = "hl-clear-crashed-lockscreen!: session is not locked";
+        else if (g_pSessionLockManager->clientLocked() || g_pSessionLockManager->clientDenied())
+            g_configError = "hl-clear-crashed-lockscreen!: session is locked with a client, refusing to unlock";
+        else {
+            g_pSessionLockManager->forceUnlock();
+            return 0;
+        }
+        return -1;
+    }
+
+    // (upstream hl.exec_scheduled_prop_refresh_immediately) — run the
+    // prop refresher's pending scheduled refresh NOW instead of on its
+    // next tick (config-time prop/rule changes become visible immediately)
+    static int hlSchemeScheduledPropRefreshImmediately() {
+        if (!g_up)
+            return -1;
+        return Config::Supplementary::refresher()->executeScheduledRefreshImmediately();
+    }
+
+    // (cmd, effects) → pid. The ONE exec: no effects → spawn(cmd) — the
+    // compositor's async shell executor (the legacy "[rules] cmd" prefix is
+    // still parsed by the C++ layer here); with effects → the effects plist
+    // builds a one-shot CWindowRule (validated against the windowEffects
+    // registry) and spawns via SExecRequest{.exec, .rule} — the executor
+    // tags the spawned window by pid itself (upstream hl.exec_cmd(cmd,
+    // ruleTable) parity; upstream's exec_raw is the same no-rule path, so
+    // it folds in).
+    static int hlSchemeExec(const char* cmd, ptr effects) {
+        if (!g_up || !cmd || !*cmd)
+            return -1;
+
+        // walk the effects plist; empty → plain spawn, else build the rule
+        auto rule = makeShared<Desktop::Rule::CWindowRule>();
+        bool any  = false;
+        for (ptr l = effects; Spairp(l); l = Scdr(Scdr(l))) {
+            if (!Spairp(Scdr(l))) {
+                g_configError = "hl-exec!: odd plist of rule effects";
+                return -1;
+            }
+            const std::string effect = schemeDatumToStr(Scar(l));
+            const auto        e      = Desktop::Rule::windowEffects()->get(std::string_view(effect));
+            if (!e) {
+                g_configError = std::format("hl-exec!: unknown rule effect '{}'", effect);
+                return -1;
+            }
+            const auto res = rule->addEffect(*e, schemeDatumToStr(Scar(Scdr(l))));
+            if (!res) {
+                g_configError = std::format("hl-exec!: effect '{}': {}", effect, res.error());
+                return -1;
+            }
+            any = true;
+        }
+
+        if (!any)
+            return (int)Config::Supplementary::executor()->spawn(cmd).value_or(-1);
+        return (int)Config::Supplementary::executor()
+                   ->spawn(Config::Supplementary::SExecRequest{.exec = cmd, .rule = std::move(rule)})
+                   .value_or(-1);
+    }
 
     // ---- groups as objects (upstream HL.Group parity) --------------------------
     // groups dissolve behind our backs -> weak handles via the guardian (the
@@ -4868,45 +4955,6 @@ namespace Config::Scheme {
         return 0;
     }
 
-    // (hl-exec-with-rule! CMD . FIELDS) — spawn CMD under a one-shot window
-    // rule built from an effects plist ('float #t 'workspace "games" ...).
-    // Effects only, no match: the executor tags the spawned window by pid
-    // itself (upstream hl.exec rule-object parity, SExecRequest.rule).
-    static int hlSchemeExecRule(const char* cmd, ptr fields) {
-        if (!g_up || !cmd || !*cmd)
-            return -1;
-
-        auto rule = makeShared<Desktop::Rule::CWindowRule>();
-        ptr  l    = fields;
-        while (Spairp(l)) {
-            if (!Spairp(Scdr(l))) {
-                g_configError = "hl-exec-with-rule!: odd plist of effects";
-                return -1;
-            }
-            const std::string effect = schemeDatumToStr(Scar(l));
-            const auto        e      = Desktop::Rule::windowEffects()->get(std::string_view(effect));
-            if (!e) {
-                g_configError = std::format("hl-exec-with-rule!: unknown effect '{}'", effect);
-                return -1;
-            }
-            const auto res = rule->addEffect(*e, schemeDatumToStr(Scar(Scdr(l))));
-            if (!res) {
-                g_configError = std::format("hl-exec-with-rule!: effect '{}': {}", effect, res.error());
-                return -1;
-            }
-            l = Scdr(Scdr(l));
-        }
-
-        // an empty field list spawns plain (upstream: empty rule → spawn(proc))
-        if (l != Snil) {
-            g_configError = "hl-exec-with-rule!: odd plist of effects";
-            return -1;
-        }
-
-        return (int)Config::Supplementary::executor()
-                   ->spawn(Config::Supplementary::SExecRequest{.exec = cmd, .rule = std::move(rule)})
-                   .value_or(-1);
-    }
     static ptr hlConfigGet(const char* key) {
         if (!g_up)
             return Sfalse;
@@ -6555,20 +6603,6 @@ namespace Config::Scheme {
         return 0;
     }
 
-    // ---- exec variants ----------------------------------------------------------
-
-    static int hlSchemeExecRaw(const char* cmd) {
-        if (!g_up || !cmd)
-            return -1;
-        return (int)Config::Supplementary::executor()->spawnRaw(cmd).value_or(-1);
-    }
-
-    static int hlSchemeExecWithRules(const char* cmd) {
-        if (!g_up || !cmd)
-            return -1;
-        return (int)Config::Supplementary::executor()->spawnWithRules(cmd).value_or(-1);
-    }
-
     // ---- gestures ---------------------------------------------------------------
     // A scheme thunk (or three, for live gestures) behind the trackpad gesture
     // system. Registered gestures are cleared by the config reload (the gesture
@@ -6775,28 +6809,38 @@ namespace Config::Scheme {
         return nullptr;
     }
 
-    static Input::ModifierMask gestureMods(const char* mods) {
-        // space-separated modifier names → mask (SUPER = META)
+    // the one mods representation across the API: a LIST of modifier tokens
+    // (strings), as built by hl-kbd/hl-key — never a string to split and
+    // never a raw mask int. Unknown tokens / non-strings are rejected.
+    static std::optional<Input::ModifierMask> modsMaskFromTokens(ptr mods) {
         uint8_t raw = 0;
-        if (!mods || !*mods)
-            return Input::ModifierMask(sc<Input::eKeyboardModifiers>(raw));
-        std::istringstream ss(mods);
-        for (std::string tok; ss >> tok;) {
+        for (ptr l = mods; Spairp(l); l = Scdr(l)) {
+            if (!Sstringp(Scar(l))) {
+                g_configError = "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")";
+                return std::nullopt;
+            }
+            std::string tok = schemeDatumToStr(Scar(l));
             std::transform(tok.begin(), tok.end(), tok.begin(), ::toupper);
+            uint8_t bit = 0;
             if (tok == "SHIFT")
-                raw |= 1;
+                bit = 1;
             else if (tok == "CAPS")
-                raw |= 2;
+                bit = 2;
             else if (tok == "CTRL" || tok == "CONTROL")
-                raw |= 4;
+                bit = 4;
             else if (tok == "ALT")
-                raw |= 8;
+                bit = 8;
             else if (tok == "MOD3")
-                raw |= 32;
+                bit = 32;
             else if (tok == "SUPER" || tok == "META" || tok == "MOD2")
-                raw |= 64;
+                bit = 64;
             else if (tok == "MOD5")
-                raw |= 128;
+                bit = 128;
+            else {
+                g_configError = std::string("unknown modifier token '") + tok + "'";
+                return std::nullopt;
+            }
+            raw |= bit;
         }
         return Input::ModifierMask(sc<Input::eKeyboardModifiers>(raw));
     }
@@ -6806,7 +6850,7 @@ namespace Config::Scheme {
     // (built-in or custom alike), which moves into the manager, owned from
     // birth; destroyed at config reload, which also unlocks any thunks it
     // carried. The addGesture result (overshadow rules) is checked.
-    static int hlSchemeGesture(ptr recipe, int fingers, const char* direction, const char* mods, double scale, int disableInhibit) {
+    static int hlSchemeGesture(ptr recipe, int fingers, const char* direction, ptr mods, double scale, int disableInhibit) {
         if (!g_up || !g_pTrackpadGestures)
             return -1;
         const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
@@ -6814,6 +6858,9 @@ namespace Config::Scheme {
             g_configError = std::string("hl-gesture: invalid direction '") + (direction ? direction : "") + "'";
             return -1;
         }
+        const auto mask = modsMaskFromTokens(mods);
+        if (!mask)
+            return -1;
         if (!Spairp(recipe) || !Sfixnump(Scar(recipe))) {
             g_configError = "hl-gesture: 'action is not a gesture action (see the hl-make-*-gesture constructors)";
             return -1;
@@ -6825,7 +6872,7 @@ namespace Config::Scheme {
         }
         auto gesture = maker->make(Scdr(recipe), dir);
         const auto result =
-            g_pTrackpadGestures->addGesture(std::move(gesture), sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
+            g_pTrackpadGestures->addGesture(std::move(gesture), sc<size_t>(fingers), dir, *mask, sc<float>(scale), disableInhibit != 0);
         if (!result) {
             g_configError = std::string("hl-gesture: ") + result.error();
             return -1;
@@ -6853,7 +6900,7 @@ namespace Config::Scheme {
     // (fingers, direction, mods, scale, disableInhibit) → 0 removed / 1 no
     // such gesture / -1 error. removeGesture matches on the registration
     // spec (the manager stores one gesture per spec), never on the action.
-    static int hlSchemeGestureRemove(int fingers, const char* direction, const char* mods, double scale, int disableInhibit) {
+    static int hlSchemeGestureRemove(int fingers, const char* direction, ptr mods, double scale, int disableInhibit) {
         if (!g_up || !g_pTrackpadGestures)
             return -1;
         const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
@@ -6861,7 +6908,10 @@ namespace Config::Scheme {
             g_configError = std::string("hl-gesture: invalid direction '") + (direction ? direction : "") + "'";
             return -1;
         }
-        const auto result = g_pTrackpadGestures->removeGesture(sc<size_t>(fingers), dir, gestureMods(mods), sc<float>(scale), disableInhibit != 0);
+        const auto mask = modsMaskFromTokens(mods);
+        if (!mask)
+            return -1;
+        const auto result = g_pTrackpadGestures->removeGesture(sc<size_t>(fingers), dir, *mask, sc<float>(scale), disableInhibit != 0);
         if (!result) {
             if (result.error() == "Can't remove a non-existent gesture")
                 return 1;
@@ -7519,7 +7569,6 @@ namespace Config::Scheme {
     // interpreter). Returns false when the bootstrap failed.
     static bool attachInterp() {
         Sregister_symbol("hl-scheme-bind", (void*)hlSchemeBind);
-        Sregister_symbol("hl-scheme-exec", (void*)hlSchemeExec);
         Sregister_symbol("hl-scheme-timer", (void*)hlSchemeTimer);
         Sregister_symbol("hl-scheme-active-title", (void*)hlSchemeActiveTitle);
         Sregister_symbol("hl-scheme-workspace-names", (void*)hlSchemeWorkspaceNames);
@@ -7640,6 +7689,9 @@ namespace Config::Scheme {
         Sregister_symbol("hl-scheme-send-shortcut", (void*)hlSchemeSendShortcut);
         Sregister_symbol("hl-scheme-send-key-state", (void*)hlSchemeSendKeyState);
         Sregister_symbol("hl-scheme-mouse", (void*)hlSchemeMouse);
+        Sregister_symbol("hl-exec!", (void*)hlSchemeExec);
+        Sregister_symbol("hl-scheme-clear-crashed-lockscreen", (void*)hlSchemeClearCrashedLockscreen);
+        Sregister_symbol("hl-scheme-scheduled-prop-refresh-immediately", (void*)hlSchemeScheduledPropRefreshImmediately);
         Sregister_symbol("hl-scheme-release-input-capture", (void*)hlSchemeReleaseInputCapture);
         Sregister_symbol("hl-scheme-window-fullscreen-state", (void*)hlSchemeWindowFullscreenState);
         Sregister_symbol("hl-scheme-layout-message", (void*)hlSchemeLayoutMessage);
@@ -7656,7 +7708,6 @@ namespace Config::Scheme {
         Sregister_symbol("hl-config-last-error", (void*)hlConfigLastError);
         Sregister_symbol("hl-config-get", (void*)hlConfigGet);
         Sregister_symbol("hl-scheme-device-add", (void*)hlSchemeDeviceAdd);
-        Sregister_symbol("hl-exec-with-rule", (void*)hlSchemeExecRule);
         Sregister_symbol("hl-monitor-begin", (void*)hlMonitorBegin);
         Sregister_symbol("hl-monitor-field-str", (void*)hlMonitorFieldStr);
         Sregister_symbol("hl-monitor-field-num", (void*)hlMonitorFieldNum);
@@ -7770,8 +7821,6 @@ namespace Config::Scheme {
         Sregister_symbol("hl-timer-enabled", (void*)hlTimerEnabled);
         Sregister_symbol("hl-timer-set-timeout", (void*)hlTimerSetTimeout);
         Sregister_symbol("hl-timer-cancel", (void*)hlTimerCancel);
-        Sregister_symbol("hl-exec!", (void*)hlSchemeExecRaw);
-        Sregister_symbol("hl-exec-shell-with-rules!", (void*)hlSchemeExecWithRules);
         Sregister_symbol("hl-scheme-gesture", (void*)hlSchemeGesture);
         Sregister_symbol("hl-scheme-gesture-maker-workspace-swipe", (void*)hlSchemeGestureMakerWorkspaceSwipe);
         Sregister_symbol("hl-scheme-gesture-maker-move", (void*)hlSchemeGestureMakerMove);
