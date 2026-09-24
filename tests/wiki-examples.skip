@@ -1,0 +1,14 @@
+# Skip-list for tests/t-zzz-docs.sh — a wiki ```scheme block is skipped
+# when its text contains one of these fixed patterns. Every entry needs a
+# reason: these blocks are intentional (schematic or pending a feature),
+# not rot. Keep this list short — a skip here is an example that never
+# gets executed.
+THUNK                    # bind-flags.md/binds.md: placeholder, not a real thunk
+thunk 'submap-universal  # submaps.md: placeholder, not a real thunk
+(MOD ... KEY)            # binds.md: syntax description, not a call
+recalculate-fn           # custom-layouts.md: schematic callback names
+hl-permission-add!      # permissions.md: config-load-only (startup rules); the
+                        # doc test runs mid-session, where it is correctly rejected
+hl-clear-crashed-lockscreen!  # scheme-utilities.md: errors when the session is
+                        # not locked — which is always true in the harness;
+                        # the refusal IS the documented behavior
