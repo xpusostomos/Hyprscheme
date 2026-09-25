@@ -81,6 +81,11 @@ namespace SchemeHost {
     SchemeValue call2(SchemeValue fn, SchemeValue a1, SchemeValue a2);
     SchemeValue call3(SchemeValue fn, SchemeValue a1, SchemeValue a2, SchemeValue a3);
 
+    // ---- backend hook --------------------------------------------------------
+    // file to load between the prelude and the defun machinery (Chez: none —
+    // its primitives are native; Guile: the compatibility layer)
+    const char* compatFile();
+
     // ---- lifecycle ----------------------------------------------------------
     // C functions become Scheme-callable primitives (Chez: Sregister_symbol;
     // later Guile: gsubr)

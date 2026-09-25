@@ -66,6 +66,12 @@ and TODO.txt's archived sections.)
   (~20 ops); SchemeManager/SchemeLayout use only SchemeHost:: and
   SchemeValue; <scheme.h> included by exactly one file. Suite 12/12
   unchanged. (Plan: GUILE-CONVERSION.txt.)
+- Guile backend (step 2): SchemeHostGuile.cpp (same ops) +
+  hyprscheme-compat-guile.scm (foreign-procedure shim over
+  scm_from_pointer pointers, Chez-only procedure defs, imports);
+  `make BACKEND=guile` selects. Smoke test green: machinery reaches
+  hl--ready, evals + describe-function work. Reload/guardian/watchdog
+  still chez-only (steps 3-5).
 
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest

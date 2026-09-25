@@ -5302,6 +5302,11 @@ namespace Config::Scheme {
         // resolves symbols at definition time, so symbols must exist before this.
         SchemeHost::call1(SchemeHost::globalRef("load"), SchemeHost::stringVal(tryScm("hyprscheme-prelude.scm").c_str()));
 
+        // phase 1b: the backend compatibility layer, if the host needs one
+        // (Guile: foreign-procedure shim + Chez-only procedure definitions)
+        if (const char* compat = SchemeHost::compatFile())
+            SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm(compat).c_str()));
+
         // phase 2: the defun machinery (defines `defun`, which phase 3's
         // converted functions use) ...
         SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm("hyprscheme-defun.scm").c_str()));

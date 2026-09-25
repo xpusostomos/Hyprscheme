@@ -115,6 +115,9 @@ namespace SchemeHost {
         return value(Scall3(val(fn), val(a1), val(a2), val(a3)));
     }
 
+    const char* compatFile() {
+        return nullptr; // Chez primitives are native; no compatibility layer
+    }
     void registerSymbol(const char* name, void* fn) {
         Sregister_symbol(name, fn);
     }

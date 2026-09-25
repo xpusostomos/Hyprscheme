@@ -183,7 +183,10 @@ in the wiki's building-the-plugin page.
   (the only file including <scheme.h>); all C++ call sites go through
   `SchemeHost::` and use `SchemeValue` (opaque word). New host ops:
   globalRef/call0-3/registerSymbol/lock/unlock/word/truthy/stringBytes.
-  A Guile backend = SchemeHostGuile.cpp implementing the same ops.
+  STEP 2 DONE: `SchemeHostGuile.cpp` + `hyprscheme-compat-guile.scm`;
+  `make BACKEND=guile` flips backends. The foreign-procedure shim is
+  DECLARATIVE (no per-function shims): C++ registers typed fn pointers
+  via scm_from_pointer; scheme-object crosses the FFI as a raw word.
   The 299 foreign-procedure decls split into 146 plain-typed
   (pointer->procedure) + 153 scheme-object (gsubrs). Generation model
   and guardians portable (copy-module helper; make-guardian exists);

@@ -35,7 +35,18 @@ INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
 LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 
-SRC = src/config/scheme/SchemeHostChez.cpp \
+# the Scheme backend: SchemeHostChez.cpp (default) or SchemeHostGuile.cpp
+BACKEND ?= chez
+ifeq ($(BACKEND),guile)
+SCHEME_HOST = src/config/scheme/SchemeHostGuile.cpp
+INCLUDES   += `pkg-config --cflags guile-3.0`
+LIBS       += `pkg-config --libs guile-3.0`
+SCM_FILES  += src/config/scheme/hyprscheme-compat-guile.scm
+else
+SCHEME_HOST = src/config/scheme/SchemeHostChez.cpp
+endif
+
+SRC = $(SCHEME_HOST) \
       src/config/scheme/SchemeManager.cpp src/config/scheme/SchemeLayout.cpp
 OBJ = $(SRC:.cpp=.o) src/plugin-main.o
 TARGET = scheme-plugin.so
@@ -77,9 +88,15 @@ hyprland:
 # the compositor binary is a prerequisite: a rebuilt Hyprland forces a
 # plugin relink (it resolves Hyprland symbols at load time and must stay
 # in sync with the tree it was compiled against)
+ifeq ($(BACKEND),guile)
+# the Guile backend: no Chez kernel, libguile from pkg-config
+$(TARGET): $(OBJ) $(HYPRLAND_SRC)/build/Hyprland
+	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(LIBS)
+else
 $(TARGET): $(OBJ) $(CHEZ_KERNEL) $(HYPRLAND_SRC)/build/Hyprland | $(CHEZ_BOOT)/petite.boot
 	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(CHEZ_KERNEL) \
 	    $(CHEZ_WORK)/lz4/lib/liblz4.a $(LIBS)
+endif
 
 src/plugin-main.o: plugin-main.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
@@ -97,7 +114,9 @@ install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 $(SCM_FILES) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+ifeq ($(BACKEND),chez)
 	install -m 644 $(CHEZ_BOOT)/petite.boot $(CHEZ_BOOT)/scheme.boot $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+endif
 	@echo ""
 	@echo "Plugin installed: $(DESTDIR)$(PREFIX)/lib/hyprscheme/scheme-plugin.so"
 	@echo "Load into a compositor built from $(HYPRLAND_SRC):"

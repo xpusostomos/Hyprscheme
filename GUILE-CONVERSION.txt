@@ -197,11 +197,20 @@ Gives up:
    function, call closure N-ary, catch, box/unbox, datum-to-string).
    Port SchemeManager/Layout onto it with ZERO behavior change; suite
    stays 12/12. COMMIT.
-2. Guile backend implementing the same interface (SchemeGuile.cpp),
-   linked via pkg-config guile-3.0; `make BACKEND=guile` selects it.
-   Both backends coexist. gsubr shims for all 298 registered
-   functions (153 need real unboxing, rest trivial). Suite green on
-   both. COMMIT.
+2. DONE (Sep 2026). Guile backend: SchemeHostGuile.cpp + the
+   declarative foreign-procedure shim (hyprscheme-compat-guile.scm)
+   — NO per-function gsubr shims needed: the C++ host registers typed
+   function pointers via scm_from_pointer, and the compat layer's
+   foreign-procedure syntax attaches type conversions declaratively
+   (scheme-object crosses as its raw word through the FFI as
+   uintptr_t, verified in /tmp probes). `make BACKEND=guile` selects
+   the backend. Smoke test green: plugin loads, prelude -> compat ->
+   defun -> bootstrap chain reaches hl--ready #t, evals, foreign
+   calls, error containment and describe-function all work, clean
+   log. STILL OPEN on the Guile side (steps 3-5): config reload
+   (copy-environment wired but untested), guardian drain (no
+   collect-request-hook yet), watchdog (stubbed), full suite.
+   COMMIT.
 3. Scheme-side port: copy-module helper replaces copy-environment in
    hl--reset; load/eval shadows target modules; dialect renames per
    the table; the 10 #!eof; errorf; andmap; list*; imports at file
