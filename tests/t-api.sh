@@ -312,11 +312,11 @@ ok '(integer? (hl-exec! "true"))'
 ok '(integer? (hl-exec! "[float] true"))'
 # exec-with-rule: spawn under a one-shot effects rule (no match — the executor
 # tags the spawned window by pid)
-idok '(hl-exec! "foot -a exec-rule" (quote float) #t)'
+idok '(hl-exec! "foot -a exec-rule" #:float #t)'
 WAIT_FOR 10 '(let ((w (hl-window-from "class:^exec-rule$"))) (if w #t #f))' >/dev/null || { echo "exec-rule fixture never appeared"; FAILED=1; }
 $SCHEME '(define exec-rule-w (hl-window-from "class:^exec-rule$"))' >/dev/null
 ok '(begin (hl-window-focus! exec-rule-w) (hl-window-floating? exec-rule-w))'
-bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-exec! "true" (quote bogus_effect) #t))))')
+bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-exec! "true" #:bogus_effect #t))))')
 [[ "$bad_exec" == *"bogus_effect"* ]] || { echo "FAIL: unknown exec effect not rejected => [$bad_exec]"; FAILED=1; }
 
 # ---- live notifications (upstream hl.notification object parity) ------------

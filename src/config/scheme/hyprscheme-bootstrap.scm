@@ -1079,20 +1079,26 @@ window has focus."
         (errorf 'hl-device-add! "~a" (c-hl-config-last-error)))))
 
 
-(define (hl-exec! cmd . effects) "The one exec. Spawns CMD asynchronously
-through the compositor's executor (shell, env injection; never blocks the
-config). Optional rule EFFECTS as a plist build a one-shot window rule
-pinned to the spawned window by pid; values go through the same rule-spec
-coercion as hl-window-rule-add!. With no effects the command may still
-carry the legacy inline rule prefix (\"[float size 800 500] mygame\") —
-the C++ layer parses it on the plain path. Returns the new pid."
+(define* (hl-exec! cmd #:key #:allow-other-keys #:rest effects)
+  "The one exec. Spawns CMD asynchronously through the compositor's
+executor (shell, env injection; never blocks the config). Keyword
+EFFECTS build a one-shot window rule pinned to the spawned window by
+pid - e.g. (hl-exec! \"foot\" #:float #t #:workspace \"games\"); the
+keys and value forms are the window-rule effects (see window-rules),
+with the same coercion as hl-window-rule-add!. With no effects the
+command may still carry the legacy inline rule prefix
+(\"[float size 800 500] mygame\") - the C++ layer parses it on the
+plain path. Returns the new pid."
   (define (flat l)
     (cond ((null? l) '())
           ((null? (cdr l)) (errorf 'hl-exec! "odd plist of rule effects"))
           (else (list* (hl--str (car l))
                        (hl--rule-spec-value (cadr l))
                        (flat (cddr l))))))
-  (let ((pid (c-hl-exec! (hl--str cmd) (flat effects))))
+  (let ((pid (c-hl-exec! (hl--str cmd)
+                         (flat (map (lambda (x)
+                                      (if (keyword? x) (keyword->symbol x) x))
+                                    effects)))))
     (if (> pid 0)
         pid
         (errorf 'hl-exec! "~a" (c-hl-config-last-error)))))
