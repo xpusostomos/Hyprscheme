@@ -35,7 +35,8 @@ INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
 LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 
-SRC = src/config/scheme/SchemeManager.cpp src/config/scheme/SchemeLayout.cpp
+SRC = src/config/scheme/SchemeHostChez.cpp \
+      src/config/scheme/SchemeManager.cpp src/config/scheme/SchemeLayout.cpp
 OBJ = $(SRC:.cpp=.o) src/plugin-main.o
 TARGET = scheme-plugin.so
 

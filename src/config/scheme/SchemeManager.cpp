@@ -1,7 +1,4 @@
-#ifndef HYPRTHEME_SCHEME_H_SEEN
-#define HYPRTHEME_SCHEME_H_SEEN
-#include <scheme.h>
-#endif
+#include "SchemeHost.hpp"
 #include "SThunkRef.hpp"
 #include "SchemeManager.hpp"
 #include "SchemeLayout.hpp"
@@ -177,7 +174,7 @@ namespace Config::Scheme {
     // event subscriptions: C++ owns the listener handles (dropping one
     // unsubscribes); Scheme owns the handler closures by id
     // event connections: record address -> the subscription that keeps the
-    // handler plugged into the bus (lost ptr = unregistered, per the listen
+    // handler plugged into the bus (lost SchemeValue = unregistered, per the listen
     // contract). Entries die three ways: hl-event-cancel!, the reload clear
     // (generation boundary = handler lifetime), plugin teardown.
     static std::unordered_map<uintptr_t, Hyprutils::Signal::CHyprSignalListener> g_eventConnections;
@@ -241,7 +238,7 @@ namespace Config::Scheme {
     }
 
     // defined below (device/config section); used by the bind result reader
-    static std::string schemeDatumToStr(ptr p);
+    static std::string schemeDatumToStr(SchemeValue p);
 
     static Keybinds::SBindResult fireSchemeBind(int id) {
         if (!g_up)
@@ -251,33 +248,33 @@ namespace Config::Scheme {
         // hl--bind-fire: #f = declined (thunk returned #f, or error/watchdog);
         // otherwise the normalized result plist (or a non-plist truthy value
         // for plain callbacks)
-        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--bind-fire")), Sinteger(id));
+        const SchemeValue r = SchemeHost::call1(SchemeHost::globalRef("hl--bind-fire"), SchemeHost::integer(id));
         watchdogExit();
-        if (r == Sfalse)
+        if (r == SchemeHost::False)
             return {.success = false, .error = "scheme keybind callback declined"};
-        if (r == Strue || !Spairp(r) || !Ssymbolp(Scar(r)))
+        if (r == SchemeHost::True || !SchemeHost::isPair(r) || !SchemeHost::isSymbol(SchemeHost::car(r)))
             return {}; // handled — 'ok defaults to true
 
         // result-table return (upstream dispatchResultFromLua parity):
         // {ok, pass-event, request-release, error}
         Keybinds::SBindResult res;
-        ptr l = r;
-        while (Spairp(l) && Spairp(Scdr(l))) {
-            const std::string k = schemeDatumToStr(Scar(l));
-            const ptr        v  = Scar(Scdr(l));
+        SchemeValue l = r;
+        while (SchemeHost::isPair(l) && SchemeHost::isPair(SchemeHost::cdr(l))) {
+            const std::string k = schemeDatumToStr(SchemeHost::car(l));
+            const SchemeValue        v  = SchemeHost::car(SchemeHost::cdr(l));
             if (k == "ok") {
-                if (v == Sfalse)
+                if (v == SchemeHost::False)
                     res.success = false;
             } else if (k == "pass-event") {
-                if (v == Strue)
+                if (v == SchemeHost::True)
                     res.passEvent = true;
             } else if (k == "request-release") {
-                if (v == Strue)
+                if (v == SchemeHost::True)
                     res.followUp = Keybinds::BIND_FOLLOW_UP_TRIGGER_RELEASE;
-            } else if (k == "error" && Sstringp(v)) {
+            } else if (k == "error" && SchemeHost::isString(v)) {
                 res.error = schemeDatumToStr(v);
             }
-            l = Scdr(Scdr(l));
+            l = SchemeHost::cdr(SchemeHost::cdr(l));
         }
         return res;
     }
@@ -285,39 +282,39 @@ namespace Config::Scheme {
     // fires a handler registered for id with no payload; errors contained
     // numeric payloads (e.g. live gesture update): a real list of numbers
     template <typename T>
-    static ptr schemeIntList(const std::vector<T>& vals) {
+    static SchemeValue schemeIntList(const std::vector<T>& vals) {
         if (vals.empty())
-            return Snil;
-        ptr l = Snil;
+            return SchemeHost::Nil;
+        SchemeValue l = SchemeHost::Nil;
         for (auto it = vals.rbegin(); it != vals.rend(); ++it) {
-            l = Scons(Sinteger(*it), l);
-            Slock_object(l);
+            l = SchemeHost::cons(SchemeHost::integer(*it), l);
+            SchemeHost::lock(l);
         }
-        for (ptr p = l; Spairp(p); p = Scdr(p))
-            Sunlock_object(p);
+        for (SchemeValue p = l; SchemeHost::isPair(p); p = SchemeHost::cdr(p))
+            SchemeHost::unlock(p);
         return l;
     }
 
-    static ptr schemeIntList(std::initializer_list<int> vals) {
+    static SchemeValue schemeIntList(std::initializer_list<int> vals) {
         return schemeIntList(std::vector<int>(vals));
     }
 
     // record+pin every heap object a call creates; release all when the value
     // is built (a moving GC can then never invalidate a pointer mid-build).
-    static void marshRoot(ptr p, std::vector<ptr>& roots) {
-        Slock_object(p);
+    static void marshRoot(SchemeValue p, std::vector<SchemeValue>& roots) {
+        SchemeHost::lock(p);
         roots.push_back(p);
     }
-    static void marshRelease(std::vector<ptr>& roots) {
+    static void marshRelease(std::vector<SchemeValue>& roots) {
         for (auto it = roots.rbegin(); it != roots.rend(); ++it)
-            Sunlock_object(*it);
+            SchemeHost::unlock(*it);
     }
 
-    static void fireScheme(ptr record) {
+    static void fireScheme(SchemeValue record) {
         if (!g_up)
             return;
         watchdogEnter("handler");
-        Scall1(Stop_level_value(Sstring_to_symbol("hl--event-fire")), record);
+        SchemeHost::call1(SchemeHost::globalRef("hl--event-fire"), record);
         watchdogExit();
     }
 
@@ -331,27 +328,23 @@ namespace Config::Scheme {
     // list. The record's pinned address, stamped into the bind's argument
     // metadata at registration, identifies our binds for precise unbind and
     // plugin shutdown.
-    static std::string bindTag(ptr record) {
-        return "scheme:" + std::to_string(reinterpret_cast<uintptr_t>(record));
+    static std::string bindTag(SchemeValue record) {
+        return "scheme:" + std::to_string(SchemeHost::word(record));
     }
 
-    static Keybinds::SBindResult fireSchemeBindRec(ptr record); // defined below
+    static Keybinds::SBindResult fireSchemeBindRec(SchemeValue record); // defined below
 
-    static int hlSchemeBind(ptr record, ptr tokens, int flags, const char* desc, ptr devices) {
+    static int hlSchemeBind(SchemeValue record, SchemeValue tokens, int flags, const char* desc, SchemeValue devices) {
         if (!g_up)
             return -1;
 
         SThunkRef ref(record); // lock FIRST: the record is a GC root from here on
 
         std::vector<std::string> keys;
-        for (ptr p = tokens; Spairp(p) && p != Snil; p = Scdr(p)) {
-            ptr elem = Scar(p);
-            if (Sstringp(elem)) {
-                std::string tok;
-                for (iptr i = 0; i < Sstring_length(elem); ++i)
-                    tok += Sstring_ref(elem, i);
-                keys.emplace_back(std::move(tok));
-            }
+        for (SchemeValue p = tokens; SchemeHost::isPair(p) && p != SchemeHost::Nil; p = SchemeHost::cdr(p)) {
+            SchemeValue elem = SchemeHost::car(p);
+            if (SchemeHost::isString(elem))
+                keys.emplace_back(SchemeHost::stringBytes(elem));
         }
 
         Keybinds::SExtraBindArgs args;
@@ -368,12 +361,12 @@ namespace Config::Scheme {
         args.metadata.submapReset = g_regSubmapReset;
         // devices arrive as a real list of name strings; a non-list element
         // or a non-string device is rejected
-        for (ptr p = devices; Spairp(p) && p != Snil; p = Scdr(p)) {
-            if (!Sstringp(Scar(p))) {
+        for (SchemeValue p = devices; SchemeHost::isPair(p) && p != SchemeHost::Nil; p = SchemeHost::cdr(p)) {
+            if (!SchemeHost::isString(SchemeHost::car(p))) {
                 g_configError = "hl-bind-add!: 'devices must be a list of device name strings";
                 return -1;
             }
-            args.devices.emplace(schemeDatumToStr(Scar(p)));
+            args.devices.emplace(schemeDatumToStr(SchemeHost::car(p)));
         }
 
         auto bind = Keybinds::CBind::make(std::move(keys), sc<Keybinds::BindFlags>(flags), [ref] { return fireSchemeBindRec(ref.obj); }, std::move(args));
@@ -391,36 +384,36 @@ namespace Config::Scheme {
 
     // fires a RECORD bind (the capture passes the locked record); the Scheme
     // trampoline extracts the thunk. Result contract identical to the id path.
-    static Keybinds::SBindResult fireSchemeBindRec(ptr record) {
+    static Keybinds::SBindResult fireSchemeBindRec(SchemeValue record) {
         if (!g_up)
             return {.success = false, .error = "scheme interpreter not initialized"};
 
         watchdogEnter("bind callback");
-        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--bind-fire-rec")), record);
+        const SchemeValue r = SchemeHost::call1(SchemeHost::globalRef("hl--bind-fire-rec"), record);
         watchdogExit();
-        if (r == Sfalse)
+        if (r == SchemeHost::False)
             return {.success = false, .error = "scheme keybind callback declined"};
-        if (r == Strue || !Spairp(r) || !Ssymbolp(Scar(r)))
+        if (r == SchemeHost::True || !SchemeHost::isPair(r) || !SchemeHost::isSymbol(SchemeHost::car(r)))
             return {}; // handled — 'ok defaults to true
 
         Keybinds::SBindResult res;
-        ptr l = r;
-        while (Spairp(l) && Spairp(Scdr(l))) {
-            const std::string k = schemeDatumToStr(Scar(l));
-            const ptr        v  = Scar(Scdr(l));
+        SchemeValue l = r;
+        while (SchemeHost::isPair(l) && SchemeHost::isPair(SchemeHost::cdr(l))) {
+            const std::string k = schemeDatumToStr(SchemeHost::car(l));
+            const SchemeValue        v  = SchemeHost::car(SchemeHost::cdr(l));
             if (k == "ok") {
-                if (v == Sfalse)
+                if (v == SchemeHost::False)
                     res.success = false;
             } else if (k == "pass-event") {
-                if (v == Strue)
+                if (v == SchemeHost::True)
                     res.passEvent = true;
             } else if (k == "request-release") {
-                if (v == Strue)
+                if (v == SchemeHost::True)
                     res.followUp = Keybinds::BIND_FOLLOW_UP_TRIGGER_RELEASE;
-            } else if (k == "error" && Sstringp(v)) {
+            } else if (k == "error" && SchemeHost::isString(v)) {
                 res.error = schemeDatumToStr(v);
             }
-            l = Scdr(Scdr(l));
+            l = SchemeHost::cdr(SchemeHost::cdr(l));
         }
         return res;
     }
@@ -438,7 +431,7 @@ namespace Config::Scheme {
     // precise: find OUR bind by the argument tag (the record's pinned
     // address) and removeBind it — exactly one match, however many same-key
     // siblings exist
-    static int hlSchemeUnbindRec(ptr record) {
+    static int hlSchemeUnbindRec(SchemeValue record) {
         if (!g_up || !Keybinds::mgr())
             return -1;
         const std::string tag = bindTag(record);
@@ -452,35 +445,35 @@ namespace Config::Scheme {
 
     // fires a handler registered for id with a string payload; all errors are
     // contained inside hl--fire-str's guard
-    static void fireSchemeStr(ptr record, const std::string& arg) {
+    static void fireSchemeStr(SchemeValue record, const std::string& arg) {
         if (!g_up)
             return;
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-str-rec")), record, Sstring_utf8(arg.c_str(), arg.size()));
+        SchemeHost::call2(SchemeHost::globalRef("hl--fire-str-rec"), record, SchemeHost::stringUtf8(arg.c_str(), arg.size()));
         watchdogExit();
     }
 
     // fires a handler registered for id with a boolean payload (#t/#f); all
     // errors are contained inside hl--fire-bool's guard
-    static void fireSchemeBool(ptr record, bool arg) {
+    static void fireSchemeBool(SchemeValue record, bool arg) {
         if (!g_up)
             return;
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-bool-rec")), record, arg ? Strue : Sfalse);
+        SchemeHost::call2(SchemeHost::globalRef("hl--fire-bool-rec"), record, arg ? SchemeHost::True : SchemeHost::False);
         watchdogExit();
     }
 
     // events carrying window payloads: the window crosses as a fresh handle id
-    static void fireSchemeWin(ptr record, PHLWINDOW window) {
+    static void fireSchemeWin(SchemeValue record, PHLWINDOW window) {
         if (!g_up || !window)
             return;
 
         const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(window));
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-win-rec")), record, Sinteger(winId));
+        SchemeHost::call2(SchemeHost::globalRef("hl--fire-win-rec"), record, SchemeHost::integer(winId));
         watchdogExit();
     }
 
@@ -497,41 +490,41 @@ namespace Config::Scheme {
     // the weak ref as-is without locking — used by workspace.removed, which
     // fires mid-destruction (that handle is born dead; see the comment at
     // the listener).
-    static void fireSchemeWs(ptr record, PHLWORKSPACE ws) {
+    static void fireSchemeWs(SchemeValue record, PHLWORKSPACE ws) {
         if (!g_up)
             return;
 
         const auto wsId = ws ? (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws)) : 0;
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-ws-rec")), record, wsId ? Sinteger(wsId) : Sfalse);
+        SchemeHost::call2(SchemeHost::globalRef("hl--fire-ws-rec"), record, wsId ? SchemeHost::integer(wsId) : SchemeHost::False);
         watchdogExit();
     }
 
-    static void fireSchemeWsRef(ptr record, PHLWORKSPACEREF ws) {
+    static void fireSchemeWsRef(SchemeValue record, PHLWORKSPACEREF ws) {
         if (!g_up)
             return;
 
         const auto wsId = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws));
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-ws-rec")), record, Sinteger(wsId));
+        SchemeHost::call2(SchemeHost::globalRef("hl--fire-ws-rec"), record, SchemeHost::integer(wsId));
         watchdogExit();
     }
 
-    static void fireSchemeMon(ptr record, PHLMONITOR mon) {
+    static void fireSchemeMon(SchemeValue record, PHLMONITOR mon) {
         if (!g_up)
             return;
 
         const auto monId = mon ? (uintptr_t)(new SHandle<PHLMONITORREF>(mon)) : 0;
 
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-mon-rec")), record, monId ? Sinteger(monId) : Sfalse);
+        SchemeHost::call2(SchemeHost::globalRef("hl--fire-mon-rec"), record, monId ? SchemeHost::integer(monId) : SchemeHost::False);
         watchdogExit();
     }
 
     // two-handle payloads (workspace, monitor); a null object crosses as #f
-    static void fireSchemeWsMon(ptr record, PHLWORKSPACE ws, PHLMONITOR mon) {
+    static void fireSchemeWsMon(SchemeValue record, PHLWORKSPACE ws, PHLMONITOR mon) {
         if (!g_up)
             return;
 
@@ -539,7 +532,7 @@ namespace Config::Scheme {
         const auto monId = mon ? (uintptr_t)(new SHandle<PHLMONITORREF>(mon)) : 0;
 
         watchdogEnter("handler");
-        Scall3(Stop_level_value(Sstring_to_symbol("hl--fire-ws-mon-rec")), record, wsId ? Sinteger(wsId) : Sfalse, monId ? Sinteger(monId) : Sfalse);
+        SchemeHost::call3(SchemeHost::globalRef("hl--fire-ws-mon-rec"), record, wsId ? SchemeHost::integer(wsId) : SchemeHost::False, monId ? SchemeHost::integer(monId) : SchemeHost::False);
         watchdogExit();
     }
 
@@ -559,42 +552,42 @@ namespace Config::Scheme {
 
     // timer-record fire: extract (hl-timer-thunk b) and run it zero-arg
     // under the bind result protocol (repeating timers stop on ok #f)
-    static Keybinds::SBindResult fireSchemeTimerRec(ptr record) {
+    static Keybinds::SBindResult fireSchemeTimerRec(SchemeValue record) {
         if (!g_up)
             return {.success = false, .error = "scheme interpreter not initialized"};
 
         watchdogEnter("bind callback");
-        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--timer-fire")), record);
+        const SchemeValue r = SchemeHost::call1(SchemeHost::globalRef("hl--timer-fire"), record);
         watchdogExit();
-        if (r == Sfalse)
+        if (r == SchemeHost::False)
             return {.success = false, .error = "scheme keybind callback declined"};
-        if (r == Strue || !Spairp(r) || !Ssymbolp(Scar(r)))
+        if (r == SchemeHost::True || !SchemeHost::isPair(r) || !SchemeHost::isSymbol(SchemeHost::car(r)))
             return {};
         Keybinds::SBindResult res;
-        ptr l = r;
-        while (Spairp(l) && Spairp(Scdr(l))) {
-            const std::string k = schemeDatumToStr(Scar(l));
-            const ptr        v  = Scar(Scdr(l));
+        SchemeValue l = r;
+        while (SchemeHost::isPair(l) && SchemeHost::isPair(SchemeHost::cdr(l))) {
+            const std::string k = schemeDatumToStr(SchemeHost::car(l));
+            const SchemeValue        v  = SchemeHost::car(SchemeHost::cdr(l));
             if (k == "ok") {
-                if (v == Sfalse)
+                if (v == SchemeHost::False)
                     res.success = false;
             } else if (k == "pass-event") {
-                if (v == Strue)
+                if (v == SchemeHost::True)
                     res.passEvent = true;
             } else if (k == "request-release") {
-                if (v == Strue)
+                if (v == SchemeHost::True)
                     res.followUp = Keybinds::BIND_FOLLOW_UP_TRIGGER_RELEASE;
-            } else if (k == "error" && Sstringp(v)) {
+            } else if (k == "error" && SchemeHost::isString(v)) {
                 res.error = schemeDatumToStr(v);
             }
-            l = Scdr(Scdr(l));
+            l = SchemeHost::cdr(SchemeHost::cdr(l));
         }
         return res;
     }
 
-    static STimerEntry* timerByRecord(ptr record); // defined below (timer control)
+    static STimerEntry* timerByRecord(SchemeValue record); // defined below (timer control)
 
-    static int hlSchemeTimer(ptr record, int ms, int repeat) {
+    static int hlSchemeTimer(SchemeValue record, int ms, int repeat) {
         if (!g_up || !g_pEventLoopManager || ms < 0)
             return -1;
 
@@ -623,27 +616,27 @@ namespace Config::Scheme {
                 self->cancel();
                 if (g_pEventLoopManager)
                     g_pEventLoopManager->removeTimer(self);
-                g_timerIndex.erase(reinterpret_cast<uintptr_t>(ref.obj));
+                g_timerIndex.erase(SchemeHost::word(ref.obj));
             },
             nullptr);
 
         g_pEventLoopManager->addTimer(shared);
-        g_timerIndex.emplace(reinterpret_cast<uintptr_t>(record),
+        g_timerIndex.emplace(SchemeHost::word(record),
                              STimerEntry{shared, repeat, sc<uint64_t>(ms)});
         return 0;
     }
 
     // called from Scheme via foreign-procedure: focused window title, or #f
-    static ptr hlSchemeActiveTitle() {
+    static SchemeValue hlSchemeActiveTitle() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto window = Desktop::focusState()->window();
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto title = window->metadata().title();
-        return Sstring_utf8(title.c_str(), title.size());
+        return SchemeHost::stringUtf8(title.c_str(), title.size());
     }
 
     // called from Scheme via foreign-procedure: newline-joined workspace
@@ -657,9 +650,9 @@ namespace Config::Scheme {
     // before the return is safe: nothing allocates in between, and the FFI
     // return re-roots the result.
 
-    static ptr hlSchemeWorkspaceNames() {
+    static SchemeValue hlSchemeWorkspaceNames() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         // proper scheme data: a real list of ids, not a newline-joined string.
         // (Sinteger is an immediate — only the cons cells need rooting.)
@@ -671,15 +664,15 @@ namespace Config::Scheme {
             ids.push_back((uintptr_t)(new SHandle<PHLWORKSPACEREF>(wsRef)));
         }
 
-        return ids.empty() ? Sfalse : schemeIntList(ids);
+        return ids.empty() ? SchemeHost::False : schemeIntList(ids);
     }
 
     // called from Scheme via foreign-procedure: subscribe to submap changes
-    static int hlSchemeSubmapListen(ptr record) {
+    static int hlSchemeSubmapListen(SchemeValue record) {
         if (!g_up)
             return -1;
 
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.keybinds.submap.listen([ref = SThunkRef(record)](const std::string& name) {
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.keybinds.submap.listen([ref = SThunkRef(record)](const std::string& name) {
             fireSchemeStr(ref.obj, name);
         }));
         return 0;
@@ -718,9 +711,9 @@ namespace Config::Scheme {
         return (double)(uintptr_t)(new SHandle<PHLWINDOWREF>(window));
     }
 
-    static ptr hlSchemeWindowIds() {
+    static SchemeValue hlSchemeWindowIds() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         std::vector<uintptr_t> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
@@ -730,19 +723,19 @@ namespace Config::Scheme {
             ids.push_back(id);
         }
 
-        return ids.empty() ? Sfalse : schemeIntList(ids);
+        return ids.empty() ? SchemeHost::False : schemeIntList(ids);
     }
 
-    static ptr hlSchemeWindowTitle(long long id) {
+    static SchemeValue hlSchemeWindowTitle(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto title = window->metadata().title();
-        return Sstring_utf8(title.c_str(), title.size());
+        return SchemeHost::stringUtf8(title.c_str(), title.size());
     }
 
     static int hlSchemeWindowAlive(long long id) {
@@ -765,9 +758,9 @@ namespace Config::Scheme {
         return Config::Actions::closeWindow(window) ? 0 : -2;
     }
 
-    static ptr hlSchemeWindowClass(long long id) {
+    static SchemeValue hlSchemeWindowClass(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         {
             std::ofstream pr("/tmp/hs-sel-debug", std::ios::app);
             auto w = windowFromId(id);
@@ -776,38 +769,38 @@ namespace Config::Scheme {
 
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto s = window->metadata().appID();
-        return Sstring_utf8(s.c_str(), s.size());
+        return SchemeHost::stringUtf8(s.c_str(), s.size());
     }
 
-    static ptr hlSchemeWindowWorkspaceId(long long id) {
+    static SchemeValue hlSchemeWindowWorkspaceId(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto window = windowFromId(id);
         if (!window || !window->m_workspace)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto wsId = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(window->m_workspace));
-        return Sinteger(wsId);
+        return SchemeHost::integer(wsId);
     }
 
-    static ptr hlSchemeWindowMonitorId(long long id) {
+    static SchemeValue hlSchemeWindowMonitorId(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto monitor = State::monitorState()->query().id(window->monitorID()).run();
         if (!monitor)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto monId = (uintptr_t)(new SHandle<PHLMONITORREF>(monitor));
-        return Sinteger(monId);
+        return SchemeHost::integer(monId);
     }
 
     static int hlSchemeWindowFloating(long long id) {
@@ -818,16 +811,16 @@ namespace Config::Scheme {
         return (window && window->isFloating()) ? 1 : 0;
     }
 
-    static ptr hlSchemeWindowSize(long long id) {
+    static SchemeValue hlSchemeWindowSize(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto sz = window->size(Desktop::View::IGeometric::GEOMETRIC_GOAL);
-        return Scons(Sinteger((int)sz.x), Sinteger((int)sz.y));   // (w . h)
+        return SchemeHost::cons(SchemeHost::integer((int)sz.x), SchemeHost::integer((int)sz.y));   // (w . h)
     }
 
     static int hlSchemeWindowPid(long long id) {
@@ -854,14 +847,14 @@ namespace Config::Scheme {
         return -1;
     }
 
-    static ptr hlSchemeWindowAddress(long long id) {
+    static SchemeValue hlSchemeWindowAddress(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
         const auto addr = std::format("0x{:x}", reinterpret_cast<uintptr_t>(window.get()));
-        return Sstring_utf8(addr.c_str(), addr.size());
+        return SchemeHost::stringUtf8(addr.c_str(), addr.size());
     }
 
     static int hlSchemeWindowMapped(long long id) {
@@ -885,14 +878,14 @@ namespace Config::Scheme {
         return (window && window->acceptsInput()) ? 1 : 0;
     }
 
-    static ptr hlSchemeWindowPosition(long long id) {
+    static SchemeValue hlSchemeWindowPosition(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
         const auto pos = window->position(Desktop::View::IGeometric::GEOMETRIC_GOAL);
-        return Scons(Sinteger((int)pos.x), Sinteger((int)pos.y)); // (x . y)
+        return SchemeHost::cons(SchemeHost::integer((int)pos.x), SchemeHost::integer((int)pos.y)); // (x . y)
     }
 
     static int hlSchemeWindowPinFullscreened(long long id) {
@@ -923,82 +916,82 @@ namespace Config::Scheme {
         return (window && g_pInputManager && g_pInputManager->isWindowInhibiting(window, false)) ? 1 : 0;
     }
 
-    static ptr hlSchemeWindowFocusHistoryId(long long id) {
+    static SchemeValue hlSchemeWindowFocusHistoryId(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
-        return Sinteger(hlWindowFocusHistoryId(window));
+            return SchemeHost::False;
+        return SchemeHost::integer(hlWindowFocusHistoryId(window));
     }
 
-    static ptr hlSchemeWindowContentType(long long id) {
+    static SchemeValue hlSchemeWindowContentType(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ct = NContentType::toString(window->getContentType());
-        return Sstring_utf8(ct.c_str(), ct.size());
+        return SchemeHost::stringUtf8(ct.c_str(), ct.size());
     }
 
-    static ptr hlSchemeWindowStableId(long long id) {
+    static SchemeValue hlSchemeWindowStableId(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
         const auto sid = std::format("{:x}", window->metadata().stableID());
-        return Sstring_utf8(sid.c_str(), sid.size());
+        return SchemeHost::stringUtf8(sid.c_str(), sid.size());
     }
 
-    static ptr hlSchemeWindowTags(long long id) {
+    static SchemeValue hlSchemeWindowTags(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
-        ptr l = Snil;
+            return SchemeHost::False;
+        SchemeValue l = SchemeHost::Nil;
         for (const auto& tag : window->m_ruleApplicator->m_tagKeeper.getTags())
-            l = Scons(Sstring_utf8(tag.c_str(), tag.size()), l);
+            l = SchemeHost::cons(SchemeHost::stringUtf8(tag.c_str(), tag.size()), l);
         return l;
     }
 
-    static ptr hlSchemeWindowSwallowingId(long long id) {
+    static SchemeValue hlSchemeWindowSwallowingId(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
         const auto swallowee = window->swallowing().swallowee();
         if (!swallowee)
-            return Sfalse;
+            return SchemeHost::False;
         const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(swallowee));
-        return Sinteger(winId);
+        return SchemeHost::integer(winId);
     }
 
-    static ptr hlSchemeWindowXdgTag(long long id) {
+    static SchemeValue hlSchemeWindowXdgTag(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
         const auto tag = window->backend().metadata().tag;
         if (!tag)
-            return Sfalse;
-        return Sstring_utf8(tag->c_str(), tag->size());
+            return SchemeHost::False;
+        return SchemeHost::stringUtf8(tag->c_str(), tag->size());
     }
 
-    static ptr hlSchemeWindowXdgDescription(long long id) {
+    static SchemeValue hlSchemeWindowXdgDescription(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
         const auto desc = window->backend().metadata().description;
         if (!desc)
-            return Sfalse;
-        return Sstring_utf8(desc->c_str(), desc->size());
+            return SchemeHost::False;
+        return SchemeHost::stringUtf8(desc->c_str(), desc->size());
     }
 
     // upstream's `layout` window field: {name} for plain algos, plus
@@ -1007,33 +1000,33 @@ namespace Config::Scheme {
     // Mirrored as a plist: (name "master" 'is-master #f 'perc-master 0.5
     // 'perc-size 1.0) | (name "scrolling" 'column (index n width f
     // windows (…)) 'index-in-column n). Stale handle / no algo -> #f.
-    static ptr hlSchemeWindowLayout(long long id) {
+    static SchemeValue hlSchemeWindowLayout(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto target = window->layoutTarget();
         if (!target || target->floating() || !window->m_workspace || !window->m_workspace->space())
-            return Sfalse;
+            return SchemeHost::False;
         const auto& algo = window->m_workspace->space()->algorithm();
         if (!algo || !algo->tiledAlgo())
-            return Sfalse;
+            return SchemeHost::False;
         const auto& tiledAlgo = algo->tiledAlgo();
 
         const std::string name = Layout::Supplementary::algoMatcher()->getNameForTiledAlgo(tiledAlgo.get());
-        ptr l = Scons(Sstring_to_symbol("name"), Scons(Sstring_utf8(name.c_str(), name.size()), Snil));
+        SchemeValue l = SchemeHost::cons(SchemeHost::symbol("name"), SchemeHost::cons(SchemeHost::stringUtf8(name.c_str(), name.size()), SchemeHost::Nil));
 
         if (const auto* master = dynamic_cast<Layout::Tiled::CMasterAlgorithm*>(tiledAlgo.get())) {
             const auto node = master->getNodeFromTarget(target);
             if (node) {
-                l = Scons(Sstring_to_symbol("is-master"),
-                     Scons(node->isMaster ? Strue : Sfalse, l));
-                l = Scons(Sstring_to_symbol("perc-master"),
-                     Scons(Sflonum(node->percMaster), l));
-                l = Scons(Sstring_to_symbol("perc-size"),
-                     Scons(Sflonum(node->percSize), l));
+                l = SchemeHost::cons(SchemeHost::symbol("is-master"),
+                     SchemeHost::cons(node->isMaster ? SchemeHost::True : SchemeHost::False, l));
+                l = SchemeHost::cons(SchemeHost::symbol("perc-master"),
+                     SchemeHost::cons(SchemeHost::flonum(node->percMaster), l));
+                l = SchemeHost::cons(SchemeHost::symbol("perc-size"),
+                     SchemeHost::cons(SchemeHost::flonum(node->percSize), l));
             }
         } else if (auto* scrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(tiledAlgo.get())) {
             const auto data = scrolling->dataFor(target);
@@ -1041,13 +1034,13 @@ namespace Config::Scheme {
                 const auto col = data->column.lock();
                 if (col) {
                     const auto scrollingData = col->scrollingData.lock();
-                    ptr column = Snil;
+                    SchemeValue column = SchemeHost::Nil;
                     if (scrollingData)
-                        column = Scons(Sstring_to_symbol("index"),
-                                   Scons(Sinteger((int)scrollingData->idx(col)), column));
-                    column = Scons(Sstring_to_symbol("width"),
-                               Scons(Sflonum(col->getColumnWidth()), column));
-                    ptr windows = Snil;
+                        column = SchemeHost::cons(SchemeHost::symbol("index"),
+                                   SchemeHost::cons(SchemeHost::integer((int)scrollingData->idx(col)), column));
+                    column = SchemeHost::cons(SchemeHost::symbol("width"),
+                               SchemeHost::cons(SchemeHost::flonum(col->getColumnWidth()), column));
+                    SchemeValue windows = SchemeHost::Nil;
                     for (const auto& td : col->targetDatas) {
                         const auto t = td->target.lock();
                         if (!t)
@@ -1056,13 +1049,13 @@ namespace Config::Scheme {
                         if (!win)
                             continue;
                         const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(win));
-                        windows = Scons(Sinteger(winId), windows);
+                        windows = SchemeHost::cons(SchemeHost::integer(winId), windows);
                     }
-                    column = Scons(Sstring_to_symbol("windows"),
-                               Scons(windows, column));
-                    l = Scons(Sstring_to_symbol("index-in-column"),
-                          Scons(Sinteger((int)col->idx(target)), l));
-                    l = Scons(Sstring_to_symbol("column"), Scons(column, l));
+                    column = SchemeHost::cons(SchemeHost::symbol("windows"),
+                               SchemeHost::cons(windows, column));
+                    l = SchemeHost::cons(SchemeHost::symbol("index-in-column"),
+                          SchemeHost::cons(SchemeHost::integer((int)col->idx(target)), l));
+                    l = SchemeHost::cons(SchemeHost::symbol("column"), SchemeHost::cons(column, l));
                 }
             }
         }
@@ -1256,27 +1249,27 @@ namespace Config::Scheme {
     // read back the dynamic window props setProp writes: effective values
     // (defaults included), as #t/#f for booleans, numbers for opacities and
     // border/rounding, and #f for unknown/unsupported prop names.
-    static ptr hlSchemeWindowPropGet(long long id, const char* prop) {
+    static SchemeValue hlSchemeWindowPropGet(long long id, const char* prop) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromSchemeId(id);
         if (!window || !prop || !*prop)
-            return Sfalse;
+            return SchemeHost::False;
         const std::string p = prop;
         auto&             A = *window->m_ruleApplicator;
         if (p == "opacity")
-            return Sflonum(A.alpha().value().alpha);
+            return SchemeHost::flonum(A.alpha().value().alpha);
         if (p == "opacity_inactive")
-            return Sflonum(A.alphaInactive().value().alpha);
+            return SchemeHost::flonum(A.alphaInactive().value().alpha);
         if (p == "opacity_fullscreen")
-            return Sflonum(A.alphaFullscreen().value().alpha);
+            return SchemeHost::flonum(A.alphaFullscreen().value().alpha);
         if (p == "border_size")
-            return Sinteger(A.borderSize().value());
+            return SchemeHost::integer(A.borderSize().value());
         if (p == "rounding")
-            return Sinteger(A.rounding().value());
+            return SchemeHost::integer(A.rounding().value());
 #define HL_READ_BOOL(NAME, CNAME)  \
     if (p == NAME)                 \
-        return A.CNAME().value() ? Strue : Sfalse;
+        return A.CNAME().value() ? SchemeHost::True : SchemeHost::False;
         HL_READ_BOOL("allows_input", allowsInput)
         HL_READ_BOOL("decorate", decorate)
         HL_READ_BOOL("focus_on_activate", focusOnActivate)
@@ -1306,7 +1299,7 @@ namespace Config::Scheme {
         HL_READ_BOOL("stay_focused", stayFocused)
         HL_READ_BOOL("no_xdg_drags", noXdgDrags)
 #undef HL_READ_BOOL
-        return Sfalse;
+        return SchemeHost::False;
     }
 
     // ---- actions: the dispatcher surface --------------------------------------
@@ -1722,12 +1715,12 @@ namespace Config::Scheme {
         return actionResult("pass", Config::Actions::pass(actionWindow(id)));
     }
 
-    static std::optional<Input::ModifierMask> modsMaskFromTokens(ptr mods); // defined below
+    static std::optional<Input::ModifierMask> modsMaskFromTokens(SchemeValue mods); // defined below
 
     // mods arrive as a LIST of modifier tokens (as built by hl-kbd/hl-key),
     // the same shape every mods-taking API takes; only the key is resolved
     // from its string name here
-    static int hlSchemeSendShortcut(ptr mods, const char* key, long long id) {
+    static int hlSchemeSendShortcut(SchemeValue mods, const char* key, long long id) {
         if (!g_up)
             return -1;
         const auto mask = modsMaskFromTokens(mods);
@@ -1739,7 +1732,7 @@ namespace Config::Scheme {
         return actionResult("send-shortcut", Config::Actions::pass(*mask, sc<uint32_t>(sym), actionWindow(id)));
     }
 
-    static int hlSchemeSendKeyState(ptr mods, const char* key, int state, long long id) {
+    static int hlSchemeSendKeyState(SchemeValue mods, const char* key, int state, long long id) {
         if (!g_up)
             return -1;
         const auto mask = modsMaskFromTokens(mods);
@@ -1826,25 +1819,25 @@ namespace Config::Scheme {
     // tags the spawned window by pid itself (upstream hl.exec_cmd(cmd,
     // ruleTable) parity; upstream's exec_raw is the same no-rule path, so
     // it folds in).
-    static int hlSchemeExec(const char* cmd, ptr effects) {
+    static int hlSchemeExec(const char* cmd, SchemeValue effects) {
         if (!g_up || !cmd || !*cmd)
             return -1;
 
         // walk the effects plist; empty → plain spawn, else build the rule
         auto rule = makeShared<Desktop::Rule::CWindowRule>();
         bool any  = false;
-        for (ptr l = effects; Spairp(l); l = Scdr(Scdr(l))) {
-            if (!Spairp(Scdr(l))) {
+        for (SchemeValue l = effects; SchemeHost::isPair(l); l = SchemeHost::cdr(SchemeHost::cdr(l))) {
+            if (!SchemeHost::isPair(SchemeHost::cdr(l))) {
                 g_configError = "hl-exec!: odd plist of rule effects";
                 return -1;
             }
-            const std::string effect = schemeDatumToStr(Scar(l));
+            const std::string effect = schemeDatumToStr(SchemeHost::car(l));
             const auto        e      = Desktop::Rule::windowEffects()->get(std::string_view(effect));
             if (!e) {
                 g_configError = std::format("hl-exec!: unknown rule effect '{}'", effect);
                 return -1;
             }
-            const auto res = rule->addEffect(*e, schemeDatumToStr(Scar(Scdr(l))));
+            const auto res = rule->addEffect(*e, schemeDatumToStr(SchemeHost::car(SchemeHost::cdr(l))));
             if (!res) {
                 g_configError = std::format("hl-exec!: effect '{}': {}", effect, res.error());
                 return -1;
@@ -1864,13 +1857,13 @@ namespace Config::Scheme {
     // record-cell model); every getter returns #f when the group is gone
     using PHLGROUPREF = Hyprutils::Memory::CWeakPointer<Desktop::View::CGroup>;
 
-    static ptr hlSchemeWorkspaceGroups(long long id) {
+    static SchemeValue hlSchemeWorkspaceGroups(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ws = workspaceFromId(id);
         if (!ws)
-            return Sfalse;
-        ptr                                 l = Snil;
+            return SchemeHost::False;
+        SchemeValue                                 l = SchemeHost::Nil;
         std::vector<const Desktop::View::CGroup*> pushed;
         for (const auto& w : Desktop::windowState()->windows()) {
             if (w->m_workspace != ws || !w->grouping().group())
@@ -1879,12 +1872,12 @@ namespace Config::Scheme {
             if (std::find(pushed.begin(), pushed.end(), g) != pushed.end())
                 continue;
             pushed.push_back(g);
-            l = Scons(Sinteger((uintptr_t)(new SHandle<PHLGROUPREF>(w->grouping().group()))), l);
+            l = SchemeHost::cons(SchemeHost::integer((uintptr_t)(new SHandle<PHLGROUPREF>(w->grouping().group()))), l);
         }
         // members were collected head-first: reverse for document order
-        ptr out = Snil;
-        for (ptr p = l; Spairp(p); p = Scdr(p))
-            out = Scons(Scar(p), out);
+        SchemeValue out = SchemeHost::Nil;
+        for (SchemeValue p = l; SchemeHost::isPair(p); p = SchemeHost::cdr(p))
+            out = SchemeHost::cons(SchemeHost::car(p), out);
         return out;
     }
 
@@ -1906,69 +1899,69 @@ namespace Config::Scheme {
         return (ga && gb && ga.get() == gb.get()) ? 1 : 0;
     }
 
-    static ptr hlSchemeGroupMembers(long long id) {
+    static SchemeValue hlSchemeGroupMembers(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto group = groupFromHandle(id);
         if (!group)
-            return Sfalse;
-        ptr l = Snil;
+            return SchemeHost::False;
+        SchemeValue l = SchemeHost::Nil;
         for (const auto& grouped : group->windows()) {
             const auto w = grouped.lock();
             if (!w)
                 continue;
-            l = Scons(Sinteger(Internals::mintWindowHandle(w)), l);
+            l = SchemeHost::cons(SchemeHost::integer(Internals::mintWindowHandle(w)), l);
         }
-        ptr out = Snil;
-        for (ptr p = l; Spairp(p); p = Scdr(p))
-            out = Scons(Scar(p), out);
+        SchemeValue out = SchemeHost::Nil;
+        for (SchemeValue p = l; SchemeHost::isPair(p); p = SchemeHost::cdr(p))
+            out = SchemeHost::cons(SchemeHost::car(p), out);
         return out;
     }
 
-    static ptr hlSchemeGroupCurrent(long long id) {
+    static SchemeValue hlSchemeGroupCurrent(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto group = groupFromHandle(id);
         if (!group)
-            return Sfalse;
+            return SchemeHost::False;
         const auto current = group->current();
         if (!current)
-            return Sfalse;
-        return Sinteger(Internals::mintWindowHandle(current));
+            return SchemeHost::False;
+        return SchemeHost::integer(Internals::mintWindowHandle(current));
     }
 
-    static ptr hlSchemeGroupCurrentIdx(long long id) {
+    static SchemeValue hlSchemeGroupCurrentIdx(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto group = groupFromHandle(id);
         if (!group)
-            return Sfalse;
-        return Sinteger(sc<int64_t>(group->getCurrentIdx()) + 1); // 1-based, upstream parity
+            return SchemeHost::False;
+        return SchemeHost::integer(sc<int64_t>(group->getCurrentIdx()) + 1); // 1-based, upstream parity
     }
 
-    static ptr hlSchemeGroupSize(long long id) {
+    static SchemeValue hlSchemeGroupSize(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto group = groupFromHandle(id);
-        return group ? Sinteger(sc<int64_t>(group->size())) : Sfalse;
+        return group ? SchemeHost::integer(sc<int64_t>(group->size())) : SchemeHost::False;
     }
 
-    static ptr hlSchemeGroupLocked(long long id) {
+    static SchemeValue hlSchemeGroupLocked(long long id) {
         if (!g_up)
-            return Sfalse;
-        const auto group = groupFromHandle(id);
-        if (!group)
-            return Sfalse;
-        return group->locked() ? Strue : Sfalse;
-    }
-
-    static ptr hlSchemeGroupDenied(long long id) {
-        if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto group = groupFromHandle(id);
         if (!group)
-            return Sfalse;
-        return group->denied() ? Strue : Sfalse;
+            return SchemeHost::False;
+        return group->locked() ? SchemeHost::True : SchemeHost::False;
+    }
+
+    static SchemeValue hlSchemeGroupDenied(long long id) {
+        if (!g_up)
+            return SchemeHost::False;
+        const auto group = groupFromHandle(id);
+        if (!group)
+            return SchemeHost::False;
+        return group->denied() ? SchemeHost::True : SchemeHost::False;
     }
 
     // index crosses as -1 = append; 1-based otherwise (upstream parity)
@@ -2114,8 +2107,8 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static ptr hlConfigLastError() {
-        return Sstring_utf8(g_configError.c_str(), g_configError.size());
+    static SchemeValue hlConfigLastError() {
+        return SchemeHost::stringUtf8(g_configError.c_str(), g_configError.size());
     }
 
     // read side: marshal the value back as an encoded string
@@ -2251,36 +2244,33 @@ namespace Config::Scheme {
         Config::VEC2    m_vec{0, 0};
     };
 
-    static std::string schemeDatumToStr(ptr p) {
-        if (Ssymbolp(p))
-            p = Ssymbol_to_string(p);
-        std::string s;
-        for (iptr i = 0; i < Sstring_length(p); ++i)
-            s += (char)Sstring_ref(p, i);
-        return s;
+    static std::string schemeDatumToStr(SchemeValue p) {
+        if (SchemeHost::isSymbol(p))
+            return SchemeHost::symbolName(p);
+        return SchemeHost::stringBytes(p);
     }
 
     // coerce a scheme value to the field's kind; sets g_configError on failure
-    static std::optional<std::pair<std::string, UP<CDeviceValue>>> deviceValue(const SDeviceField& f, ptr v) {
+    static std::optional<std::pair<std::string, UP<CDeviceValue>>> deviceValue(const SDeviceField& f, SchemeValue v) {
         auto fail = [&](const char* why) -> std::optional<std::pair<std::string, UP<CDeviceValue>>> {
             g_configError = std::format("hl-device-add!: field '{}': {}", f.name, why);
             return std::nullopt;
         };
 
         if (f.kind == eDeviceKind::BOOL) {
-            if (v == Strue) return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(true))};
-            if (v == Sfalse) return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(false))};
+            if (v == SchemeHost::True) return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(true))};
+            if (v == SchemeHost::False) return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(false))};
             return fail("expected #t or #f");
         }
         if (f.kind == eDeviceKind::STRING) {
-            if (!Sstringp(v))
+            if (!SchemeHost::isString(v))
                 return fail("expected a string");
             return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(schemeDatumToStr(v)))};
         }
         if (f.kind == eDeviceKind::INT || f.kind == eDeviceKind::FLOAT) {
             double d = 0;
-            if (Sfixnump(v)) d = (double)Sfixnum_value(v);
-            else if (Sflonump(v)) d = Sflonum_value(v);
+            if (SchemeHost::isFixnum(v)) d = (double)SchemeHost::fixnumValue(v);
+            else if (SchemeHost::isFlonum(v)) d = SchemeHost::flonumValue(v);
             else return fail("expected a number");
             if ((f.lo != 0 || f.hi != 0) && (d < f.lo || d > f.hi))
                 return fail(std::format("out of range [{:.0g}, {:.0g}]", f.lo, f.hi).c_str());
@@ -2289,30 +2279,30 @@ namespace Config::Scheme {
             return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue((Config::FLOAT)d))};
         }
         // VEC2: (x . y) or (x y)
-        if (!Spairp(v))
+        if (!SchemeHost::isPair(v))
             return fail("expected a coordinate pair");
-        auto asNum = [](ptr p, double& out) -> bool {
-            if (Sfixnump(p)) { out = (double)Sfixnum_value(p); return true; }
-            if (Sflonump(p)) { out = Sflonum_value(p); return true; }
+        auto asNum = [](SchemeValue p, double& out) -> bool {
+            if (SchemeHost::isFixnum(p)) { out = (double)SchemeHost::fixnumValue(p); return true; }
+            if (SchemeHost::isFlonum(p)) { out = SchemeHost::flonumValue(p); return true; }
             return false;
         };
         double x, y;
-        ptr    tail = Scdr(v);
-        if (Spairp(tail)) {
-            if (!asNum(Scar(tail), y)) return fail("expected a coordinate pair");
+        SchemeValue    tail = SchemeHost::cdr(v);
+        if (SchemeHost::isPair(tail)) {
+            if (!asNum(SchemeHost::car(tail), y)) return fail("expected a coordinate pair");
         } else if (!asNum(tail, y))
             return fail("expected a coordinate pair");
-        if (!asNum(Scar(v), x)) return fail("expected a coordinate pair");
+        if (!asNum(SchemeHost::car(v), x)) return fail("expected a coordinate pair");
         return std::pair{std::string(f.name), UP<CDeviceValue>(new CDeviceValue(Config::VEC2(x, y)))};
     }
 
     // (hl-device-add! NAME . FIELDS)
-    static int hlSchemeDeviceAdd(const char* name, ptr fields) {
+    static int hlSchemeDeviceAdd(const char* name, SchemeValue fields) {
         if (!g_up || !name || !*name) {
             g_configError = "hl-device-add!: a device name is required";
             return -1;
         }
-        if (!Spairp(fields)) {
+        if (!SchemeHost::isPair(fields)) {
             g_configError = "hl-device-add!: fields must be a plist, e.g. (hl-device-add! NAME 'enabled #t)";
             return -1;
         }
@@ -2322,13 +2312,13 @@ namespace Config::Scheme {
 
         // validate + coerce every field first: a bad field writes nothing
         std::vector<std::pair<std::string, UP<CDeviceValue>>> values;
-        ptr l = fields;
-        while (Spairp(l)) {
-            if (!Spairp(Scdr(l))) {
+        SchemeValue l = fields;
+        while (SchemeHost::isPair(l)) {
+            if (!SchemeHost::isPair(SchemeHost::cdr(l))) {
                 g_configError = "hl-device-add!: odd plist of fields";
                 return -1;
             }
-            const std::string key = schemeDatumToStr(Scar(l));
+            const std::string key = schemeDatumToStr(SchemeHost::car(l));
             const SDeviceField* f  = nullptr;
             for (const auto& F : DEVICE_FIELDS) {
                 if (key == F.name) { f = &F; break; }
@@ -2337,11 +2327,11 @@ namespace Config::Scheme {
                 g_configError = std::format("hl-device-add!: unknown field '{}'", key);
                 return -1;
             }
-            auto v = deviceValue(*f, Scar(Scdr(l)));
+            auto v = deviceValue(*f, SchemeHost::car(SchemeHost::cdr(l)));
             if (!v)
                 return -1;
             values.emplace_back(std::move(*v));
-            l = Scdr(Scdr(l));
+            l = SchemeHost::cdr(SchemeHost::cdr(l));
         }
 
         // Config::mgr() is the abstract interface; the device store lives on
@@ -2355,69 +2345,69 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static ptr hlConfigGet(const char* key) {
+    static SchemeValue hlConfigGet(const char* key) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         auto* val = configValueByKey(key);
         if (!val)
-            return Sfalse;
+            return SchemeHost::False;
         lua_State* L = configScratch();
         val->push(L);
 
-        std::vector<ptr> roots;
-        ptr              result = Sfalse;
+        std::vector<SchemeValue> roots;
+        SchemeValue              result = SchemeHost::False;
 
         switch (lua_type(L, -1)) {
             case LUA_TNIL: break;
-            case LUA_TBOOLEAN: result = lua_toboolean(L, -1) ? Strue : Sfalse; break;
+            case LUA_TBOOLEAN: result = lua_toboolean(L, -1) ? SchemeHost::True : SchemeHost::False; break;
             case LUA_TNUMBER: {
                 const auto D = lua_tonumber(L, -1);
-                result       = (long long)D == D ? Sinteger((long long)D) : Sflonum(D);
+                result       = (long long)D == D ? SchemeHost::integer((long long)D) : SchemeHost::flonum(D);
                 break;
             }
             case LUA_TSTRING: {
                 const char* s = lua_tostring(L, -1);
-                result        = Sstring_utf8(s, strlen(s));
+                result        = SchemeHost::stringUtf8(s, strlen(s));
                 break;
             }
             case LUA_TTABLE: {
                 // tables come back as a PLIST (key value key value ...) — the
                 // same shape hl-config-add! accepts going in
-                std::vector<ptr> elems;
+                std::vector<SchemeValue> elems;
                 lua_pushnil(L);
                 while (lua_next(L, -2) != 0) {
                     if (lua_type(L, -2) == LUA_TSTRING) {
                         const char* k = lua_tostring(L, -2);
-                        ptr         keySym = Sstring_to_symbol(k);
+                        SchemeValue         keySym = SchemeHost::symbol(k);
                         marshRoot(keySym, roots);
                         elems.push_back(keySym);
                     } else {
-                        elems.push_back(Sinteger(lua_tointeger(L, -2)));
+                        elems.push_back(SchemeHost::integer(lua_tointeger(L, -2)));
                     }
 
                     switch (lua_type(L, -1)) {
                         case LUA_TNUMBER: {
                             const auto D = lua_tonumber(L, -1);
-                            ptr         v = (long long)D == D ? Sinteger((long long)D) : Sflonum(D);
+                            SchemeValue         v = (long long)D == D ? SchemeHost::integer((long long)D) : SchemeHost::flonum(D);
                             marshRoot(v, roots);
                             elems.push_back(v);
                             break;
                         }
                         case LUA_TSTRING: {
                             const char* s = lua_tostring(L, -1);
-                            ptr         v = Sstring_utf8(s, strlen(s));
+                            SchemeValue         v = SchemeHost::stringUtf8(s, strlen(s));
                             marshRoot(v, roots);
                             elems.push_back(v);
                             break;
                         }
-                        case LUA_TBOOLEAN: elems.push_back(lua_toboolean(L, -1) ? Strue : Sfalse); break;
+                        case LUA_TBOOLEAN: elems.push_back(lua_toboolean(L, -1) ? SchemeHost::True : SchemeHost::False); break;
                         default: break;
                     }
                     lua_pop(L, 1);
                 }
-                result = Snil;
+                result = SchemeHost::Nil;
                 for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
-                    result = Scons(*it, result);
+                    result = SchemeHost::cons(*it, result);
                     marshRoot(result, roots);
                 }
                 break;
@@ -2842,38 +2832,38 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlWindowRuleCommit(ptr record) {
+    static int hlWindowRuleCommit(SchemeValue record) {
         if (!g_up || !g_curWindowRule)
             return -1;
-        g_ruleIndex.emplace(reinterpret_cast<uintptr_t>(record),
+        g_ruleIndex.emplace(SchemeHost::word(record),
                             std::make_pair(g_curWindowRule, SThunkRef(record)));
         Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_WINDOW_STATES);
         g_curWindowRule.reset();
         return 0;
     }
 
-    static int hlLayerRuleCommit(ptr record) {
+    static int hlLayerRuleCommit(SchemeValue record) {
         if (!g_up || !g_curLayerRule)
             return -1;
-        g_ruleIndex.emplace(reinterpret_cast<uintptr_t>(record),
+        g_ruleIndex.emplace(SchemeHost::word(record),
                             std::make_pair(g_curLayerRule, SThunkRef(record)));
         Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_RULES);
         g_curLayerRule.reset();
         return 0;
     }
 
-    static int hlRuleSetEnabled(ptr record, int enabled) {
+    static int hlRuleSetEnabled(SchemeValue record, int enabled) {
         if (!g_up)
             return -1;
-        const auto it = g_ruleIndex.find(reinterpret_cast<uintptr_t>(record));
+        const auto it = g_ruleIndex.find(SchemeHost::word(record));
         if (it == g_ruleIndex.end())
             return -1;
         it->second.first->setEnabled(enabled != 0);
         return 0;
     }
 
-    static int hlRuleEnabled(ptr record) {
-        const auto it = g_ruleIndex.find(reinterpret_cast<uintptr_t>(record));
+    static int hlRuleEnabled(SchemeValue record) {
+        const auto it = g_ruleIndex.find(SchemeHost::word(record));
         return (it != g_ruleIndex.end() && it->second.first->isEnabled()) ? 1 : 0;
     }
 
@@ -3083,73 +3073,73 @@ namespace Config::Scheme {
         return -1;
     }
 
-    static ptr monitorIdResult(PHLMONITOR m) {
+    static SchemeValue monitorIdResult(PHLMONITOR m) {
         if (!m)
-            return Sfalse;
+            return SchemeHost::False;
         const auto id = (uintptr_t)(new SHandle<PHLMONITORREF>(m));
-        return Sinteger(id);
+        return SchemeHost::integer(id);
     }
 
-    static ptr hlMonitorFrom(const char* sel) {
+    static SchemeValue hlMonitorFrom(const char* sel) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         return monitorIdResult(State::monitorState()->query().configString(sel ? sel : "").run());
     }
 
-    static ptr hlMonitorAt(double x, double y) {
+    static SchemeValue hlMonitorAt(double x, double y) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         return monitorIdResult(State::monitorState()->query().vec(Vector2D{x, y}).run());
     }
 
-    static ptr hlMonitorAtCursor() {
+    static SchemeValue hlMonitorAtCursor() {
         if (!g_up || !Pointer::mgr())
-            return Sfalse;
+            return SchemeHost::False;
         const auto pos = Pointer::mgr()->untransformedPosition();
         return monitorIdResult(State::monitorState()->query().vec(pos).run());
     }
 
-    static ptr hlActiveMonitor() {
+    static SchemeValue hlActiveMonitor() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         return monitorIdResult(Desktop::focusState()->monitor());
     }
 
-    static ptr hlActiveWorkspace() {
+    static SchemeValue hlActiveWorkspace() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto mon = Desktop::focusState()->monitor();
         if (!mon || !mon->m_activeWorkspace)
-            return Sfalse;
+            return SchemeHost::False;
         const auto id = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(mon->m_activeWorkspace));
-        return Sinteger(id);
+        return SchemeHost::integer(id);
     }
 
-    static ptr hlActiveSpecialWorkspace() {
+    static SchemeValue hlActiveSpecialWorkspace() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto mon = Desktop::focusState()->monitor();
         if (!mon || !mon->m_activeSpecialWorkspace)
-            return Sfalse;
+            return SchemeHost::False;
         const auto id = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(mon->m_activeSpecialWorkspace));
-        return Sinteger(id);
+        return SchemeHost::integer(id);
     }
 
-    static ptr hlLastWorkspace() {
+    static SchemeValue hlLastWorkspace() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto mon     = Desktop::focusState()->monitor();
         const auto current = mon ? mon->m_activeWorkspace : nullptr;
         if (!current)
-            return Sfalse;
+            return SchemeHost::False;
         const auto previous = Desktop::History::workspaceTracker()->previousWorkspace(current);
         auto       ws       = previous.workspace.lock();
         if (!ws && previous.target.valid())
             ws = State::Workspace::state()->find(previous.target);
         if (!ws)
-            return Sfalse;
+            return SchemeHost::False;
         const auto id = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws));
-        return Sinteger(id);
+        return SchemeHost::integer(id);
     }
 
     // ---- workspace/monitor handle getters -------------------------------------
@@ -3158,215 +3148,215 @@ namespace Config::Scheme {
     // first; a stale or dead handle yields #f from every getter, like an
     // expired Lua object.
 
-    static ptr boolResult(bool b) {
-        return b ? Strue : Sfalse;
+    static SchemeValue boolResult(bool b) {
+        return b ? SchemeHost::True : SchemeHost::False;
     }
 
-    static ptr windowHandleResult(PHLWINDOW w) {
+    static SchemeValue windowHandleResult(PHLWINDOW w) {
         if (!w)
-            return Sfalse;
+            return SchemeHost::False;
         const auto id = (uintptr_t)(new SHandle<PHLWINDOWREF>(w));
-        return Sinteger(id);
+        return SchemeHost::integer(id);
     }
 
-    static ptr workspaceHandleResult(PHLWORKSPACE ws) {
+    static SchemeValue workspaceHandleResult(PHLWORKSPACE ws) {
         if (!ws)
-            return Sfalse;
+            return SchemeHost::False;
         const auto id = (uintptr_t)(new SHandle<PHLWORKSPACEREF>(ws));
-        return Sinteger(id);
+        return SchemeHost::integer(id);
     }
 
-    static ptr monitorHandleResult(PHLMONITOR mon) {
+    static SchemeValue monitorHandleResult(PHLMONITOR mon) {
         if (!mon)
-            return Sfalse;
+            return SchemeHost::False;
         const auto id = (uintptr_t)(new SHandle<PHLMONITORREF>(mon));
-        return Sinteger(id);
+        return SchemeHost::integer(id);
     }
 
     template <typename F>
-    static ptr wsGet(long long id, F&& fn) {
+    static SchemeValue wsGet(long long id, F&& fn) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ws = workspaceFromId(id);
         if (!ws)
-            return Sfalse;
+            return SchemeHost::False;
         return fn(ws);
     }
 
     template <typename F>
-    static ptr monGet(long long id, F&& fn) {
+    static SchemeValue monGet(long long id, F&& fn) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto mon = monitorFromId(id);
         if (!mon)
-            return Sfalse;
+            return SchemeHost::False;
         return fn(mon);
     }
 
     // -- workspace getters
-    static ptr hlWorkspaceName(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { const auto& s = ws->displayName(); return Sstring_utf8(s.c_str(), s.size()); });
+    static SchemeValue hlWorkspaceName(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { const auto& s = ws->displayName(); return SchemeHost::stringUtf8(s.c_str(), s.size()); });
     }
 
-    static ptr hlWorkspaceAddressableName(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { const auto& s = ws->addressableName(); return Sstring_utf8(s.c_str(), s.size()); });
+    static SchemeValue hlWorkspaceAddressableName(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { const auto& s = ws->addressableName(); return SchemeHost::stringUtf8(s.c_str(), s.size()); });
     }
 
-    static ptr hlWorkspaceNumber(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+    static SchemeValue hlWorkspaceNumber(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue {
             const auto n = ws->numberedID();
-            return n ? Sinteger(sc<int>(*n)) : Sfalse;
+            return n ? SchemeHost::integer(sc<int>(*n)) : SchemeHost::False;
         });
     }
 
-    static ptr hlWorkspaceMonitor(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return monitorHandleResult(ws->m_monitor.lock()); });
+    static SchemeValue hlWorkspaceMonitor(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return monitorHandleResult(ws->m_monitor.lock()); });
     }
 
-    static ptr hlWorkspaceSpecial(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->type() == Workspace::eWorkspaceType::SPECIAL); });
+    static SchemeValue hlWorkspaceSpecial(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return boolResult(ws->type() == Workspace::eWorkspaceType::SPECIAL); });
     }
 
-    static ptr hlWorkspaceActive(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+    static SchemeValue hlWorkspaceActive(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue {
             const auto mon = ws->m_monitor.lock();
             return boolResult(mon && (mon->m_activeWorkspace == ws || mon->m_activeSpecialWorkspace == ws));
         });
     }
 
-    static ptr hlWorkspaceVisible(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->visible()); });
+    static SchemeValue hlWorkspaceVisible(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return boolResult(ws->visible()); });
     }
 
-    static ptr hlWorkspaceEmpty(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->getWindowCount() == 0); });
+    static SchemeValue hlWorkspaceEmpty(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return boolResult(ws->getWindowCount() == 0); });
     }
 
-    static ptr hlWorkspacePersistent(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+    static SchemeValue hlWorkspacePersistent(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue {
             const auto REGULAR = dynamicPointerCast<Workspace::CRegularWorkspace>(ws);
             return boolResult(REGULAR && REGULAR->isPersistent());
         });
     }
 
-    static ptr hlWorkspaceHasUrgent(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(ws->hasUrgentWindow()); });
+    static SchemeValue hlWorkspaceHasUrgent(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return boolResult(ws->hasUrgentWindow()); });
     }
 
-    static ptr hlWorkspaceHasFullscreen(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return boolResult(Fullscreen::controller()->hasFullscreen(ws)); });
+    static SchemeValue hlWorkspaceHasFullscreen(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return boolResult(Fullscreen::controller()->hasFullscreen(ws)); });
     }
 
-    static ptr hlWorkspaceFullscreenMode(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(sc<int>(Fullscreen::controller()->getFullscreenModes(ws).internal)); });
+    static SchemeValue hlWorkspaceFullscreenMode(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return SchemeHost::integer(sc<int>(Fullscreen::controller()->getFullscreenModes(ws).internal)); });
     }
 
-    static ptr hlWorkspaceFullscreenWindow(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return windowHandleResult(Fullscreen::controller()->getFullscreenWindow(ws)); });
+    static SchemeValue hlWorkspaceFullscreenWindow(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return windowHandleResult(Fullscreen::controller()->getFullscreenWindow(ws)); });
     }
 
-    static ptr hlWorkspaceLastWindow(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return windowHandleResult(ws->getLastFocusedWindow()); });
+    static SchemeValue hlWorkspaceLastWindow(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return windowHandleResult(ws->getLastFocusedWindow()); });
     }
 
-    static ptr hlWorkspaceWindowCount(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(ws->getWindowCount()); });
+    static SchemeValue hlWorkspaceWindowCount(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return SchemeHost::integer(ws->getWindowCount()); });
     }
 
-    static ptr hlWorkspaceGroupCount(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr { return Sinteger(ws->getGroups()); });
+    static SchemeValue hlWorkspaceGroupCount(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue { return SchemeHost::integer(ws->getGroups()); });
     }
 
     // windows on the workspace as newline-joined window-handle ids
 
-    static ptr hlWorkspaceTiledLayout(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+    static SchemeValue hlWorkspaceTiledLayout(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue {
             std::string layoutName = "unknown";
             const auto  SPACE      = ws->space();
             if (SPACE && SPACE->algorithm() && SPACE->algorithm()->tiledAlgo())
                 layoutName = Layout::Supplementary::algoMatcher()->getNameForTiledAlgo(SPACE->algorithm()->tiledAlgo().get());
-            return Sstring_utf8(layoutName.c_str(), layoutName.size());
+            return SchemeHost::stringUtf8(layoutName.c_str(), layoutName.size());
         });
     }
 
-    static ptr hlWorkspaceAlive(long long id) {
+    static SchemeValue hlWorkspaceAlive(long long id) {
         return boolResult(g_up && workspaceFromId(id) != nullptr);
     }
 
     // identity, mirroring hl-window=?: true iff both handles lock to the same
     // live workspace; dead handles are never "the same" as anything
-    static ptr hlWorkspaceSame(long long a, long long b) {
+    static SchemeValue hlWorkspaceSame(long long a, long long b) {
         const auto wa = g_up ? workspaceFromId(a) : nullptr;
         const auto wb = g_up ? workspaceFromId(b) : nullptr;
         return boolResult(wa && wb && wa.get() == wb.get());
     }
 
     // -- monitor getters
-    static ptr hlMonitorName(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_name.c_str(), mon->m_name.size()); });
+    static SchemeValue hlMonitorName(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::stringUtf8(mon->m_name.c_str(), mon->m_name.size()); });
     }
 
-    static ptr hlMonitorDescription(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_description.c_str(), mon->m_description.size()); });
+    static SchemeValue hlMonitorDescription(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::stringUtf8(mon->m_description.c_str(), mon->m_description.size()); });
     }
 
-    static ptr hlMonitorNumber(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_id)); });
+    static SchemeValue hlMonitorNumber(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::integer(sc<int>(mon->m_id)); });
     }
 
-    static ptr hlMonitorEnabled(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_enabled); });
+    static SchemeValue hlMonitorEnabled(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return boolResult(mon->m_enabled); });
     }
 
-    static ptr hlMonitorFocused(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(Desktop::focusState()->monitor() == mon); });
+    static SchemeValue hlMonitorFocused(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return boolResult(Desktop::focusState()->monitor() == mon); });
     }
 
-    static ptr hlMonitorX(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_position.x)); });
+    static SchemeValue hlMonitorX(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::integer(sc<int>(mon->m_position.x)); });
     }
 
-    static ptr hlMonitorY(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_position.y)); });
+    static SchemeValue hlMonitorY(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::integer(sc<int>(mon->m_position.y)); });
     }
 
-    static ptr hlMonitorWidth(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_size.x)); });
+    static SchemeValue hlMonitorWidth(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::integer(sc<int>(mon->m_size.x)); });
     }
 
-    static ptr hlMonitorHeight(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_size.y)); });
+    static SchemeValue hlMonitorHeight(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::integer(sc<int>(mon->m_size.y)); });
     }
 
-    static ptr hlMonitorScale(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sflonum(sc<double>(mon->m_scale)); });
+    static SchemeValue hlMonitorScale(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::flonum(sc<double>(mon->m_scale)); });
     }
 
-    static ptr hlMonitorTransform(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sinteger(sc<int>(mon->m_transform)); });
+    static SchemeValue hlMonitorTransform(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::integer(sc<int>(mon->m_transform)); });
     }
 
-    static ptr hlMonitorRefreshRate(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sflonum(sc<double>(mon->m_refreshRate)); });
+    static SchemeValue hlMonitorRefreshRate(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::flonum(sc<double>(mon->m_refreshRate)); });
     }
 
-    static ptr hlMonitorMode(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr {
+    static SchemeValue hlMonitorMode(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue {
             const auto s = std::format("{}x{}@{}", sc<int>(mon->m_size.x), sc<int>(mon->m_size.y), mon->m_refreshRate);
-            return Sstring_utf8(s.c_str(), s.size());
+            return SchemeHost::stringUtf8(s.c_str(), s.size());
         });
     }
 
-    static ptr hlMonitorDpms(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_dpmsStatus); });
+    static SchemeValue hlMonitorDpms(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return boolResult(mon->m_dpmsStatus); });
     }
 
-    static ptr hlMonitorVrr(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_vrrActive != 0); });
+    static SchemeValue hlMonitorVrr(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return boolResult(mon->m_vrrActive != 0); });
     }
 
-    static ptr hlMonitor10bit(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return boolResult(mon->m_enabled10bit); });
+    static SchemeValue hlMonitor10bit(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return boolResult(mon->m_enabled10bit); });
     }
 
     // reserved area; all-zero means unset
@@ -3385,23 +3375,23 @@ namespace Config::Scheme {
         }
     }
 
-    static ptr hlMonitorSerial(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr {
+    static SchemeValue hlMonitorSerial(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue {
             const auto& s = mon->m_output->serial;
-            return Sstring_utf8(s.c_str(), s.size());
+            return SchemeHost::stringUtf8(s.c_str(), s.size());
         });
     }
 
     // (physical-width . physical-height), in mm
-    static ptr hlMonitorPhysicalSize(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr {
-            return Scons(Sinteger((int)mon->m_output->physicalSize.x),
-                         Sinteger((int)mon->m_output->physicalSize.y));
+    static SchemeValue hlMonitorPhysicalSize(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue {
+            return SchemeHost::cons(SchemeHost::integer((int)mon->m_output->physicalSize.x),
+                         SchemeHost::integer((int)mon->m_output->physicalSize.y));
         });
     }
 
-    static ptr hlMonitorMirrors(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr {
+    static SchemeValue hlMonitorMirrors(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue {
             std::vector<uintptr_t> ids;
             for (const auto& mirrorRef : mon->m_mirrors) {
                 const auto mirror = mirrorRef.lock();
@@ -3415,36 +3405,36 @@ namespace Config::Scheme {
     }
 
     // list of per-mode plists: ((width w height h refresh-rate r preferred b) ...)
-    static ptr hlMonitorAvailableModes(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr {
-            std::vector<ptr> roots, modes;
+    static SchemeValue hlMonitorAvailableModes(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue {
+            std::vector<SchemeValue> roots, modes;
             for (const auto& mode : mon->m_output->modes) {
                 if (!mode)
                     continue;
-                std::vector<ptr> elems;
-                ptr k = Sstring_to_symbol("width");
+                std::vector<SchemeValue> elems;
+                SchemeValue k = SchemeHost::symbol("width");
                 marshRoot(k, roots); elems.push_back(k);
-                elems.push_back(Sinteger((int)mode->pixelSize.x));
-                k = Sstring_to_symbol("height");
+                elems.push_back(SchemeHost::integer((int)mode->pixelSize.x));
+                k = SchemeHost::symbol("height");
                 marshRoot(k, roots); elems.push_back(k);
-                elems.push_back(Sinteger((int)mode->pixelSize.y));
-                k = Sstring_to_symbol("refresh-rate");
+                elems.push_back(SchemeHost::integer((int)mode->pixelSize.y));
+                k = SchemeHost::symbol("refresh-rate");
                 marshRoot(k, roots); elems.push_back(k);
-                ptr r = Sflonum(mode->refreshRate / 1000.0);
+                SchemeValue r = SchemeHost::flonum(mode->refreshRate / 1000.0);
                 marshRoot(r, roots); elems.push_back(r);
-                k = Sstring_to_symbol("preferred");
+                k = SchemeHost::symbol("preferred");
                 marshRoot(k, roots); elems.push_back(k);
-                elems.push_back(mode->preferred ? Strue : Sfalse);
-                ptr m = Snil;
+                elems.push_back(mode->preferred ? SchemeHost::True : SchemeHost::False);
+                SchemeValue m = SchemeHost::Nil;
                 for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
-                    m = Scons(*it, m);
+                    m = SchemeHost::cons(*it, m);
                     marshRoot(m, roots);
                 }
                 modes.push_back(m);
             }
-            ptr l = Snil;
+            SchemeValue l = SchemeHost::Nil;
             for (auto it = modes.rbegin(); it != modes.rend(); ++it) {
-                l = Scons(*it, l);
+                l = SchemeHost::cons(*it, l);
                 marshRoot(l, roots);
             }
             marshRelease(roots);
@@ -3453,52 +3443,52 @@ namespace Config::Scheme {
     }
 
     // plist: (backend "..." hdr b chroma b bt2020 b vrr-capable b)
-    static ptr hlMonitorHardwareDetails(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr {
-            std::vector<ptr> roots, elems;
+    static SchemeValue hlMonitorHardwareDetails(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue {
+            std::vector<SchemeValue> roots, elems;
             const std::string backend = monitorBackendName(mon->m_output->getBackend()->type());
-            ptr k = Sstring_to_symbol("backend");
+            SchemeValue k = SchemeHost::symbol("backend");
             marshRoot(k, roots); elems.push_back(k);
-            ptr b = Sstring_utf8(backend.c_str(), backend.size());
+            SchemeValue b = SchemeHost::stringUtf8(backend.c_str(), backend.size());
             marshRoot(b, roots); elems.push_back(b);
-            k = Sstring_to_symbol("hdr");
+            k = SchemeHost::symbol("hdr");
             marshRoot(k, roots);
-            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.hdrMetadata.has_value() ? Strue : Sfalse);
-            k = Sstring_to_symbol("chroma");
+            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.hdrMetadata.has_value() ? SchemeHost::True : SchemeHost::False);
+            k = SchemeHost::symbol("chroma");
             marshRoot(k, roots);
-            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.chromaticityCoords.has_value() ? Strue : Sfalse);
-            k = Sstring_to_symbol("bt2020");
+            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.chromaticityCoords.has_value() ? SchemeHost::True : SchemeHost::False);
+            k = SchemeHost::symbol("bt2020");
             marshRoot(k, roots);
-            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.supportsBT2020 ? Strue : Sfalse);
-            k = Sstring_to_symbol("vrr-capable");
+            elems.push_back(k); elems.push_back(mon->m_output->parsedEDID.supportsBT2020 ? SchemeHost::True : SchemeHost::False);
+            k = SchemeHost::symbol("vrr-capable");
             marshRoot(k, roots);
-            elems.push_back(k); elems.push_back(mon->m_output->vrrCapable ? Strue : Sfalse);
-            ptr l = Snil;
+            elems.push_back(k); elems.push_back(mon->m_output->vrrCapable ? SchemeHost::True : SchemeHost::False);
+            SchemeValue l = SchemeHost::Nil;
             for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
-                l = Scons(*it, l);
+                l = SchemeHost::cons(*it, l);
                 marshRoot(l, roots);
             }
             marshRelease(roots);
             return l;
         });
     }
-    static ptr hlMonitorReserved(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr {
+    static SchemeValue hlMonitorReserved(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue {
             // a plist: (top n left n right n bottom n)
             const auto&         r = mon->m_reservedArea;
-            std::vector<ptr>    roots;
-            std::vector<ptr>    elems;
+            std::vector<SchemeValue>    roots;
+            std::vector<SchemeValue>    elems;
             const std::string   KEYS[] = {"top", "left", "right", "bottom"};
             const int           VALUES[] = {r.top(), r.left(), r.right(), r.bottom()};
             for (int i = 0; i < 4; ++i) {
-                ptr k = Sstring_to_symbol(KEYS[i].c_str());
+                SchemeValue k = SchemeHost::symbol(KEYS[i].c_str());
                 marshRoot(k, roots);
                 elems.push_back(k);
-                elems.push_back(Sinteger(VALUES[i]));
+                elems.push_back(SchemeHost::integer(VALUES[i]));
             }
-            ptr l = Snil;
+            SchemeValue l = SchemeHost::Nil;
             for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
-                l = Scons(*it, l);
+                l = SchemeHost::cons(*it, l);
                 marshRoot(l, roots);
             }
             marshRelease(roots);
@@ -3507,23 +3497,23 @@ namespace Config::Scheme {
     }
 
     // the monitor this one mirrors, as a handle; #f when not a mirror
-    static ptr hlMonitorMirrorOf(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return monitorHandleResult(mon->m_mirrorOf.lock()); });
+    static SchemeValue hlMonitorMirrorOf(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return monitorHandleResult(mon->m_mirrorOf.lock()); });
     }
 
-    static ptr hlMonitorActiveWorkspace(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return workspaceHandleResult(mon->m_activeWorkspace); });
+    static SchemeValue hlMonitorActiveWorkspace(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return workspaceHandleResult(mon->m_activeWorkspace); });
     }
 
-    static ptr hlMonitorActiveSpecialWorkspace(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return workspaceHandleResult(mon->m_activeSpecialWorkspace); });
+    static SchemeValue hlMonitorActiveSpecialWorkspace(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return workspaceHandleResult(mon->m_activeSpecialWorkspace); });
     }
 
-    static ptr hlMonitorAlive(long long id) {
+    static SchemeValue hlMonitorAlive(long long id) {
         return boolResult(g_up && monitorFromId(id) != nullptr);
     }
 
-    static ptr hlMonitorSame(long long a, long long b) {
+    static SchemeValue hlMonitorSame(long long a, long long b) {
         const auto ma = g_up ? monitorFromId(a) : nullptr;
         const auto mb = g_up ? monitorFromId(b) : nullptr;
         return boolResult(ma && mb && ma.get() == mb.get());
@@ -3532,15 +3522,15 @@ namespace Config::Scheme {
     // -- selector bridges: handles are accepted anywhere a selector string is,
     // resolved through the canonical selector exactly like upstream's
     // *SelectorOrObject helpers (LuaBindingsInternal.cpp)
-    static ptr hlWorkspaceSelector(long long id) {
-        return wsGet(id, [](PHLWORKSPACE ws) -> ptr {
+    static SchemeValue hlWorkspaceSelector(long long id) {
+        return wsGet(id, [](PHLWORKSPACE ws) -> SchemeValue {
             const auto s = Workspace::selector(*ws);
-            return Sstring_utf8(s.c_str(), s.size());
+            return SchemeHost::stringUtf8(s.c_str(), s.size());
         });
     }
 
-    static ptr hlMonitorSelector(long long id) {
-        return monGet(id, [](PHLMONITOR mon) -> ptr { return Sstring_utf8(mon->m_name.c_str(), mon->m_name.size()); });
+    static SchemeValue hlMonitorSelector(long long id) {
+        return monGet(id, [](PHLMONITOR mon) -> SchemeValue { return SchemeHost::stringUtf8(mon->m_name.c_str(), mon->m_name.size()); });
     }
 
     // workspace resolution via the resolver (the query() chain has proven
@@ -3553,27 +3543,27 @@ namespace Config::Scheme {
     }
 
     // windows on a workspace: newline-joined handle ids (like hl-windows)
-    static ptr hlWorkspaceWindows(const char* sel) {
+    static SchemeValue hlWorkspaceWindows(const char* sel) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ws = workspaceFromSelector(sel ? sel : "");
         if (!ws)
-            return Sfalse;
+            return SchemeHost::False;
         std::vector<uintptr_t> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!w->mapped() || w->m_workspace != ws)
                 continue;
             ids.push_back((uintptr_t)(new SHandle<PHLWINDOWREF>(PHLWINDOWREF(w))));
         }
-        return ids.empty() ? Sfalse : schemeIntList(ids);
+        return ids.empty() ? SchemeHost::False : schemeIntList(ids);
     }
 
     // bare-thunk/record list fire (gestures, screenshare, keyboard-key)
-    static void fireSchemeListRec(ptr record, ptr lst) {
+    static void fireSchemeListRec(SchemeValue record, SchemeValue lst) {
         if (!g_up)
             return;
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-list-rec")), record, lst);
+        SchemeHost::call2(SchemeHost::globalRef("hl--fire-list-rec"), record, lst);
         watchdogExit();
     }
 
@@ -3586,27 +3576,27 @@ namespace Config::Scheme {
         return Keybinds::mgr()->inputState().isKeysymDown(sym) ? 1 : 0;
     }
 
-    static ptr hlLoadedPlugins() {
+    static SchemeValue hlLoadedPlugins() {
         if (!g_up)
-            return Sfalse;
-        ptr l = Snil;
+            return SchemeHost::False;
+        SchemeValue l = SchemeHost::Nil;
         for (const auto& p : g_pPluginSystem->getAllPlugins()) {
             if (!p)
                 continue;
             const std::string name = p->m_name;
-            l = Scons(Sstring_utf8(name.c_str(), name.size()), l);
+            l = SchemeHost::cons(SchemeHost::stringUtf8(name.c_str(), name.size()), l);
         }
         return l;
     }
 
-    static ptr hlVersion() {
-        return Sstring_utf8(HYPRLAND_VERSION, strlen(HYPRLAND_VERSION));
+    static SchemeValue hlVersion() {
+        return SchemeHost::stringUtf8(HYPRLAND_VERSION, strlen(HYPRLAND_VERSION));
     }
 
     // windows matching a selector: handle ids as a scheme list
-    static ptr hlWindowsFrom(const char* sel) {
+    static SchemeValue hlWindowsFrom(const char* sel) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const std::string selector = sel ? sel : "";
         std::vector<uintptr_t> ids;
         for (const auto& w : Desktop::windowState()->windows()) {
@@ -3614,17 +3604,17 @@ namespace Config::Scheme {
                 continue;
             ids.push_back((uintptr_t)(new SHandle<PHLWINDOWREF>(w)));
         }
-        return ids.empty() ? Sfalse : schemeIntList(ids);
+        return ids.empty() ? SchemeHost::False : schemeIntList(ids);
     }
 
-    static ptr hlWindowFullscreenHandler(long long id) {
+    static SchemeValue hlWindowFullscreenHandler(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
         const auto name = Fullscreen::controller()->getFullscreenHandlerNameAsString(window);
-        return Sstring_utf8(name.c_str(), name.size());
+        return SchemeHost::stringUtf8(name.c_str(), name.size());
     }
 
     // ---- notifications ---------------------------------------------------------
@@ -3646,11 +3636,11 @@ namespace Config::Scheme {
         return ICON_NONE;
     }
 
-    static eIcons schemeIconFromScheme(ptr v, bool* ok = nullptr) {
-        if (Sstringp(v))
+    static eIcons schemeIconFromScheme(SchemeValue v, bool* ok = nullptr) {
+        if (SchemeHost::isString(v))
             return schemeIconFromStr(schemeDatumToStr(v), ok);
-        if (Sfixnump(v)) {
-            const auto raw = Sfixnum_value(v);
+        if (SchemeHost::isFixnum(v)) {
+            const auto raw = SchemeHost::fixnumValue(v);
             if (raw >= ICON_WARNING && raw <= ICON_NONE)
                 return sc<eIcons>(raw);
         }
@@ -3670,9 +3660,9 @@ namespace Config::Scheme {
         }
     }
 
-    static ptr hlNotify(const char* text, double durationMs, const char* icon, const char* color, double fontSize) {
+    static SchemeValue hlNotify(const char* text, double durationMs, const char* icon, const char* color, double fontSize) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         eIcons     theIcon = ICON_NONE;
         const auto ic      = schemeIconFromStr(icon ? icon : "");
@@ -3681,16 +3671,16 @@ namespace Config::Scheme {
             theIcon = schemeIconFromStr(icon, &ok);
             if (!ok) {
                 g_configError = "hl-notify!: bad icon (expected none/warn/info/hint/error/confused/ok)";
-                return Sfalse;
+                return SchemeHost::False;
             }
         }
         const auto col = schemeColorFromStr(color ? color : "");
         if (!col) {
             g_configError = "hl-notify!: bad color (expected 0xAARRGGBB)";
-            return Sfalse;
+            return SchemeHost::False;
         }
         Notification::overlay()->addNotification(text ? text : "", *col, sc<float>(durationMs), theIcon, sc<float>(fontSize));
-        return Strue;
+        return SchemeHost::True;
     }
 
     // ---- live notification objects (upstream hl.notification parity) -----------
@@ -3713,152 +3703,152 @@ namespace Config::Scheme {
         return reinterpret_cast<SNotificationHandle*>(id)->wp.lock();
     }
 
-    static ptr hlNotificationAdd(ptr fields) {
+    static SchemeValue hlNotificationAdd(SchemeValue fields) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         // walk the plist first: a bad field writes nothing (device-add parity)
         std::string text;
         double      timeout = -1, fontSize = 13.0;
         eIcons      icon = ICON_NONE;
         CHyprColor  color(0);
-        ptr         l = fields;
-        while (Spairp(l) && Spairp(Scdr(l))) {
-            const std::string k = schemeDatumToStr(Scar(l));
-            const ptr         v = Scar(Scdr(l));
+        SchemeValue         l = fields;
+        while (SchemeHost::isPair(l) && SchemeHost::isPair(SchemeHost::cdr(l))) {
+            const std::string k = schemeDatumToStr(SchemeHost::car(l));
+            const SchemeValue         v = SchemeHost::car(SchemeHost::cdr(l));
             if (k == "text") {
-                if (!Sstringp(v)) {
+                if (!SchemeHost::isString(v)) {
                     g_configError = "hl-notification-add!: 'text must be a string";
-                    return Sfalse;
+                    return SchemeHost::False;
                 }
                 text = schemeDatumToStr(v);
             } else if (k == "timeout" || k == "duration" || k == "time") {
-                if (!Sfixnump(v) && !Sflonump(v)) {
+                if (!SchemeHost::isFixnum(v) && !SchemeHost::isFlonum(v)) {
                     g_configError = "hl-notification-add!: 'timeout must be a number (ms)";
-                    return Sfalse;
+                    return SchemeHost::False;
                 }
-                timeout = Sfixnump(v) ? sc<double>(Sfixnum_value(v)) : Sflonum_value(v);
+                timeout = SchemeHost::isFixnum(v) ? sc<double>(SchemeHost::fixnumValue(v)) : SchemeHost::flonumValue(v);
                 if (timeout < 0) {
                     g_configError = "hl-notification-add!: 'timeout must be >= 0";
-                    return Sfalse;
+                    return SchemeHost::False;
                 }
             } else if (k == "icon") {
                 bool ok = true;
                 icon = schemeIconFromScheme(v, &ok);
                 if (!ok) {
                     g_configError = "hl-notification-add!: bad 'icon (expected none/warn/info/hint/error/confused/ok or an id 0-6)";
-                    return Sfalse;
+                    return SchemeHost::False;
                 }
             } else if (k == "color") {
-                const auto c = schemeColorFromStr(Sstringp(v) ? schemeDatumToStr(v) : (Sfixnump(v) ? std::to_string(Sfixnum_value(v)) : ""));
+                const auto c = schemeColorFromStr(SchemeHost::isString(v) ? schemeDatumToStr(v) : (SchemeHost::isFixnum(v) ? std::to_string(SchemeHost::fixnumValue(v)) : ""));
                 if (!c) {
                     g_configError = "hl-notification-add!: bad 'color (expected 0xAARRGGBB)";
-                    return Sfalse;
+                    return SchemeHost::False;
                 }
                 color = *c;
             } else if (k == "font-size") {
-                if (!Sfixnump(v) && !Sflonump(v)) {
+                if (!SchemeHost::isFixnum(v) && !SchemeHost::isFlonum(v)) {
                     g_configError = "hl-notification-add!: 'font-size must be a number";
-                    return Sfalse;
+                    return SchemeHost::False;
                 }
-                fontSize = Sfixnump(v) ? sc<double>(Sfixnum_value(v)) : Sflonum_value(v);
+                fontSize = SchemeHost::isFixnum(v) ? sc<double>(SchemeHost::fixnumValue(v)) : SchemeHost::flonumValue(v);
                 if (fontSize <= 0) {
                     g_configError = "hl-notification-add!: 'font-size must be > 0";
-                    return Sfalse;
+                    return SchemeHost::False;
                 }
             } else {
                 g_configError = std::format("hl-notification-add!: unknown field '{}'", k);
-                return Sfalse;
+                return SchemeHost::False;
             }
-            l = Scdr(Scdr(l));
+            l = SchemeHost::cdr(SchemeHost::cdr(l));
         }
         if (text.empty()) {
             g_configError = "hl-notification-add!: 'text is required";
-            return Sfalse;
+            return SchemeHost::False;
         }
         if (timeout < 0) {
             g_configError = "hl-notification-add!: 'timeout is required";
-            return Sfalse;
+            return SchemeHost::False;
         }
 
         const auto n = Notification::overlay()->addNotification(text, color, sc<float>(timeout), icon, sc<float>(fontSize));
         if (!n)
-            return Sfalse;
-        return Sinteger((uintptr_t)(new SNotificationHandle(n)));
+            return SchemeHost::False;
+        return SchemeHost::integer((uintptr_t)(new SNotificationHandle(n)));
     }
 
-    static ptr hlNotificationList() {
+    static SchemeValue hlNotificationList() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         std::vector<uintptr_t> ids;
         for (const auto& n : Notification::overlay()->getNotifications())
             ids.push_back((uintptr_t)(new SNotificationHandle(n)));
-        return ids.empty() ? Sfalse : schemeIntList(ids);
+        return ids.empty() ? SchemeHost::False : schemeIntList(ids);
     }
 
-    static ptr hlNotificationText(long long id) {
+    static SchemeValue hlNotificationText(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto n = notificationFromHandle(id);
         if (!n)
-            return Sfalse;
-        return Sstring_utf8(n->text().c_str(), n->text().size());
+            return SchemeHost::False;
+        return SchemeHost::stringUtf8(n->text().c_str(), n->text().size());
     }
 
-    static ptr hlNotificationTimeout(long long id) {
+    static SchemeValue hlNotificationTimeout(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto n = notificationFromHandle(id);
-        return n ? Sflonum(n->timeMs()) : Sfalse;
+        return n ? SchemeHost::flonum(n->timeMs()) : SchemeHost::False;
     }
 
-    static ptr hlNotificationColor(long long id) {
+    static SchemeValue hlNotificationColor(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto n = notificationFromHandle(id);
-        return n ? Sinteger(n->color().getAsHex()) : Sfalse;
+        return n ? SchemeHost::integer(n->color().getAsHex()) : SchemeHost::False;
     }
 
-    static ptr hlNotificationIcon(long long id) {
+    static SchemeValue hlNotificationIcon(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto n = notificationFromHandle(id);
-        return n ? Sinteger(sc<int>(n->icon())) : Sfalse;
+        return n ? SchemeHost::integer(sc<int>(n->icon())) : SchemeHost::False;
     }
 
-    static ptr hlNotificationFontSize(long long id) {
+    static SchemeValue hlNotificationFontSize(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto n = notificationFromHandle(id);
-        return n ? Sflonum(n->fontSize()) : Sfalse;
+        return n ? SchemeHost::flonum(n->fontSize()) : SchemeHost::False;
     }
 
-    static ptr hlNotificationElapsed(long long id) {
+    static SchemeValue hlNotificationElapsed(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto n = notificationFromHandle(id);
-        return n ? Sflonum(n->timeElapsedMs()) : Sfalse;
+        return n ? SchemeHost::flonum(n->timeElapsedMs()) : SchemeHost::False;
     }
 
-    static ptr hlNotificationAge(long long id) {
+    static SchemeValue hlNotificationAge(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto n = notificationFromHandle(id);
-        return n ? Sflonum(n->timeElapsedSinceCreationMs()) : Sfalse;
+        return n ? SchemeHost::flonum(n->timeElapsedSinceCreationMs()) : SchemeHost::False;
     }
 
-    static ptr hlNotificationAlive(long long id) {
+    static SchemeValue hlNotificationAlive(long long id) {
         if (!g_up)
-            return Sfalse;
-        return notificationFromHandle(id) ? Strue : Sfalse;
+            return SchemeHost::False;
+        return notificationFromHandle(id) ? SchemeHost::True : SchemeHost::False;
     }
 
-    static ptr hlNotificationSame(long long a, long long b) {
+    static SchemeValue hlNotificationSame(long long a, long long b) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto na = notificationFromHandle(a);
         const auto nb = notificationFromHandle(b);
-        return (na && nb && na.get() == nb.get()) ? Strue : Sfalse;
+        return (na && nb && na.get() == nb.get()) ? SchemeHost::True : SchemeHost::False;
     }
 
     // expired handles mutate as silent no-ops (upstream parity)
@@ -3895,7 +3885,7 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlNotificationIconSet(long long id, ptr v) {
+    static int hlNotificationIconSet(long long id, SchemeValue v) {
         if (!g_up)
             return -1;
         bool ok = true;
@@ -3937,13 +3927,13 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static ptr hlNotificationPausedQ(long long id) {
+    static SchemeValue hlNotificationPausedQ(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto n = notificationFromHandle(id);
         if (!n)
-            return Sfalse;
-        return n->isLocked() ? Strue : Sfalse;
+            return SchemeHost::False;
+        return n->isLocked() ? SchemeHost::True : SchemeHost::False;
     }
 
     static int hlNotificationDismiss(long long id) {
@@ -3957,12 +3947,12 @@ namespace Config::Scheme {
     // ---- timer handles ----------------------------------------------------------
 
 
-    static STimerEntry* timerByRecord(ptr record) {
-        const auto it = g_timerIndex.find(reinterpret_cast<uintptr_t>(record));
+    static STimerEntry* timerByRecord(SchemeValue record) {
+        const auto it = g_timerIndex.find(SchemeHost::word(record));
         return it == g_timerIndex.end() ? nullptr : &it->second;
     }
 
-    static int hlTimerSetEnabled(ptr record, int enabled) {
+    static int hlTimerSetEnabled(SchemeValue record, int enabled) {
         if (!g_up)
             return -1;
         auto* e = timerByRecord(record);
@@ -3975,12 +3965,12 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlTimerEnabled(ptr record) {
+    static int hlTimerEnabled(SchemeValue record) {
         const auto* e = timerByRecord(record);
         return (e && e->timer && e->timer->armed()) ? 1 : 0;
     }
 
-    static int hlTimerSetTimeout(ptr record, double ms) {
+    static int hlTimerSetTimeout(SchemeValue record, double ms) {
         if (!g_up)
             return -1;
         auto* e = timerByRecord(record);
@@ -3991,7 +3981,7 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlTimerCancel(ptr record) {
+    static int hlTimerCancel(SchemeValue record) {
         if (!g_up || !g_pEventLoopManager)
             return -1;
         auto* e = timerByRecord(record);
@@ -3999,7 +3989,7 @@ namespace Config::Scheme {
             return -1;
         e->timer->cancel();
         g_pEventLoopManager->removeTimer(e->timer);
-        g_timerIndex.erase(reinterpret_cast<uintptr_t>(record));
+        g_timerIndex.erase(SchemeHost::word(record));
         return 0;
     }
 
@@ -4013,23 +4003,23 @@ namespace Config::Scheme {
     // destructure them as normal lambda args:
     //   (lambda (phase direction type time-ms fingers delta . rest))   ; begin/update
     //   (lambda (phase direction type time-ms cancelled) ...)          ; end
-    static ptr gestureEventPlist(std::vector<ptr>& roots, const char* phase, const std::string& dir,
-                                 const char* type, uint32_t timeMs, std::optional<int> fingers, ptr deltaPair,
-                                 ptr scale, ptr rotation, ptr cancelled) {
-        std::vector<ptr> elems;
-        auto push = [&](ptr p) { marshRoot(p, roots); elems.push_back(p); };
-        push(Sstring_to_symbol("phase"));      push(Sstring_utf8(phase, strlen(phase)));
-        push(Sstring_to_symbol("direction"));  push(Sstring_utf8(dir.c_str(), dir.size()));
-        push(Sstring_to_symbol("type"));       push(Sstring_utf8(type, strlen(type)));
-        push(Sstring_to_symbol("time-ms"));    elems.push_back(Sinteger((int)timeMs));
-        if (fingers) { push(Sstring_to_symbol("fingers")); elems.push_back(Sinteger(*fingers)); }
-        if (deltaPair) { push(Sstring_to_symbol("delta")); push(deltaPair); }
-        if (scale && scale != Sfalse) { push(Sstring_to_symbol("scale")); push(scale); }
-        if (rotation && rotation != Sfalse) { push(Sstring_to_symbol("rotation")); push(rotation); }
-        if (cancelled && cancelled != Sfalse) { push(Sstring_to_symbol("cancelled")); push(cancelled); }
-        ptr l = Snil;
+    static SchemeValue gestureEventPlist(std::vector<SchemeValue>& roots, const char* phase, const std::string& dir,
+                                 const char* type, uint32_t timeMs, std::optional<int> fingers, SchemeValue deltaPair,
+                                 SchemeValue scale, SchemeValue rotation, SchemeValue cancelled) {
+        std::vector<SchemeValue> elems;
+        auto push = [&](SchemeValue p) { marshRoot(p, roots); elems.push_back(p); };
+        push(SchemeHost::symbol("phase"));      push(SchemeHost::stringUtf8(phase, strlen(phase)));
+        push(SchemeHost::symbol("direction"));  push(SchemeHost::stringUtf8(dir.c_str(), dir.size()));
+        push(SchemeHost::symbol("type"));       push(SchemeHost::stringUtf8(type, strlen(type)));
+        push(SchemeHost::symbol("time-ms"));    elems.push_back(SchemeHost::integer((int)timeMs));
+        if (fingers) { push(SchemeHost::symbol("fingers")); elems.push_back(SchemeHost::integer(*fingers)); }
+        if (SchemeHost::truthy(deltaPair)) { push(SchemeHost::symbol("delta")); push(deltaPair); }
+        if (SchemeHost::truthy(scale) && scale != SchemeHost::False) { push(SchemeHost::symbol("scale")); push(scale); }
+        if (SchemeHost::truthy(rotation) && rotation != SchemeHost::False) { push(SchemeHost::symbol("rotation")); push(rotation); }
+        if (SchemeHost::truthy(cancelled) && cancelled != SchemeHost::False) { push(SchemeHost::symbol("cancelled")); push(cancelled); }
+        SchemeValue l = SchemeHost::Nil;
         for (auto it = elems.rbegin(); it != elems.rend(); ++it) {
-            l = Scons(*it, l);
+            l = SchemeHost::cons(*it, l);
             marshRoot(l, roots);
         }
         return l;
@@ -4038,38 +4028,38 @@ namespace Config::Scheme {
     // bare-thunk variant: gestures carry their callbacks directly (SThunkRef
     // members), so the fire passes the callable itself; the plist is APPLIED
     // to it (spread args)
-    static void fireSchemeList(ptr thunk, ptr lst) {
+    static void fireSchemeList(SchemeValue thunk, SchemeValue lst) {
         if (!g_up)
             return;
         watchdogEnter("handler");
-        Scall2(Stop_level_value(Sstring_to_symbol("hl--fire-list")), thunk, lst);
+        SchemeHost::call2(SchemeHost::globalRef("hl--fire-list"), thunk, lst);
         watchdogExit();
     }
 
     template <typename E>
-    static void fireSchemeGestureEvent(ptr thunk, const char* phase, const E& e, const std::string& dir) {
+    static void fireSchemeGestureEvent(SchemeValue thunk, const char* phase, const E& e, const std::string& dir) {
         if (!g_up)
             return;
-        std::vector<ptr>      roots;
+        std::vector<SchemeValue>      roots;
         constexpr bool        IS_END = std::is_same_v<E, ITrackpadGesture::STrackpadGestureEnd>;
-        ptr                   delta  = Snil, scale = Sfalse, rotation = Sfalse;
+        SchemeValue                   delta  = SchemeHost::Nil, scale = SchemeHost::False, rotation = SchemeHost::False;
         if constexpr (!IS_END) {
             const auto& d = e.swipe ? e.swipe->delta : e.pinch->delta;
-            ptr x = Sflonum(d.x); marshRoot(x, roots);
-            ptr y = Sflonum(d.y); marshRoot(y, roots);
-            delta = Scons(x, y); marshRoot(delta, roots);
+            SchemeValue x = SchemeHost::flonum(d.x); marshRoot(x, roots);
+            SchemeValue y = SchemeHost::flonum(d.y); marshRoot(y, roots);
+            delta = SchemeHost::cons(x, y); marshRoot(delta, roots);
             if (e.pinch) {
-                scale = Sflonum(e.pinch->scale); marshRoot(scale, roots);
-                rotation = Sflonum(e.pinch->rotation); marshRoot(rotation, roots);
+                scale = SchemeHost::flonum(e.pinch->scale); marshRoot(scale, roots);
+                rotation = SchemeHost::flonum(e.pinch->rotation); marshRoot(rotation, roots);
             }
         }
-        ptr cancelled = Sfalse;
+        SchemeValue cancelled = SchemeHost::False;
         if constexpr (IS_END)
-            cancelled = (e.swipe ? e.swipe->cancelled : e.pinch->cancelled) ? Strue : Sfalse;
+            cancelled = (e.swipe ? e.swipe->cancelled : e.pinch->cancelled) ? SchemeHost::True : SchemeHost::False;
         std::optional<int> fingers;
         if constexpr (!IS_END)
             fingers = (int)(e.swipe ? e.swipe->fingers : e.pinch->fingers);
-        ptr lst = gestureEventPlist(roots, phase, dir,
+        SchemeValue lst = gestureEventPlist(roots, phase, dir,
                                     e.swipe ? "swipe" : "pinch",
                                     e.swipe ? e.swipe->timeMs : e.pinch->timeMs,
                                     fingers,
@@ -4080,22 +4070,22 @@ namespace Config::Scheme {
 
     class CSchemeGesture : public ITrackpadGesture {
       public:
-        // the callbacks arrive as thunks and are carried locked; Snil means
+        // the callbacks arrive as thunks and are carried locked; SchemeHost::Nil means
         // "unused" (the counted lock no-ops on immediates). The gesture
         // manager destroys us at config reload, which unlocks them.
-        CSchemeGesture(ptr begin, ptr update, ptr end, const char* direction) :
+        CSchemeGesture(SchemeValue begin, SchemeValue update, SchemeValue end, const char* direction) :
             m_begin(begin), m_update(update), m_end(end), m_direction(direction ? direction : "") {}
 
         void  begin(const STrackpadGestureBegin& e) override {
-            if (!Snullp(m_begin.obj))
+            if (!SchemeHost::isNull(m_begin.obj))
                 fireSchemeGestureEvent(m_begin.obj, "start", e, m_direction);
         }
         void  update(const STrackpadGestureUpdate& e) override {
-            if (!Snullp(m_update.obj))
+            if (!SchemeHost::isNull(m_update.obj))
                 fireSchemeGestureEvent(m_update.obj, "update", e, m_direction);
         }
         void  end(const STrackpadGestureEnd& e) override {
-            if (!Snullp(m_end.obj))
+            if (!SchemeHost::isNull(m_end.obj))
                 fireSchemeGestureEvent(m_end.obj, "end", e, m_direction);
         }
 
@@ -4113,27 +4103,27 @@ namespace Config::Scheme {
     // construct the ITrackpadGesture and moves it straight into the manager
     // (owned from birth, destroyed at reload). The recipe itself is a pure
     // value: registering it twice constructs two independent instances.
-    static ptr gestureArgGet(ptr args, const char* key) {
-        for (ptr l = args; Spairp(l) && Spairp(Scdr(l)); l = Scdr(Scdr(l)))
-            if (Ssymbolp(Scar(l)) && schemeDatumToStr(Scar(l)) == key)
-                return Scar(Scdr(l));
-        return Sfalse;
+    static SchemeValue gestureArgGet(SchemeValue args, const char* key) {
+        for (SchemeValue l = args; SchemeHost::isPair(l) && SchemeHost::isPair(SchemeHost::cdr(l)); l = SchemeHost::cdr(SchemeHost::cdr(l)))
+            if (SchemeHost::isSymbol(SchemeHost::car(l)) && schemeDatumToStr(SchemeHost::car(l)) == key)
+                return SchemeHost::car(SchemeHost::cdr(l));
+        return SchemeHost::False;
     }
 
-    static std::string gestureArgStr(ptr args, const char* key) {
+    static std::string gestureArgStr(SchemeValue args, const char* key) {
         // symbol (mode tags) or string (special workspace name) values
-        const ptr v = gestureArgGet(args, key);
-        return (Ssymbolp(v) || Sstringp(v)) ? schemeDatumToStr(v) : std::string();
+        const SchemeValue v = gestureArgGet(args, key);
+        return (SchemeHost::isSymbol(v) || SchemeHost::isString(v)) ? schemeDatumToStr(v) : std::string();
     }
 
-    static double gestureArgDouble(ptr args, const char* key) {
-        const ptr v = gestureArgGet(args, key);
-        return Sflonump(v) ? Sflonum_value(v) : 1.0;
+    static double gestureArgDouble(SchemeValue args, const char* key) {
+        const SchemeValue v = gestureArgGet(args, key);
+        return SchemeHost::isFlonum(v) ? SchemeHost::flonumValue(v) : 1.0;
     }
 
     class IGestureMaker {
       public:
-        virtual UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection dir) = 0;
+        virtual UP<ITrackpadGesture> make(SchemeValue args, eTrackpadGestureDirection dir) = 0;
         virtual ~IGestureMaker() = default;
     };
 
@@ -4141,7 +4131,7 @@ namespace Config::Scheme {
     template <typename G>
     class CTrivialGestureMaker final : public IGestureMaker {
       public:
-        UP<ITrackpadGesture> make(ptr, eTrackpadGestureDirection) override {
+        UP<ITrackpadGesture> make(SchemeValue, eTrackpadGestureDirection) override {
             return makeUnique<G>();
         }
     };
@@ -4153,7 +4143,7 @@ namespace Config::Scheme {
 
     class CFloatGestureMaker final : public IGestureMaker {
       public:
-        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection) override {
+        UP<ITrackpadGesture> make(SchemeValue args, eTrackpadGestureDirection) override {
             return makeUnique<CFloatTrackpadGesture>(gestureArgStr(args, "mode"));
         }
     };
@@ -4161,7 +4151,7 @@ namespace Config::Scheme {
 
     class CFullscreenGestureMaker final : public IGestureMaker {
       public:
-        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection) override {
+        UP<ITrackpadGesture> make(SchemeValue args, eTrackpadGestureDirection) override {
             return makeUnique<CFullscreenTrackpadGesture>(gestureArgStr(args, "mode"));
         }
     };
@@ -4169,7 +4159,7 @@ namespace Config::Scheme {
 
     class CSpecialWorkspaceGestureMaker final : public IGestureMaker {
       public:
-        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection) override {
+        UP<ITrackpadGesture> make(SchemeValue args, eTrackpadGestureDirection) override {
             return makeUnique<CSpecialWorkspaceGesture>(gestureArgStr(args, "name"));
         }
     };
@@ -4177,7 +4167,7 @@ namespace Config::Scheme {
 
     class CCursorZoomGestureMaker final : public IGestureMaker {
       public:
-        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection) override {
+        UP<ITrackpadGesture> make(SchemeValue args, eTrackpadGestureDirection) override {
             // the underlying ctor parses a zoom string; format our typed number
             return makeUnique<CCursorZoomTrackpadGesture>(std::format("{}", gestureArgDouble(args, "zoom")), gestureArgStr(args, "mode"));
         }
@@ -4188,8 +4178,8 @@ namespace Config::Scheme {
     // (finish . T)); CSchemeGesture locks them into SThunkRef members
     class CCustomGestureMaker final : public IGestureMaker {
       public:
-        UP<ITrackpadGesture> make(ptr args, eTrackpadGestureDirection dir) override {
-            const auto toNil = [](ptr p) { return p == Sfalse ? Snil : p; };
+        UP<ITrackpadGesture> make(SchemeValue args, eTrackpadGestureDirection dir) override {
+            const auto toNil = [](SchemeValue p) { return p == SchemeHost::False ? SchemeHost::Nil : p; };
             return makeUnique<CSchemeGesture>(toNil(gestureArgGet(args, "start")), toNil(gestureArgGet(args, "update")),
                                               toNil(gestureArgGet(args, "finish")), g_pTrackpadGestures->stringForDir(dir));
         }
@@ -4212,14 +4202,14 @@ namespace Config::Scheme {
     // the one mods representation across the API: a LIST of modifier tokens
     // (strings), as built by hl-kbd/hl-key — never a string to split and
     // never a raw mask int. Unknown tokens / non-strings are rejected.
-    static std::optional<Input::ModifierMask> modsMaskFromTokens(ptr mods) {
+    static std::optional<Input::ModifierMask> modsMaskFromTokens(SchemeValue mods) {
         uint8_t raw = 0;
-        for (ptr l = mods; Spairp(l); l = Scdr(l)) {
-            if (!Sstringp(Scar(l))) {
+        for (SchemeValue l = mods; SchemeHost::isPair(l); l = SchemeHost::cdr(l)) {
+            if (!SchemeHost::isString(SchemeHost::car(l))) {
                 g_configError = "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")";
                 return std::nullopt;
             }
-            std::string tok = schemeDatumToStr(Scar(l));
+            std::string tok = schemeDatumToStr(SchemeHost::car(l));
             std::transform(tok.begin(), tok.end(), tok.begin(), ::toupper);
             uint8_t bit = 0;
             if (tok == "SHIFT")
@@ -4250,7 +4240,7 @@ namespace Config::Scheme {
     // (built-in or custom alike), which moves into the manager, owned from
     // birth; destroyed at config reload, which also unlocks any thunks it
     // carried. The addGesture result (overshadow rules) is checked.
-    static int hlSchemeGesture(ptr recipe, int fingers, const char* direction, ptr mods, double scale, int disableInhibit) {
+    static int hlSchemeGesture(SchemeValue recipe, int fingers, const char* direction, SchemeValue mods, double scale, int disableInhibit) {
         if (!g_up || !g_pTrackpadGestures)
             return -1;
         const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
@@ -4261,16 +4251,16 @@ namespace Config::Scheme {
         const auto mask = modsMaskFromTokens(mods);
         if (!mask)
             return -1;
-        if (!Spairp(recipe) || !Sfixnump(Scar(recipe))) {
+        if (!SchemeHost::isPair(recipe) || !SchemeHost::isFixnum(SchemeHost::car(recipe))) {
             g_configError = "hl-gesture: 'action is not a gesture action (see the hl-make-*-gesture constructors)";
             return -1;
         }
-        const auto maker = gestureMakerFromAddress(Sfixnum_value(Scar(recipe)));
+        const auto maker = gestureMakerFromAddress(SchemeHost::fixnumValue(SchemeHost::car(recipe)));
         if (!maker) {
             g_configError = "hl-gesture: 'action is not a valid gesture action (see the hl-make-*-gesture constructors)";
             return -1;
         }
-        auto gesture = maker->make(Scdr(recipe), dir);
+        auto gesture = maker->make(SchemeHost::cdr(recipe), dir);
         const auto result =
             g_pTrackpadGestures->addGesture(std::move(gesture), sc<size_t>(fingers), dir, *mask, sc<float>(scale), disableInhibit != 0);
         if (!result) {
@@ -4300,7 +4290,7 @@ namespace Config::Scheme {
     // (fingers, direction, mods, scale, disableInhibit) → 0 removed / 1 no
     // such gesture / -1 error. removeGesture matches on the registration
     // spec (the manager stores one gesture per spec), never on the action.
-    static int hlSchemeGestureRemove(int fingers, const char* direction, ptr mods, double scale, int disableInhibit) {
+    static int hlSchemeGestureRemove(int fingers, const char* direction, SchemeValue mods, double scale, int disableInhibit) {
         if (!g_up || !g_pTrackpadGestures)
             return -1;
         const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
@@ -4322,28 +4312,28 @@ namespace Config::Scheme {
     }
 
 
-    static ptr hlSchemeWindowInitialClass(long long id) {
+    static SchemeValue hlSchemeWindowInitialClass(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto s = window->metadata().initialAppID();
-        return Sstring_utf8(s.c_str(), s.size());
+        return SchemeHost::stringUtf8(s.c_str(), s.size());
     }
 
-    static ptr hlSchemeWindowInitialTitle(long long id) {
+    static SchemeValue hlSchemeWindowInitialTitle(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto window = windowFromId(id);
         if (!window)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto s = window->metadata().initialTitle();
-        return Sstring_utf8(s.c_str(), s.size());
+        return SchemeHost::stringUtf8(s.c_str(), s.size());
     }
 
     static int hlSchemeWindowX11(long long id) {
@@ -4377,100 +4367,100 @@ namespace Config::Scheme {
         return (la && lb && la.get() == lb.get()) ? 1 : 0;
     }
 
-    static ptr hlSchemeLayerAddress(long long id) {
+    static SchemeValue hlSchemeLayerAddress(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ls = layerFromHandle(id);
         if (!ls)
-            return Sfalse;
+            return SchemeHost::False;
         const auto addr = std::format("0x{:x}", reinterpret_cast<uintptr_t>(ls.get()));
-        return Sstring_utf8(addr.c_str(), addr.size());
+        return SchemeHost::stringUtf8(addr.c_str(), addr.size());
     }
 
-    static ptr hlSchemeLayerPid(long long id) {
+    static SchemeValue hlSchemeLayerPid(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ls = layerFromHandle(id);
-        return ls ? Sinteger(sc<int64_t>(ls->getPID())) : Sfalse;
+        return ls ? SchemeHost::integer(sc<int64_t>(ls->getPID())) : SchemeHost::False;
     }
 
-    static ptr hlSchemeLayerMonitorId(long long id) {
+    static SchemeValue hlSchemeLayerMonitorId(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ls = layerFromHandle(id);
         if (!ls)
-            return Sfalse;
+            return SchemeHost::False;
         const auto mon = ls->m_monitor.lock();
         if (!mon)
-            return Sfalse;
-        return Sinteger((uintptr_t)(new SHandle<PHLMONITORREF>(mon)));
+            return SchemeHost::False;
+        return SchemeHost::integer((uintptr_t)(new SHandle<PHLMONITORREF>(mon)));
     }
 
-    static ptr hlSchemeLayerNamespace(long long id) {
+    static SchemeValue hlSchemeLayerNamespace(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ls = layerFromHandle(id);
         if (!ls)
-            return Sfalse;
-        return Sstring_utf8(ls->m_namespace.c_str(), ls->m_namespace.size());
+            return SchemeHost::False;
+        return SchemeHost::stringUtf8(ls->m_namespace.c_str(), ls->m_namespace.size());
     }
 
-    static ptr hlSchemeLayerLevel(long long id) {
+    static SchemeValue hlSchemeLayerLevel(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ls = layerFromHandle(id);
-        return ls ? Sinteger(sc<int64_t>(ls->m_layer)) : Sfalse;
+        return ls ? SchemeHost::integer(sc<int64_t>(ls->m_layer)) : SchemeHost::False;
     }
 
-    static ptr hlSchemeLayerMapped(long long id) {
+    static SchemeValue hlSchemeLayerMapped(long long id) {
         if (!g_up)
-            return Sfalse;
-        const auto ls = layerFromHandle(id);
-        if (!ls)
-            return Sfalse;
-        return ls->mapped() ? Strue : Sfalse;
-    }
-
-    static ptr hlSchemeLayerKbInteractivity(long long id) {
-        if (!g_up)
-            return Sfalse;
-        const auto ls = layerFromHandle(id);
-        return ls ? Sinteger(sc<int64_t>(ls->m_keyboardInteractivity)) : Sfalse;
-    }
-
-    static ptr hlSchemeLayerAboveFullscreen(long long id) {
-        if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ls = layerFromHandle(id);
         if (!ls)
-            return Sfalse;
-        return (ls->m_flags & Desktop::View::LAYER_FLAG_ABOVE_FULLSCREEN) ? Strue : Sfalse;
+            return SchemeHost::False;
+        return ls->mapped() ? SchemeHost::True : SchemeHost::False;
     }
 
-    static ptr hlSchemeLayerPosition(long long id) {
+    static SchemeValue hlSchemeLayerKbInteractivity(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ls = layerFromHandle(id);
-        if (!ls)
-            return Sfalse;
-        return Scons(Sinteger((int)ls->m_geometry.x), Sinteger((int)ls->m_geometry.y));
+        return ls ? SchemeHost::integer(sc<int64_t>(ls->m_keyboardInteractivity)) : SchemeHost::False;
     }
 
-    static ptr hlSchemeLayerSize(long long id) {
+    static SchemeValue hlSchemeLayerAboveFullscreen(long long id) {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
         const auto ls = layerFromHandle(id);
         if (!ls)
-            return Sfalse;
-        return Scons(Sinteger((int)ls->m_geometry.width), Sinteger((int)ls->m_geometry.height));
+            return SchemeHost::False;
+        return (ls->m_flags & Desktop::View::LAYER_FLAG_ABOVE_FULLSCREEN) ? SchemeHost::True : SchemeHost::False;
+    }
+
+    static SchemeValue hlSchemeLayerPosition(long long id) {
+        if (!g_up)
+            return SchemeHost::False;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return SchemeHost::False;
+        return SchemeHost::cons(SchemeHost::integer((int)ls->m_geometry.x), SchemeHost::integer((int)ls->m_geometry.y));
+    }
+
+    static SchemeValue hlSchemeLayerSize(long long id) {
+        if (!g_up)
+            return SchemeHost::False;
+        const auto ls = layerFromHandle(id);
+        if (!ls)
+            return SchemeHost::False;
+        return SchemeHost::cons(SchemeHost::integer((int)ls->m_geometry.width), SchemeHost::integer((int)ls->m_geometry.height));
     }
 
     // (monitorFilter, namespaceFilter) — nullptr/empty = no filter; the
     // monitor crosses as a handle id (0 = none) after Scheme-side coercion
-    static ptr hlLayers(long long monId, ptr nsFilter) {
+    static SchemeValue hlLayers(long long monId, SchemeValue nsFilter) {
         if (!g_up)
-            return Sfalse;
-        const std::string ns = nsFilter && Sstringp(nsFilter) ? schemeDatumToStr(nsFilter) : "";
+            return SchemeHost::False;
+        const std::string ns = SchemeHost::truthy(nsFilter) && SchemeHost::isString(nsFilter) ? schemeDatumToStr(nsFilter) : "";
         PHLWINDOWREF dummy; // unused; keeps the compiler from warning on the include order
         (void)dummy;
         PHLMONITOR monFilter;
@@ -4492,39 +4482,39 @@ namespace Config::Scheme {
                 }
             }
         }
-        return ids.empty() ? Sfalse : schemeIntList(ids);
+        return ids.empty() ? SchemeHost::False : schemeIntList(ids);
     }
 
-    static ptr hlSchemeMonitorNames() {
+    static SchemeValue hlSchemeMonitorNames() {
         if (!g_up)
-            return Sfalse;
+            return SchemeHost::False;
 
         std::vector<uintptr_t> ids;
         for (const auto& m : State::monitorState()->monitors()) {
             ids.push_back((uintptr_t)(new SHandle<PHLMONITORREF>(m)));
         }
 
-        return ids.empty() ? Sfalse : schemeIntList(ids);
+        return ids.empty() ? SchemeHost::False : schemeIntList(ids);
     }
 
-    static int hlSchemeWindowEventListen(ptr record, int which) {
+    static int hlSchemeWindowEventListen(SchemeValue record, int which) {
         if (!g_up)
             return -1;
 
         switch (which) {
-            case 0: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.openLate.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 1: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.close.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 2: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.title.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 3: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.class_.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 4: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.urgent.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 5: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.pin.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 6: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.fullscreen.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 7: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.moveToWorkspace.listen([ref = SThunkRef(record)](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(ref.obj, w); })); break;
-            case 8: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.active.listen([ref = SThunkRef(record)](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(ref.obj, w); })); break;
-            case 9: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.openEarly.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 10: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.kill.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 11: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.bell.listen([ref = SThunkRef(record)](PHLWINDOW w, Event::SCallbackInfo&) { fireSchemeWin(ref.obj, w); })); break;
-            case 12: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.updateRules.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 0: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.openLate.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 1: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.close.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 2: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.title.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 3: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.class_.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 4: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.urgent.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 5: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.pin.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 6: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.fullscreen.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 7: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.moveToWorkspace.listen([ref = SThunkRef(record)](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(ref.obj, w); })); break;
+            case 8: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.active.listen([ref = SThunkRef(record)](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(ref.obj, w); })); break;
+            case 9: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.openEarly.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 10: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.kill.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
+            case 11: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.bell.listen([ref = SThunkRef(record)](PHLWINDOW w, Event::SCallbackInfo&) { fireSchemeWin(ref.obj, w); })); break;
+            case 12: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.updateRules.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
             default: break;
         }
 
@@ -4532,16 +4522,16 @@ namespace Config::Scheme {
     }
 
     // minimize fires with (window, state): pass the bool as a second arg
-    static int hlSchemeWindowMinimizeListen(ptr record) {
+    static int hlSchemeWindowMinimizeListen(SchemeValue record) {
         if (!g_up)
             return -1;
 
         SThunkRef ref(record);
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.minimize.listen([ref](PHLWINDOW w, bool state) {
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.minimize.listen([ref](PHLWINDOW w, bool state) {
             if (!g_up || !w)
                 return;
             const auto winId = (uintptr_t)(new SHandle<PHLWINDOWREF>(w));
-            Scall3(Stop_level_value(Sstring_to_symbol("hl--fire-win-state-rec")), ref.obj, Sinteger(winId), state ? Strue : Sfalse);
+            SchemeHost::call3(SchemeHost::globalRef("hl--fire-win-state-rec"), ref.obj, SchemeHost::integer(winId), state ? SchemeHost::True : SchemeHost::False);
         }));
         return 0;
     }
@@ -4550,7 +4540,7 @@ namespace Config::Scheme {
     // (the exit action). Matches upstream: a handler registered after start
     // already fired (only possible when the plugin itself loaded before the
     // first frame) runs on the next loop pass.
-    static int hlSchemeLifecycleListen(ptr record, int which) {
+    static int hlSchemeLifecycleListen(SchemeValue record, int which) {
         if (!g_up)
             return -1;
 
@@ -4565,29 +4555,29 @@ namespace Config::Scheme {
             } else
                 g_pendingStart.emplace_back(record);
         } else
-            g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.exit.listen([ref] { fireScheme(ref.obj); }));
+            g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.exit.listen([ref] { fireScheme(ref.obj); }));
 
         return 0;
     }
 
-    static int hlSchemeMonitorListen(ptr record, int which) {
+    static int hlSchemeMonitorListen(SchemeValue record, int which) {
         if (!g_up)
             return -1;
         switch (which) {
-            case 0: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.monitor.added.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
-            case 1: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.monitor.removed.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
-            case 2: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.monitor.focused.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
-            case 3: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.monitor.layoutChanged.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); })); break;
+            case 0: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.monitor.added.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 1: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.monitor.removed.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 2: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.monitor.focused.listen([ref = SThunkRef(record)](PHLMONITOR m) { fireSchemeMon(ref.obj, m); })); break;
+            case 3: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.monitor.layoutChanged.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); })); break;
             default: break;
         }
         return 0;
     }
 
-    static int hlSchemeWorkspaceListen(ptr record, int which) {
+    static int hlSchemeWorkspaceListen(SchemeValue record, int which) {
         if (!g_up)
             return -1;
         switch (which) {
-            case 0: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.created.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { auto w = ws.lock(); if (w) fireSchemeWs(ref.obj, w); })); break;
+            case 0: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.workspace.created.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { auto w = ws.lock(); if (w) fireSchemeWs(ref.obj, w); })); break;
             // removed fires from ~CHLWorkspace: the payload cannot be locked
             // (hyprutils marks the impl "destroying"), but the data pointer
             // stays valid until the destructor returns, so the name COULD be
@@ -4600,55 +4590,55 @@ namespace Config::Scheme {
             // instant — a later enhancement could snapshot it into the handle
             // at fire time and expose it through (hl-workspace-name), but that
             // would go beyond what Lua offers, so it is deliberately not done.
-            case 1: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.removed.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { fireSchemeWsRef(ref.obj, ws); })); break;
+            case 1: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.workspace.removed.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { fireSchemeWsRef(ref.obj, ws); })); break;
             // fires (ws mon) handles; ws is #f when no special workspace is
             // open on the monitor (upstream crosses nil the same way)
-            case 2: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.specialActive.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
-            case 3: g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.moveToMonitor.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
+            case 2: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.workspace.specialActive.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
+            case 3: g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.workspace.moveToMonitor.listen([ref = SThunkRef(record)](PHLWORKSPACE ws, PHLMONITOR mon) { fireSchemeWsMon(ref.obj, ws, mon); })); break;
             default: break;
         }
         return 0;
     }
 
-    static int hlSchemeConfigReloadedListen(ptr record) {
+    static int hlSchemeConfigReloadedListen(SchemeValue record) {
         if (!g_up)
             return -1;
 
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.config.reloaded.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.config.reloaded.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
         return 0;
     }
 
     // config.preReload — upstream maps config.unload onto it
-    static int hlSchemeConfigUnloadListen(ptr record) {
+    static int hlSchemeConfigUnloadListen(SchemeValue record) {
         if (!g_up)
             return -1;
 
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.config.preReload.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.config.preReload.listen([ref = SThunkRef(record)] { fireScheme(ref.obj); }));
         return 0;
     }
 
     // window.destroy: zero-argument callback (upstream delivers nil — the bus
     // event is Event<PHLWINDOWREF>; identity belongs to the window-close notification)
-    static int hlSchemeWindowDestroyListen(ptr record) {
+    static int hlSchemeWindowDestroyListen(SchemeValue record) {
         if (!g_up)
             return -1;
 
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.window.destroy.listen([ref = SThunkRef(record)](PHLWINDOWREF) { fireScheme(ref.obj); }));
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.window.destroy.listen([ref = SThunkRef(record)](PHLWINDOWREF) { fireScheme(ref.obj); }));
         return 0;
     }
 
     // screenshare.state — callbacks receive (active? type name); upstream
     // dispatches 3 positional args (LuaEventHandler.cpp:166)
-    static int hlSchemeScreenshareListen(ptr record) {
+    static int hlSchemeScreenshareListen(SchemeValue record) {
         if (!g_up)
             return -1;
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.screenshare.state.listen([ref = SThunkRef(record)](bool state, uint8_t type, const std::string& name) {
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.screenshare.state.listen([ref = SThunkRef(record)](bool state, uint8_t type, const std::string& name) {
             if (!g_up)
                 return;
-            std::vector<ptr> roots;
-            ptr nm = Sstring_utf8(name.c_str(), name.size());
+            std::vector<SchemeValue> roots;
+            SchemeValue nm = SchemeHost::stringUtf8(name.c_str(), name.size());
             marshRoot(nm, roots);
-            ptr lst = Scons(state ? Strue : Sfalse, Scons(Sinteger((int)type), Scons(nm, Snil)));
+            SchemeValue lst = SchemeHost::cons(state ? SchemeHost::True : SchemeHost::False, SchemeHost::cons(SchemeHost::integer((int)type), SchemeHost::cons(nm, SchemeHost::Nil)));
             marshRoot(lst, roots);
             marshRelease(roots);
             fireSchemeListRec(ref.obj, lst);   // (active? type name)
@@ -4659,10 +4649,10 @@ namespace Config::Scheme {
     // input.keyboard.key — high-frequency (every key event); handlers must be
     // trivial. Observe-only: the bus event is Cancellable, Scheme listeners
     // never take the cancellation. keycode is +8 (libinput → xkb), as upstream.
-    static int hlSchemeKeyboardKeyListen(ptr record) {
+    static int hlSchemeKeyboardKeyListen(SchemeValue record) {
         if (!g_up)
             return -1;
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.input.keyboard.key.listen([ref = SThunkRef(record)](const IKeyboard::SKeyEvent& keyEvent, Event::SCallbackInfo& _) {
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.input.keyboard.key.listen([ref = SThunkRef(record)](const IKeyboard::SKeyEvent& keyEvent, Event::SCallbackInfo& _) {
             if (!g_up)
                 return;
             fireSchemeListRec(ref.obj, schemeIntList({(int)keyEvent.keycode + 8, (int)keyEvent.timeMs, (int)keyEvent.state}));
@@ -4671,34 +4661,34 @@ namespace Config::Scheme {
     }
 
     // layer.opened / layer.closed — callbacks receive the layer's namespace
-    static int hlSchemeLayerListen(ptr record, int which) {
+    static int hlSchemeLayerListen(SchemeValue record, int which) {
         if (!g_up)
             return -1;
 
         if (which == 0)
-            g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.layer.opened.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
+            g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.layer.opened.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
         else
-            g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.layer.closed.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
+            g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.layer.closed.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
         return 0;
     }
 
     // handler receives #t when the prop refresh ran as scheduled, #f when it
     // was executed prematurely
-    static int hlSchemePropsRefreshedListen(ptr record) {
+    static int hlSchemePropsRefreshedListen(SchemeValue record) {
         if (!g_up)
             return -1;
 
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.config.props_refreshed.listen([ref = SThunkRef(record)](const bool scheduled) { fireSchemeBool(ref.obj, scheduled); }));
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.config.props_refreshed.listen([ref = SThunkRef(record)](const bool scheduled) { fireSchemeBool(ref.obj, scheduled); }));
         return 0;
     }
 
     // unlisten: drop the connection; its destruction unregisters from the
     // bus and releases the handler record's lock. Upstream HL.EventSub-
     // scription:remove parity. The record goes inert: cancel again -> -1.
-    static int hlSchemeEventCancel(ptr record) {
+    static int hlSchemeEventCancel(SchemeValue record) {
         if (!g_up)
             return -1;
-        const auto it = g_eventConnections.find(reinterpret_cast<uintptr_t>(record));
+        const auto it = g_eventConnections.find(SchemeHost::word(record));
         if (it == g_eventConnections.end())
             return -1;
         g_eventConnections.erase(it);
@@ -4706,10 +4696,10 @@ namespace Config::Scheme {
     }
 
     // upstream HL.EventSubscription:is_active parity
-    static int hlSchemeEventActive(ptr record) {
+    static int hlSchemeEventActive(SchemeValue record) {
         if (!g_up)
             return -1;
-        return g_eventConnections.count(reinterpret_cast<uintptr_t>(record)) ? 1 : 0;
+        return g_eventConnections.count(SchemeHost::word(record)) ? 1 : 0;
     }
 
     // identity, mirroring Lua's windowEq: two handles are the same window
@@ -4724,28 +4714,28 @@ namespace Config::Scheme {
         return (a && b && a.get() == b.get()) ? 1 : 0;
     }
 
-    static ptr hlSchemeCurrentSubmap() {
+    static SchemeValue hlSchemeCurrentSubmap() {
         if (!g_up || !Keybinds::mgr())
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto submap = std::string(Keybinds::mgr()->currentSubmap());
-        return Sstring_utf8(submap.c_str(), submap.size());
+        return SchemeHost::stringUtf8(submap.c_str(), submap.size());
     }
 
-    static ptr hlSchemeCursorPos() {
+    static SchemeValue hlSchemeCursorPos() {
         if (!g_up || !Pointer::mgr())
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto pos = Pointer::mgr()->untransformedPosition();
-        return Scons(Sinteger((int)pos.x), Sinteger((int)pos.y));   // (x . y)
+        return SchemeHost::cons(SchemeHost::integer((int)pos.x), SchemeHost::integer((int)pos.y));   // (x . y)
     }
 
-    static int hlSchemeWorkspaceActiveListen(ptr record) {
+    static int hlSchemeWorkspaceActiveListen(SchemeValue record) {
         if (!g_up)
             return -1;
 
         SThunkRef ref(record);
-        g_eventConnections.emplace(reinterpret_cast<uintptr_t>(record), Event::bus()->m_events.workspace.active.listen([ref](PHLWORKSPACE ws) {
+        g_eventConnections.emplace(SchemeHost::word(record), Event::bus()->m_events.workspace.active.listen([ref](PHLWORKSPACE ws) {
             fireSchemeWs(ref.obj, ws);
         }));
         return 0;
@@ -4789,10 +4779,10 @@ namespace Config::Scheme {
         // this reload may have changed what they should see.
         CConfigValueBase::flushCaches();
 
-        Scall0(Stop_level_value(Sstring_to_symbol("hl--reset")));
+        SchemeHost::call0(SchemeHost::globalRef("hl--reset"));
 
-        const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--load")), Sstring(g_configPath.c_str()));
-        if (r == Sfalse)
+        const SchemeValue r = SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(g_configPath.c_str()));
+        if (r == SchemeHost::False)
             LOG(Log::ERR, "[scheme] failed to load {}", g_configPath);
         else
             LOG(Log::INFO, "[scheme] loaded {}", g_configPath);
@@ -4914,13 +4904,11 @@ namespace Config::Scheme {
             .handler = [](const IPC::Socket1::SRequest& req) {
                 auto code = req.command.substr(req.command.find_first_of(' ') + 1);
                 watchdogEnter("eval");
-                const ptr r = Scall1(Stop_level_value(Sstring_to_symbol("hl--eval")), Sstring_utf8(code.c_str(), code.size()));
+                const SchemeValue r = SchemeHost::call1(SchemeHost::globalRef("hl--eval"), SchemeHost::stringUtf8(code.c_str(), code.size()));
                 watchdogExit();
                 std::string out;
-                if (Sstringp(r)) {
-                    for (iptr i = 0; i < Sstring_length(r); ++i)
-                        out += (char)Sstring_ref(r, i);
-                }
+                if (SchemeHost::isString(r))
+                    out = SchemeHost::stringBytes(r);
                 return IPC::Socket1::SResponse(out);
             }});
         LOG(Log::INFO, "[scheme] ipc command registered");
@@ -4962,319 +4950,319 @@ namespace Config::Scheme {
     // re-loaded plugin picks up its new scheme API against the live
     // interpreter). Returns false when the bootstrap failed.
     static bool attachInterp() {
-        Sregister_symbol("hl-scheme-bind", (void*)hlSchemeBind);
-        Sregister_symbol("hl-scheme-timer", (void*)hlSchemeTimer);
-        Sregister_symbol("hl-scheme-active-title", (void*)hlSchemeActiveTitle);
-        Sregister_symbol("hl-scheme-workspace-names", (void*)hlSchemeWorkspaceNames);
-        Sregister_symbol("hl-scheme-submap-listen", (void*)hlSchemeSubmapListen);
-        Sregister_symbol("hl-scheme-active-window-id", (void*)hlSchemeActiveWindowId);
-        Sregister_symbol("hl-handle-free", (void*)hlHandleFree);
-        Sregister_symbol("hl-scheme-window-ids", (void*)hlSchemeWindowIds);
-        Sregister_symbol("hl-scheme-window-title", (void*)hlSchemeWindowTitle);
-        Sregister_symbol("hl-scheme-window-alive", (void*)hlSchemeWindowAlive);
-        Sregister_symbol("hl-scheme-window-close", (void*)hlSchemeWindowClose);
-        Sregister_symbol("hl-scheme-window-class", (void*)hlSchemeWindowClass);
-        Sregister_symbol("hl-scheme-window-workspace-id", (void*)hlSchemeWindowWorkspaceId);
-        Sregister_symbol("hl-scheme-window-monitor-id", (void*)hlSchemeWindowMonitorId);
-        Sregister_symbol("hl-scheme-window-floating", (void*)hlSchemeWindowFloating);
-        Sregister_symbol("hl-scheme-window-size", (void*)hlSchemeWindowSize);
-        Sregister_symbol("hl-scheme-window-pid", (void*)hlSchemeWindowPid);
-        Sregister_symbol("hl-scheme-window-focus", (void*)hlSchemeWindowFocus);
-        Sregister_symbol("hl-scheme-window-float", (void*)hlSchemeWindowFloat);
-        Sregister_symbol("hl-scheme-window-move-to-workspace", (void*)hlSchemeWindowMoveToWorkspace);
-        Sregister_symbol("hl-scheme-monitor-names", (void*)hlSchemeMonitorNames);
-        Sregister_symbol("hl-scheme-window-event-listen", (void*)hlSchemeWindowEventListen);
-        Sregister_symbol("hl-scheme-window-minimize-listen", (void*)hlSchemeWindowMinimizeListen);
-        Sregister_symbol("hl-scheme-lifecycle-listen", (void*)hlSchemeLifecycleListen);
-        Sregister_symbol("hl-scheme-config-reloaded-listen", (void*)hlSchemeConfigReloadedListen);
-        Sregister_symbol("hl-scheme-config-unload-listen", (void*)hlSchemeConfigUnloadListen);
-        Sregister_symbol("hl-scheme-config-props-refreshed-listen", (void*)hlSchemePropsRefreshedListen);
-        Sregister_symbol("hl-scheme-window-destroy-listen", (void*)hlSchemeWindowDestroyListen);
-        Sregister_symbol("hl-scheme-layer-listen", (void*)hlSchemeLayerListen);
-        Sregister_symbol("hl-scheme-screenshare-listen", (void*)hlSchemeScreenshareListen);
-        Sregister_symbol("hl-scheme-keyboard-key-listen", (void*)hlSchemeKeyboardKeyListen);
-        Sregister_symbol("hl-scheme-unbind-rec", (void*)hlSchemeUnbindRec);
-        Sregister_symbol("hl-scheme-unbind-key", (void*)hlSchemeUnbindKey);
-        Sregister_symbol("hl-layers", (void*)hlLayers);
-        Sregister_symbol("hl-layer-alive", (void*)hlSchemeLayerAlive);
-        Sregister_symbol("hl-layer-same", (void*)hlSchemeLayerSame);
-        Sregister_symbol("hl-layer-address", (void*)hlSchemeLayerAddress);
-        Sregister_symbol("hl-layer-pid", (void*)hlSchemeLayerPid);
-        Sregister_symbol("hl-layer-monitor", (void*)hlSchemeLayerMonitorId);
-        Sregister_symbol("hl-layer-namespace", (void*)hlSchemeLayerNamespace);
-        Sregister_symbol("hl-layer-level", (void*)hlSchemeLayerLevel);
-        Sregister_symbol("hl-layer-mapped", (void*)hlSchemeLayerMapped);
-        Sregister_symbol("hl-layer-kb-interactivity", (void*)hlSchemeLayerKbInteractivity);
-        Sregister_symbol("hl-layer-above-fs", (void*)hlSchemeLayerAboveFullscreen);
-        Sregister_symbol("hl-layer-position", (void*)hlSchemeLayerPosition);
-        Sregister_symbol("hl-layer-size", (void*)hlSchemeLayerSize);
-        Sregister_symbol("hl-scheme-event-cancel", (void*)hlSchemeEventCancel);
-        Sregister_symbol("hl-scheme-event-active", (void*)hlSchemeEventActive);
-        Sregister_symbol("hl-scheme-window-same", (void*)hlSchemeWindowSame);
-        Sregister_symbol("hl-scheme-current-submap", (void*)hlSchemeCurrentSubmap);
-        Sregister_symbol("hl-scheme-cursor-pos", (void*)hlSchemeCursorPos);
-        Sregister_symbol("hl-scheme-workspace-active-listen", (void*)hlSchemeWorkspaceActiveListen);
-        Sregister_symbol("hl-scheme-workspace-event-listen", (void*)hlSchemeWorkspaceListen);
-        Sregister_symbol("hl-scheme-monitor-event-listen", (void*)hlSchemeMonitorListen);
-        Sregister_symbol("hl-scheme-workspace-change-id", (void*)hlWorkspaceChangeId);
-        Sregister_symbol("hl-scheme-window-fullscreen-toggle", (void*)hlSchemeWindowFullscreenToggle);
-        Sregister_symbol("hl-scheme-window-fullscreen-set", (void*)hlSchemeWindowFullscreenSet);
-        Sregister_symbol("hl-scheme-window-fullscreen-mode", (void*)hlSchemeWindowFullscreenMode);
-        Sregister_symbol("hl-scheme-focus-workspace", (void*)hlSchemeFocusWorkspace);
-        Sregister_symbol("hl-scheme-window-float-act", (void*)hlSchemeWindowFloatAct);
-        Sregister_symbol("hl-scheme-focus-direction", (void*)hlSchemeFocusDirection);
-        Sregister_symbol("hl-scheme-focus-monitor", (void*)hlSchemeFocusMonitor);
-        Sregister_symbol("hl-scheme-focus-last", (void*)hlSchemeFocusLast);
-        Sregister_symbol("hl-scheme-focus-urgent", (void*)hlSchemeFocusUrgent);
-        Sregister_symbol("hl-scheme-window-move-direction", (void*)hlSchemeWindowMoveDirection);
-        Sregister_symbol("hl-scheme-window-swap-direction", (void*)hlSchemeWindowSwapDirection);
-        Sregister_symbol("hl-scheme-window-swap-next", (void*)hlSchemeWindowSwapNext);
-        Sregister_symbol("hl-scheme-window-swap-with", (void*)hlSchemeWindowSwapWith);
-        Sregister_symbol("hl-scheme-window-cycle", (void*)hlSchemeWindowCycle);
-        Sregister_symbol("hl-scheme-window-center", (void*)hlSchemeWindowCenter);
-        Sregister_symbol("hl-scheme-window-resize-px", (void*)hlSchemeWindowResizePx);
-        Sregister_symbol("hl-scheme-window-move-px", (void*)hlSchemeWindowMovePx);
-        Sregister_symbol("hl-scheme-window-pin-act", (void*)hlSchemeWindowPinAct);
-        Sregister_symbol("hl-scheme-window-pseudo", (void*)hlSchemeWindowPseudo);
-        Sregister_symbol("hl-scheme-window-kill", (void*)hlSchemeWindowKill);
-        Sregister_symbol("hl-scheme-window-signal", (void*)hlSchemeWindowSignal);
-        Sregister_symbol("hl-scheme-window-zorder", (void*)hlSchemeWindowZOrder);
-        Sregister_symbol("hl-scheme-window-set-prop", (void*)hlSchemeWindowSetProp);
-        Sregister_symbol("hl-scheme-window-tag", (void*)hlSchemeWindowTag);
-        Sregister_symbol("hl-scheme-window-clear-tags", (void*)hlSchemeWindowClearTags);
-        Sregister_symbol("hl-scheme-toggle-swallow", (void*)hlSchemeToggleSwallow);
-        Sregister_symbol("hl-scheme-workspace-groups", (void*)hlSchemeWorkspaceGroups);
-        Sregister_symbol("hl-scheme-group-alive", (void*)hlSchemeGroupAlive);
-        Sregister_symbol("hl-scheme-group-same", (void*)hlSchemeGroupSame);
-        Sregister_symbol("hl-scheme-group-members", (void*)hlSchemeGroupMembers);
-        Sregister_symbol("hl-scheme-group-current", (void*)hlSchemeGroupCurrent);
-        Sregister_symbol("hl-scheme-group-current-idx", (void*)hlSchemeGroupCurrentIdx);
-        Sregister_symbol("hl-scheme-group-size", (void*)hlSchemeGroupSize);
-        Sregister_symbol("hl-scheme-group-locked", (void*)hlSchemeGroupLocked);
-        Sregister_symbol("hl-scheme-group-denied", (void*)hlSchemeGroupDenied);
-        Sregister_symbol("hl-scheme-group-add", (void*)hlSchemeGroupAdd);
-        Sregister_symbol("hl-scheme-group-remove", (void*)hlSchemeGroupRemove);
-        Sregister_symbol("hl-scheme-group-toggle", (void*)hlSchemeGroupToggle);
-        Sregister_symbol("hl-scheme-group-set", (void*)hlSchemeGroupSet);
-        Sregister_symbol("hl-scheme-monitor-set-special", (void*)hlSchemeMonitorSetSpecial);
-        Sregister_symbol("hl-scheme-group-cycle", (void*)hlSchemeGroupCycle);
-        Sregister_symbol("hl-scheme-group-index", (void*)hlSchemeGroupIndex);
-        Sregister_symbol("hl-scheme-group-move-window", (void*)hlSchemeGroupMoveWindow);
-        Sregister_symbol("hl-scheme-group-lock", (void*)hlSchemeGroupLock);
-        Sregister_symbol("hl-scheme-group-lock-active", (void*)hlSchemeGroupLockActive);
-        Sregister_symbol("hl-scheme-window-into-group", (void*)hlSchemeWindowIntoGroup);
-        Sregister_symbol("hl-scheme-window-out-of-group", (void*)hlSchemeWindowOutOfGroup);
-        Sregister_symbol("hl-scheme-window-into-or-create-group", (void*)hlSchemeWindowIntoOrCreateGroup);
-        Sregister_symbol("hl-scheme-window-deny-from-group", (void*)hlSchemeWindowDenyFromGroup);
-        Sregister_symbol("hl-scheme-workspace-rename", (void*)hlSchemeWorkspaceRename);
-        Sregister_symbol("hl-scheme-workspace-move-monitor", (void*)hlSchemeWorkspaceMoveMonitor);
-        Sregister_symbol("hl-scheme-workspace-toggle-special", (void*)hlSchemeWorkspaceToggleSpecial);
-        Sregister_symbol("hl-scheme-workspace-swap-monitors", (void*)hlSchemeWorkspaceSwapMonitors);
-        Sregister_symbol("hl-scheme-cursor-move", (void*)hlSchemeCursorMove);
-        Sregister_symbol("hl-scheme-cursor-corner", (void*)hlSchemeCursorCorner);
-        Sregister_symbol("hl-scheme-exit", (void*)hlSchemeExit);
-        Sregister_symbol("hl-scheme-reload-config", (void*)hlSchemeReloadConfig);
-        Sregister_symbol("hl-scheme-force-renderer-reload", (void*)hlSchemeForceRendererReload);
-        Sregister_symbol("hl-scheme-dpms", (void*)hlSchemeDpms);
-        Sregister_symbol("hl-scheme-force-idle", (void*)hlSchemeForceIdle);
-        Sregister_symbol("hl-scheme-global", (void*)hlSchemeGlobal);
-        Sregister_symbol("hl-scheme-event", (void*)hlSchemeEvent);
-        Sregister_symbol("hl-scheme-pass", (void*)hlSchemePass);
-        Sregister_symbol("hl-scheme-send-shortcut", (void*)hlSchemeSendShortcut);
-        Sregister_symbol("hl-scheme-send-key-state", (void*)hlSchemeSendKeyState);
-        Sregister_symbol("hl-scheme-mouse", (void*)hlSchemeMouse);
-        Sregister_symbol("hl-exec!", (void*)hlSchemeExec);
-        Sregister_symbol("hl-scheme-clear-crashed-lockscreen", (void*)hlSchemeClearCrashedLockscreen);
-        Sregister_symbol("hl-scheme-scheduled-prop-refresh-immediately", (void*)hlSchemeScheduledPropRefreshImmediately);
-        Sregister_symbol("hl-scheme-release-input-capture", (void*)hlSchemeReleaseInputCapture);
-        Sregister_symbol("hl-scheme-window-fullscreen-state", (void*)hlSchemeWindowFullscreenState);
-        Sregister_symbol("hl-scheme-layout-message", (void*)hlSchemeLayoutMessage);
-        Sregister_symbol("hl-config-begin", (void*)hlConfigBegin);
-        Sregister_symbol("hl-config-push-int", (void*)hlConfigPushInt);
-        Sregister_symbol("hl-config-push-num", (void*)hlConfigPushNum);
-        Sregister_symbol("hl-config-push-bool", (void*)hlConfigPushBool);
-        Sregister_symbol("hl-config-push-str", (void*)hlConfigPushStr);
-        Sregister_symbol("hl-config-tbl-open", (void*)hlConfigTblOpen);
-        Sregister_symbol("hl-config-tbl-key", (void*)hlConfigTblKey);
-        Sregister_symbol("hl-config-tbl-set-hash", (void*)hlConfigTblSetHash);
-        Sregister_symbol("hl-config-tbl-seti", (void*)hlConfigTblSeti);
-        Sregister_symbol("hl-config-set", (void*)hlConfigSet);
-        Sregister_symbol("hl-config-last-error", (void*)hlConfigLastError);
-        Sregister_symbol("hl-config-get", (void*)hlConfigGet);
-        Sregister_symbol("hl-scheme-device-add", (void*)hlSchemeDeviceAdd);
-        Sregister_symbol("hl-monitor-begin", (void*)hlMonitorBegin);
-        Sregister_symbol("hl-monitor-field-str", (void*)hlMonitorFieldStr);
-        Sregister_symbol("hl-monitor-field-num", (void*)hlMonitorFieldNum);
-        Sregister_symbol("hl-monitor-field-gap", (void*)hlMonitorFieldGap);
-        Sregister_symbol("hl-monitor-field-bool", (void*)hlMonitorFieldBool);
-        Sregister_symbol("hl-monitor-commit", (void*)hlMonitorCommit);
-        Sregister_symbol("hl-curve-add", (void*)hlCurveAdd);
-        Sregister_symbol("hl-animation-set", (void*)hlAnimationSet);
-        Sregister_symbol("hl-permission-add", (void*)hlPermissionAdd);
-        Sregister_symbol("hl-window-rule-begin", (void*)hlWindowRuleBegin);
-        Sregister_symbol("hl-layer-rule-begin", (void*)hlLayerRuleBegin);
-        Sregister_symbol("hl-rule-match", (void*)hlRuleMatch);
-        Sregister_symbol("hl-window-rule-effect", (void*)hlWindowRuleEffect);
-        Sregister_symbol("hl-layer-rule-effect", (void*)hlLayerRuleEffect);
-        Sregister_symbol("hl-window-rule-commit", (void*)hlWindowRuleCommit);
-        Sregister_symbol("hl-layer-rule-commit", (void*)hlLayerRuleCommit);
-        Sregister_symbol("hl-rule-set-enabled", (void*)hlRuleSetEnabled);
-        Sregister_symbol("hl-rule-enabled", (void*)hlRuleEnabled);
-        Sregister_symbol("hl-workspace-rule-begin", (void*)hlWorkspaceRuleBegin);
-        Sregister_symbol("hl-workspace-rule-str", (void*)hlWorkspaceRuleStr);
-        Sregister_symbol("hl-workspace-rule-num", (void*)hlWorkspaceRuleNum);
-        Sregister_symbol("hl-workspace-rule-bool", (void*)hlWorkspaceRuleBool);
-        Sregister_symbol("hl-workspace-rule-gap", (void*)hlWorkspaceRuleGap);
-        Sregister_symbol("hl-workspace-rule-layout-opt", (void*)hlWorkspaceRuleLayoutOpt);
-        Sregister_symbol("hl-workspace-rule-commit", (void*)hlWorkspaceRuleCommit);
-        Sregister_symbol("hl-window-from", (void*)hlWindowFrom);
-        Sregister_symbol("hl-urgent-window", (void*)hlUrgentWindow);
-        Sregister_symbol("hl-last-window", (void*)hlLastWindow);
-        Sregister_symbol("hl-monitor-from", (void*)hlMonitorFrom);
-        Sregister_symbol("hl-monitor-at", (void*)hlMonitorAt);
-        Sregister_symbol("hl-monitor-at-cursor", (void*)hlMonitorAtCursor);
-        Sregister_symbol("hl-active-monitor", (void*)hlActiveMonitor);
-        Sregister_symbol("hl-active-workspace", (void*)hlActiveWorkspace);
-        Sregister_symbol("hl-active-special-workspace", (void*)hlActiveSpecialWorkspace);
-        Sregister_symbol("hl-last-workspace", (void*)hlLastWorkspace);
-        Sregister_symbol("hl-workspace-name", (void*)hlWorkspaceName);
-        Sregister_symbol("hl-workspace-addressable-name", (void*)hlWorkspaceAddressableName);
-        Sregister_symbol("hl-workspace-number", (void*)hlWorkspaceNumber);
-        Sregister_symbol("hl-workspace-monitor", (void*)hlWorkspaceMonitor);
-        Sregister_symbol("hl-workspace-special", (void*)hlWorkspaceSpecial);
-        Sregister_symbol("hl-workspace-active", (void*)hlWorkspaceActive);
-        Sregister_symbol("hl-workspace-visible", (void*)hlWorkspaceVisible);
-        Sregister_symbol("hl-workspace-empty", (void*)hlWorkspaceEmpty);
-        Sregister_symbol("hl-workspace-persistent", (void*)hlWorkspacePersistent);
-        Sregister_symbol("hl-workspace-has-urgent", (void*)hlWorkspaceHasUrgent);
-        Sregister_symbol("hl-workspace-has-fullscreen", (void*)hlWorkspaceHasFullscreen);
-        Sregister_symbol("hl-workspace-fullscreen-mode", (void*)hlWorkspaceFullscreenMode);
-        Sregister_symbol("hl-workspace-fullscreen-window", (void*)hlWorkspaceFullscreenWindow);
-        Sregister_symbol("hl-workspace-last-window", (void*)hlWorkspaceLastWindow);
-        Sregister_symbol("hl-workspace-window-count", (void*)hlWorkspaceWindowCount);
-        Sregister_symbol("hl-workspace-group-count", (void*)hlWorkspaceGroupCount);
-        Sregister_symbol("hl-workspace-tiled-layout", (void*)hlWorkspaceTiledLayout);
-        Sregister_symbol("hl-workspace-alive", (void*)hlWorkspaceAlive);
-        Sregister_symbol("hl-workspace-same", (void*)hlWorkspaceSame);
-        Sregister_symbol("hl-workspace-selector", (void*)hlWorkspaceSelector);
-        Sregister_symbol("hl-workspace-windows", (void*)hlWorkspaceWindows);
-        Sregister_symbol("hl-is-key-down", (void*)hlIsKeyDown);
-        Sregister_symbol("hl-loaded-plugins", (void*)hlLoadedPlugins);
-        Sregister_symbol("hl-version", (void*)hlVersion);
-        Sregister_symbol("hl-windows-from", (void*)hlWindowsFrom);
-        Sregister_symbol("hl-monitor-name", (void*)hlMonitorName);
-        Sregister_symbol("hl-monitor-description", (void*)hlMonitorDescription);
-        Sregister_symbol("hl-monitor-number", (void*)hlMonitorNumber);
-        Sregister_symbol("hl-monitor-enabled", (void*)hlMonitorEnabled);
-        Sregister_symbol("hl-monitor-focused", (void*)hlMonitorFocused);
-        Sregister_symbol("hl-monitor-x", (void*)hlMonitorX);
-        Sregister_symbol("hl-monitor-y", (void*)hlMonitorY);
-        Sregister_symbol("hl-monitor-width", (void*)hlMonitorWidth);
-        Sregister_symbol("hl-monitor-height", (void*)hlMonitorHeight);
-        Sregister_symbol("hl-monitor-scale", (void*)hlMonitorScale);
-        Sregister_symbol("hl-monitor-transform", (void*)hlMonitorTransform);
-        Sregister_symbol("hl-monitor-refresh-rate", (void*)hlMonitorRefreshRate);
-        Sregister_symbol("hl-monitor-mode", (void*)hlMonitorMode);
-        Sregister_symbol("hl-monitor-dpms", (void*)hlMonitorDpms);
-        Sregister_symbol("hl-monitor-vrr", (void*)hlMonitorVrr);
-        Sregister_symbol("hl-monitor-10bit", (void*)hlMonitor10bit);
-        Sregister_symbol("hl-monitor-reserved", (void*)hlMonitorReserved);
-        Sregister_symbol("hl-monitor-serial", (void*)hlMonitorSerial);
-        Sregister_symbol("hl-monitor-physical-size", (void*)hlMonitorPhysicalSize);
-        Sregister_symbol("hl-monitor-mirrors", (void*)hlMonitorMirrors);
-        Sregister_symbol("hl-monitor-available-modes", (void*)hlMonitorAvailableModes);
-        Sregister_symbol("hl-monitor-hardware-details", (void*)hlMonitorHardwareDetails);
-        Sregister_symbol("hl-monitor-mirror-of", (void*)hlMonitorMirrorOf);
-        Sregister_symbol("hl-monitor-active-workspace", (void*)hlMonitorActiveWorkspace);
-        Sregister_symbol("hl-monitor-active-special-workspace", (void*)hlMonitorActiveSpecialWorkspace);
-        Sregister_symbol("hl-monitor-alive", (void*)hlMonitorAlive);
-        Sregister_symbol("hl-monitor-same", (void*)hlMonitorSame);
-        Sregister_symbol("hl-monitor-selector", (void*)hlMonitorSelector);
-        Sregister_symbol("hl-window-fullscreen-handler", (void*)hlWindowFullscreenHandler);
-        Sregister_symbol("hl-notify!", (void*)hlNotify);
-        Sregister_symbol("hl-notification-add", (void*)hlNotificationAdd);
-        Sregister_symbol("hl-notification-list", (void*)hlNotificationList);
-        Sregister_symbol("hl-notification-text", (void*)hlNotificationText);
-        Sregister_symbol("hl-notification-timeout", (void*)hlNotificationTimeout);
-        Sregister_symbol("hl-notification-color", (void*)hlNotificationColor);
-        Sregister_symbol("hl-notification-icon", (void*)hlNotificationIcon);
-        Sregister_symbol("hl-notification-font-size", (void*)hlNotificationFontSize);
-        Sregister_symbol("hl-notification-elapsed", (void*)hlNotificationElapsed);
-        Sregister_symbol("hl-notification-age", (void*)hlNotificationAge);
-        Sregister_symbol("hl-notification-alive", (void*)hlNotificationAlive);
-        Sregister_symbol("hl-notification-same", (void*)hlNotificationSame);
-        Sregister_symbol("hl-notification-text-set", (void*)hlNotificationTextSet);
-        Sregister_symbol("hl-notification-timeout-set", (void*)hlNotificationTimeoutSet);
-        Sregister_symbol("hl-notification-color-set", (void*)hlNotificationColorSet);
-        Sregister_symbol("hl-notification-icon-set", (void*)hlNotificationIconSet);
-        Sregister_symbol("hl-notification-font-size-set", (void*)hlNotificationFontSizeSet);
-        Sregister_symbol("hl-notification-paused-set", (void*)hlNotificationPausedSet);
-        Sregister_symbol("hl-notification-paused-q", (void*)hlNotificationPausedQ);
-        Sregister_symbol("hl-notification-dismiss", (void*)hlNotificationDismiss);
-        Sregister_symbol("hl-timer-set-enabled", (void*)hlTimerSetEnabled);
-        Sregister_symbol("hl-timer-enabled", (void*)hlTimerEnabled);
-        Sregister_symbol("hl-timer-set-timeout", (void*)hlTimerSetTimeout);
-        Sregister_symbol("hl-timer-cancel", (void*)hlTimerCancel);
-        Sregister_symbol("hl-scheme-gesture", (void*)hlSchemeGesture);
-        Sregister_symbol("hl-scheme-gesture-maker-workspace-swipe", (void*)hlSchemeGestureMakerWorkspaceSwipe);
-        Sregister_symbol("hl-scheme-gesture-maker-move", (void*)hlSchemeGestureMakerMove);
-        Sregister_symbol("hl-scheme-gesture-maker-resize", (void*)hlSchemeGestureMakerResize);
-        Sregister_symbol("hl-scheme-gesture-maker-close", (void*)hlSchemeGestureMakerClose);
-        Sregister_symbol("hl-scheme-gesture-maker-scroll-move", (void*)hlSchemeGestureMakerScrollMove);
-        Sregister_symbol("hl-scheme-gesture-maker-float", (void*)hlSchemeGestureMakerFloat);
-        Sregister_symbol("hl-scheme-gesture-maker-fullscreen", (void*)hlSchemeGestureMakerFullscreen);
-        Sregister_symbol("hl-scheme-gesture-maker-special", (void*)hlSchemeGestureMakerSpecial);
-        Sregister_symbol("hl-scheme-gesture-maker-cursor-zoom", (void*)hlSchemeGestureMakerCursorZoom);
-        Sregister_symbol("hl-scheme-gesture-maker-custom", (void*)hlSchemeGestureMakerCustom);
-        Sregister_symbol("hl-scheme-gesture-remove", (void*)hlSchemeGestureRemove);
-        Sregister_symbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
+        SchemeHost::registerSymbol("hl-scheme-bind", (void*)hlSchemeBind);
+        SchemeHost::registerSymbol("hl-scheme-timer", (void*)hlSchemeTimer);
+        SchemeHost::registerSymbol("hl-scheme-active-title", (void*)hlSchemeActiveTitle);
+        SchemeHost::registerSymbol("hl-scheme-workspace-names", (void*)hlSchemeWorkspaceNames);
+        SchemeHost::registerSymbol("hl-scheme-submap-listen", (void*)hlSchemeSubmapListen);
+        SchemeHost::registerSymbol("hl-scheme-active-window-id", (void*)hlSchemeActiveWindowId);
+        SchemeHost::registerSymbol("hl-handle-free", (void*)hlHandleFree);
+        SchemeHost::registerSymbol("hl-scheme-window-ids", (void*)hlSchemeWindowIds);
+        SchemeHost::registerSymbol("hl-scheme-window-title", (void*)hlSchemeWindowTitle);
+        SchemeHost::registerSymbol("hl-scheme-window-alive", (void*)hlSchemeWindowAlive);
+        SchemeHost::registerSymbol("hl-scheme-window-close", (void*)hlSchemeWindowClose);
+        SchemeHost::registerSymbol("hl-scheme-window-class", (void*)hlSchemeWindowClass);
+        SchemeHost::registerSymbol("hl-scheme-window-workspace-id", (void*)hlSchemeWindowWorkspaceId);
+        SchemeHost::registerSymbol("hl-scheme-window-monitor-id", (void*)hlSchemeWindowMonitorId);
+        SchemeHost::registerSymbol("hl-scheme-window-floating", (void*)hlSchemeWindowFloating);
+        SchemeHost::registerSymbol("hl-scheme-window-size", (void*)hlSchemeWindowSize);
+        SchemeHost::registerSymbol("hl-scheme-window-pid", (void*)hlSchemeWindowPid);
+        SchemeHost::registerSymbol("hl-scheme-window-focus", (void*)hlSchemeWindowFocus);
+        SchemeHost::registerSymbol("hl-scheme-window-float", (void*)hlSchemeWindowFloat);
+        SchemeHost::registerSymbol("hl-scheme-window-move-to-workspace", (void*)hlSchemeWindowMoveToWorkspace);
+        SchemeHost::registerSymbol("hl-scheme-monitor-names", (void*)hlSchemeMonitorNames);
+        SchemeHost::registerSymbol("hl-scheme-window-event-listen", (void*)hlSchemeWindowEventListen);
+        SchemeHost::registerSymbol("hl-scheme-window-minimize-listen", (void*)hlSchemeWindowMinimizeListen);
+        SchemeHost::registerSymbol("hl-scheme-lifecycle-listen", (void*)hlSchemeLifecycleListen);
+        SchemeHost::registerSymbol("hl-scheme-config-reloaded-listen", (void*)hlSchemeConfigReloadedListen);
+        SchemeHost::registerSymbol("hl-scheme-config-unload-listen", (void*)hlSchemeConfigUnloadListen);
+        SchemeHost::registerSymbol("hl-scheme-config-props-refreshed-listen", (void*)hlSchemePropsRefreshedListen);
+        SchemeHost::registerSymbol("hl-scheme-window-destroy-listen", (void*)hlSchemeWindowDestroyListen);
+        SchemeHost::registerSymbol("hl-scheme-layer-listen", (void*)hlSchemeLayerListen);
+        SchemeHost::registerSymbol("hl-scheme-screenshare-listen", (void*)hlSchemeScreenshareListen);
+        SchemeHost::registerSymbol("hl-scheme-keyboard-key-listen", (void*)hlSchemeKeyboardKeyListen);
+        SchemeHost::registerSymbol("hl-scheme-unbind-rec", (void*)hlSchemeUnbindRec);
+        SchemeHost::registerSymbol("hl-scheme-unbind-key", (void*)hlSchemeUnbindKey);
+        SchemeHost::registerSymbol("hl-layers", (void*)hlLayers);
+        SchemeHost::registerSymbol("hl-layer-alive", (void*)hlSchemeLayerAlive);
+        SchemeHost::registerSymbol("hl-layer-same", (void*)hlSchemeLayerSame);
+        SchemeHost::registerSymbol("hl-layer-address", (void*)hlSchemeLayerAddress);
+        SchemeHost::registerSymbol("hl-layer-pid", (void*)hlSchemeLayerPid);
+        SchemeHost::registerSymbol("hl-layer-monitor", (void*)hlSchemeLayerMonitorId);
+        SchemeHost::registerSymbol("hl-layer-namespace", (void*)hlSchemeLayerNamespace);
+        SchemeHost::registerSymbol("hl-layer-level", (void*)hlSchemeLayerLevel);
+        SchemeHost::registerSymbol("hl-layer-mapped", (void*)hlSchemeLayerMapped);
+        SchemeHost::registerSymbol("hl-layer-kb-interactivity", (void*)hlSchemeLayerKbInteractivity);
+        SchemeHost::registerSymbol("hl-layer-above-fs", (void*)hlSchemeLayerAboveFullscreen);
+        SchemeHost::registerSymbol("hl-layer-position", (void*)hlSchemeLayerPosition);
+        SchemeHost::registerSymbol("hl-layer-size", (void*)hlSchemeLayerSize);
+        SchemeHost::registerSymbol("hl-scheme-event-cancel", (void*)hlSchemeEventCancel);
+        SchemeHost::registerSymbol("hl-scheme-event-active", (void*)hlSchemeEventActive);
+        SchemeHost::registerSymbol("hl-scheme-window-same", (void*)hlSchemeWindowSame);
+        SchemeHost::registerSymbol("hl-scheme-current-submap", (void*)hlSchemeCurrentSubmap);
+        SchemeHost::registerSymbol("hl-scheme-cursor-pos", (void*)hlSchemeCursorPos);
+        SchemeHost::registerSymbol("hl-scheme-workspace-active-listen", (void*)hlSchemeWorkspaceActiveListen);
+        SchemeHost::registerSymbol("hl-scheme-workspace-event-listen", (void*)hlSchemeWorkspaceListen);
+        SchemeHost::registerSymbol("hl-scheme-monitor-event-listen", (void*)hlSchemeMonitorListen);
+        SchemeHost::registerSymbol("hl-scheme-workspace-change-id", (void*)hlWorkspaceChangeId);
+        SchemeHost::registerSymbol("hl-scheme-window-fullscreen-toggle", (void*)hlSchemeWindowFullscreenToggle);
+        SchemeHost::registerSymbol("hl-scheme-window-fullscreen-set", (void*)hlSchemeWindowFullscreenSet);
+        SchemeHost::registerSymbol("hl-scheme-window-fullscreen-mode", (void*)hlSchemeWindowFullscreenMode);
+        SchemeHost::registerSymbol("hl-scheme-focus-workspace", (void*)hlSchemeFocusWorkspace);
+        SchemeHost::registerSymbol("hl-scheme-window-float-act", (void*)hlSchemeWindowFloatAct);
+        SchemeHost::registerSymbol("hl-scheme-focus-direction", (void*)hlSchemeFocusDirection);
+        SchemeHost::registerSymbol("hl-scheme-focus-monitor", (void*)hlSchemeFocusMonitor);
+        SchemeHost::registerSymbol("hl-scheme-focus-last", (void*)hlSchemeFocusLast);
+        SchemeHost::registerSymbol("hl-scheme-focus-urgent", (void*)hlSchemeFocusUrgent);
+        SchemeHost::registerSymbol("hl-scheme-window-move-direction", (void*)hlSchemeWindowMoveDirection);
+        SchemeHost::registerSymbol("hl-scheme-window-swap-direction", (void*)hlSchemeWindowSwapDirection);
+        SchemeHost::registerSymbol("hl-scheme-window-swap-next", (void*)hlSchemeWindowSwapNext);
+        SchemeHost::registerSymbol("hl-scheme-window-swap-with", (void*)hlSchemeWindowSwapWith);
+        SchemeHost::registerSymbol("hl-scheme-window-cycle", (void*)hlSchemeWindowCycle);
+        SchemeHost::registerSymbol("hl-scheme-window-center", (void*)hlSchemeWindowCenter);
+        SchemeHost::registerSymbol("hl-scheme-window-resize-px", (void*)hlSchemeWindowResizePx);
+        SchemeHost::registerSymbol("hl-scheme-window-move-px", (void*)hlSchemeWindowMovePx);
+        SchemeHost::registerSymbol("hl-scheme-window-pin-act", (void*)hlSchemeWindowPinAct);
+        SchemeHost::registerSymbol("hl-scheme-window-pseudo", (void*)hlSchemeWindowPseudo);
+        SchemeHost::registerSymbol("hl-scheme-window-kill", (void*)hlSchemeWindowKill);
+        SchemeHost::registerSymbol("hl-scheme-window-signal", (void*)hlSchemeWindowSignal);
+        SchemeHost::registerSymbol("hl-scheme-window-zorder", (void*)hlSchemeWindowZOrder);
+        SchemeHost::registerSymbol("hl-scheme-window-set-prop", (void*)hlSchemeWindowSetProp);
+        SchemeHost::registerSymbol("hl-scheme-window-tag", (void*)hlSchemeWindowTag);
+        SchemeHost::registerSymbol("hl-scheme-window-clear-tags", (void*)hlSchemeWindowClearTags);
+        SchemeHost::registerSymbol("hl-scheme-toggle-swallow", (void*)hlSchemeToggleSwallow);
+        SchemeHost::registerSymbol("hl-scheme-workspace-groups", (void*)hlSchemeWorkspaceGroups);
+        SchemeHost::registerSymbol("hl-scheme-group-alive", (void*)hlSchemeGroupAlive);
+        SchemeHost::registerSymbol("hl-scheme-group-same", (void*)hlSchemeGroupSame);
+        SchemeHost::registerSymbol("hl-scheme-group-members", (void*)hlSchemeGroupMembers);
+        SchemeHost::registerSymbol("hl-scheme-group-current", (void*)hlSchemeGroupCurrent);
+        SchemeHost::registerSymbol("hl-scheme-group-current-idx", (void*)hlSchemeGroupCurrentIdx);
+        SchemeHost::registerSymbol("hl-scheme-group-size", (void*)hlSchemeGroupSize);
+        SchemeHost::registerSymbol("hl-scheme-group-locked", (void*)hlSchemeGroupLocked);
+        SchemeHost::registerSymbol("hl-scheme-group-denied", (void*)hlSchemeGroupDenied);
+        SchemeHost::registerSymbol("hl-scheme-group-add", (void*)hlSchemeGroupAdd);
+        SchemeHost::registerSymbol("hl-scheme-group-remove", (void*)hlSchemeGroupRemove);
+        SchemeHost::registerSymbol("hl-scheme-group-toggle", (void*)hlSchemeGroupToggle);
+        SchemeHost::registerSymbol("hl-scheme-group-set", (void*)hlSchemeGroupSet);
+        SchemeHost::registerSymbol("hl-scheme-monitor-set-special", (void*)hlSchemeMonitorSetSpecial);
+        SchemeHost::registerSymbol("hl-scheme-group-cycle", (void*)hlSchemeGroupCycle);
+        SchemeHost::registerSymbol("hl-scheme-group-index", (void*)hlSchemeGroupIndex);
+        SchemeHost::registerSymbol("hl-scheme-group-move-window", (void*)hlSchemeGroupMoveWindow);
+        SchemeHost::registerSymbol("hl-scheme-group-lock", (void*)hlSchemeGroupLock);
+        SchemeHost::registerSymbol("hl-scheme-group-lock-active", (void*)hlSchemeGroupLockActive);
+        SchemeHost::registerSymbol("hl-scheme-window-into-group", (void*)hlSchemeWindowIntoGroup);
+        SchemeHost::registerSymbol("hl-scheme-window-out-of-group", (void*)hlSchemeWindowOutOfGroup);
+        SchemeHost::registerSymbol("hl-scheme-window-into-or-create-group", (void*)hlSchemeWindowIntoOrCreateGroup);
+        SchemeHost::registerSymbol("hl-scheme-window-deny-from-group", (void*)hlSchemeWindowDenyFromGroup);
+        SchemeHost::registerSymbol("hl-scheme-workspace-rename", (void*)hlSchemeWorkspaceRename);
+        SchemeHost::registerSymbol("hl-scheme-workspace-move-monitor", (void*)hlSchemeWorkspaceMoveMonitor);
+        SchemeHost::registerSymbol("hl-scheme-workspace-toggle-special", (void*)hlSchemeWorkspaceToggleSpecial);
+        SchemeHost::registerSymbol("hl-scheme-workspace-swap-monitors", (void*)hlSchemeWorkspaceSwapMonitors);
+        SchemeHost::registerSymbol("hl-scheme-cursor-move", (void*)hlSchemeCursorMove);
+        SchemeHost::registerSymbol("hl-scheme-cursor-corner", (void*)hlSchemeCursorCorner);
+        SchemeHost::registerSymbol("hl-scheme-exit", (void*)hlSchemeExit);
+        SchemeHost::registerSymbol("hl-scheme-reload-config", (void*)hlSchemeReloadConfig);
+        SchemeHost::registerSymbol("hl-scheme-force-renderer-reload", (void*)hlSchemeForceRendererReload);
+        SchemeHost::registerSymbol("hl-scheme-dpms", (void*)hlSchemeDpms);
+        SchemeHost::registerSymbol("hl-scheme-force-idle", (void*)hlSchemeForceIdle);
+        SchemeHost::registerSymbol("hl-scheme-global", (void*)hlSchemeGlobal);
+        SchemeHost::registerSymbol("hl-scheme-event", (void*)hlSchemeEvent);
+        SchemeHost::registerSymbol("hl-scheme-pass", (void*)hlSchemePass);
+        SchemeHost::registerSymbol("hl-scheme-send-shortcut", (void*)hlSchemeSendShortcut);
+        SchemeHost::registerSymbol("hl-scheme-send-key-state", (void*)hlSchemeSendKeyState);
+        SchemeHost::registerSymbol("hl-scheme-mouse", (void*)hlSchemeMouse);
+        SchemeHost::registerSymbol("hl-exec!", (void*)hlSchemeExec);
+        SchemeHost::registerSymbol("hl-scheme-clear-crashed-lockscreen", (void*)hlSchemeClearCrashedLockscreen);
+        SchemeHost::registerSymbol("hl-scheme-scheduled-prop-refresh-immediately", (void*)hlSchemeScheduledPropRefreshImmediately);
+        SchemeHost::registerSymbol("hl-scheme-release-input-capture", (void*)hlSchemeReleaseInputCapture);
+        SchemeHost::registerSymbol("hl-scheme-window-fullscreen-state", (void*)hlSchemeWindowFullscreenState);
+        SchemeHost::registerSymbol("hl-scheme-layout-message", (void*)hlSchemeLayoutMessage);
+        SchemeHost::registerSymbol("hl-config-begin", (void*)hlConfigBegin);
+        SchemeHost::registerSymbol("hl-config-push-int", (void*)hlConfigPushInt);
+        SchemeHost::registerSymbol("hl-config-push-num", (void*)hlConfigPushNum);
+        SchemeHost::registerSymbol("hl-config-push-bool", (void*)hlConfigPushBool);
+        SchemeHost::registerSymbol("hl-config-push-str", (void*)hlConfigPushStr);
+        SchemeHost::registerSymbol("hl-config-tbl-open", (void*)hlConfigTblOpen);
+        SchemeHost::registerSymbol("hl-config-tbl-key", (void*)hlConfigTblKey);
+        SchemeHost::registerSymbol("hl-config-tbl-set-hash", (void*)hlConfigTblSetHash);
+        SchemeHost::registerSymbol("hl-config-tbl-seti", (void*)hlConfigTblSeti);
+        SchemeHost::registerSymbol("hl-config-set", (void*)hlConfigSet);
+        SchemeHost::registerSymbol("hl-config-last-error", (void*)hlConfigLastError);
+        SchemeHost::registerSymbol("hl-config-get", (void*)hlConfigGet);
+        SchemeHost::registerSymbol("hl-scheme-device-add", (void*)hlSchemeDeviceAdd);
+        SchemeHost::registerSymbol("hl-monitor-begin", (void*)hlMonitorBegin);
+        SchemeHost::registerSymbol("hl-monitor-field-str", (void*)hlMonitorFieldStr);
+        SchemeHost::registerSymbol("hl-monitor-field-num", (void*)hlMonitorFieldNum);
+        SchemeHost::registerSymbol("hl-monitor-field-gap", (void*)hlMonitorFieldGap);
+        SchemeHost::registerSymbol("hl-monitor-field-bool", (void*)hlMonitorFieldBool);
+        SchemeHost::registerSymbol("hl-monitor-commit", (void*)hlMonitorCommit);
+        SchemeHost::registerSymbol("hl-curve-add", (void*)hlCurveAdd);
+        SchemeHost::registerSymbol("hl-animation-set", (void*)hlAnimationSet);
+        SchemeHost::registerSymbol("hl-permission-add", (void*)hlPermissionAdd);
+        SchemeHost::registerSymbol("hl-window-rule-begin", (void*)hlWindowRuleBegin);
+        SchemeHost::registerSymbol("hl-layer-rule-begin", (void*)hlLayerRuleBegin);
+        SchemeHost::registerSymbol("hl-rule-match", (void*)hlRuleMatch);
+        SchemeHost::registerSymbol("hl-window-rule-effect", (void*)hlWindowRuleEffect);
+        SchemeHost::registerSymbol("hl-layer-rule-effect", (void*)hlLayerRuleEffect);
+        SchemeHost::registerSymbol("hl-window-rule-commit", (void*)hlWindowRuleCommit);
+        SchemeHost::registerSymbol("hl-layer-rule-commit", (void*)hlLayerRuleCommit);
+        SchemeHost::registerSymbol("hl-rule-set-enabled", (void*)hlRuleSetEnabled);
+        SchemeHost::registerSymbol("hl-rule-enabled", (void*)hlRuleEnabled);
+        SchemeHost::registerSymbol("hl-workspace-rule-begin", (void*)hlWorkspaceRuleBegin);
+        SchemeHost::registerSymbol("hl-workspace-rule-str", (void*)hlWorkspaceRuleStr);
+        SchemeHost::registerSymbol("hl-workspace-rule-num", (void*)hlWorkspaceRuleNum);
+        SchemeHost::registerSymbol("hl-workspace-rule-bool", (void*)hlWorkspaceRuleBool);
+        SchemeHost::registerSymbol("hl-workspace-rule-gap", (void*)hlWorkspaceRuleGap);
+        SchemeHost::registerSymbol("hl-workspace-rule-layout-opt", (void*)hlWorkspaceRuleLayoutOpt);
+        SchemeHost::registerSymbol("hl-workspace-rule-commit", (void*)hlWorkspaceRuleCommit);
+        SchemeHost::registerSymbol("hl-window-from", (void*)hlWindowFrom);
+        SchemeHost::registerSymbol("hl-urgent-window", (void*)hlUrgentWindow);
+        SchemeHost::registerSymbol("hl-last-window", (void*)hlLastWindow);
+        SchemeHost::registerSymbol("hl-monitor-from", (void*)hlMonitorFrom);
+        SchemeHost::registerSymbol("hl-monitor-at", (void*)hlMonitorAt);
+        SchemeHost::registerSymbol("hl-monitor-at-cursor", (void*)hlMonitorAtCursor);
+        SchemeHost::registerSymbol("hl-active-monitor", (void*)hlActiveMonitor);
+        SchemeHost::registerSymbol("hl-active-workspace", (void*)hlActiveWorkspace);
+        SchemeHost::registerSymbol("hl-active-special-workspace", (void*)hlActiveSpecialWorkspace);
+        SchemeHost::registerSymbol("hl-last-workspace", (void*)hlLastWorkspace);
+        SchemeHost::registerSymbol("hl-workspace-name", (void*)hlWorkspaceName);
+        SchemeHost::registerSymbol("hl-workspace-addressable-name", (void*)hlWorkspaceAddressableName);
+        SchemeHost::registerSymbol("hl-workspace-number", (void*)hlWorkspaceNumber);
+        SchemeHost::registerSymbol("hl-workspace-monitor", (void*)hlWorkspaceMonitor);
+        SchemeHost::registerSymbol("hl-workspace-special", (void*)hlWorkspaceSpecial);
+        SchemeHost::registerSymbol("hl-workspace-active", (void*)hlWorkspaceActive);
+        SchemeHost::registerSymbol("hl-workspace-visible", (void*)hlWorkspaceVisible);
+        SchemeHost::registerSymbol("hl-workspace-empty", (void*)hlWorkspaceEmpty);
+        SchemeHost::registerSymbol("hl-workspace-persistent", (void*)hlWorkspacePersistent);
+        SchemeHost::registerSymbol("hl-workspace-has-urgent", (void*)hlWorkspaceHasUrgent);
+        SchemeHost::registerSymbol("hl-workspace-has-fullscreen", (void*)hlWorkspaceHasFullscreen);
+        SchemeHost::registerSymbol("hl-workspace-fullscreen-mode", (void*)hlWorkspaceFullscreenMode);
+        SchemeHost::registerSymbol("hl-workspace-fullscreen-window", (void*)hlWorkspaceFullscreenWindow);
+        SchemeHost::registerSymbol("hl-workspace-last-window", (void*)hlWorkspaceLastWindow);
+        SchemeHost::registerSymbol("hl-workspace-window-count", (void*)hlWorkspaceWindowCount);
+        SchemeHost::registerSymbol("hl-workspace-group-count", (void*)hlWorkspaceGroupCount);
+        SchemeHost::registerSymbol("hl-workspace-tiled-layout", (void*)hlWorkspaceTiledLayout);
+        SchemeHost::registerSymbol("hl-workspace-alive", (void*)hlWorkspaceAlive);
+        SchemeHost::registerSymbol("hl-workspace-same", (void*)hlWorkspaceSame);
+        SchemeHost::registerSymbol("hl-workspace-selector", (void*)hlWorkspaceSelector);
+        SchemeHost::registerSymbol("hl-workspace-windows", (void*)hlWorkspaceWindows);
+        SchemeHost::registerSymbol("hl-is-key-down", (void*)hlIsKeyDown);
+        SchemeHost::registerSymbol("hl-loaded-plugins", (void*)hlLoadedPlugins);
+        SchemeHost::registerSymbol("hl-version", (void*)hlVersion);
+        SchemeHost::registerSymbol("hl-windows-from", (void*)hlWindowsFrom);
+        SchemeHost::registerSymbol("hl-monitor-name", (void*)hlMonitorName);
+        SchemeHost::registerSymbol("hl-monitor-description", (void*)hlMonitorDescription);
+        SchemeHost::registerSymbol("hl-monitor-number", (void*)hlMonitorNumber);
+        SchemeHost::registerSymbol("hl-monitor-enabled", (void*)hlMonitorEnabled);
+        SchemeHost::registerSymbol("hl-monitor-focused", (void*)hlMonitorFocused);
+        SchemeHost::registerSymbol("hl-monitor-x", (void*)hlMonitorX);
+        SchemeHost::registerSymbol("hl-monitor-y", (void*)hlMonitorY);
+        SchemeHost::registerSymbol("hl-monitor-width", (void*)hlMonitorWidth);
+        SchemeHost::registerSymbol("hl-monitor-height", (void*)hlMonitorHeight);
+        SchemeHost::registerSymbol("hl-monitor-scale", (void*)hlMonitorScale);
+        SchemeHost::registerSymbol("hl-monitor-transform", (void*)hlMonitorTransform);
+        SchemeHost::registerSymbol("hl-monitor-refresh-rate", (void*)hlMonitorRefreshRate);
+        SchemeHost::registerSymbol("hl-monitor-mode", (void*)hlMonitorMode);
+        SchemeHost::registerSymbol("hl-monitor-dpms", (void*)hlMonitorDpms);
+        SchemeHost::registerSymbol("hl-monitor-vrr", (void*)hlMonitorVrr);
+        SchemeHost::registerSymbol("hl-monitor-10bit", (void*)hlMonitor10bit);
+        SchemeHost::registerSymbol("hl-monitor-reserved", (void*)hlMonitorReserved);
+        SchemeHost::registerSymbol("hl-monitor-serial", (void*)hlMonitorSerial);
+        SchemeHost::registerSymbol("hl-monitor-physical-size", (void*)hlMonitorPhysicalSize);
+        SchemeHost::registerSymbol("hl-monitor-mirrors", (void*)hlMonitorMirrors);
+        SchemeHost::registerSymbol("hl-monitor-available-modes", (void*)hlMonitorAvailableModes);
+        SchemeHost::registerSymbol("hl-monitor-hardware-details", (void*)hlMonitorHardwareDetails);
+        SchemeHost::registerSymbol("hl-monitor-mirror-of", (void*)hlMonitorMirrorOf);
+        SchemeHost::registerSymbol("hl-monitor-active-workspace", (void*)hlMonitorActiveWorkspace);
+        SchemeHost::registerSymbol("hl-monitor-active-special-workspace", (void*)hlMonitorActiveSpecialWorkspace);
+        SchemeHost::registerSymbol("hl-monitor-alive", (void*)hlMonitorAlive);
+        SchemeHost::registerSymbol("hl-monitor-same", (void*)hlMonitorSame);
+        SchemeHost::registerSymbol("hl-monitor-selector", (void*)hlMonitorSelector);
+        SchemeHost::registerSymbol("hl-window-fullscreen-handler", (void*)hlWindowFullscreenHandler);
+        SchemeHost::registerSymbol("hl-notify!", (void*)hlNotify);
+        SchemeHost::registerSymbol("hl-notification-add", (void*)hlNotificationAdd);
+        SchemeHost::registerSymbol("hl-notification-list", (void*)hlNotificationList);
+        SchemeHost::registerSymbol("hl-notification-text", (void*)hlNotificationText);
+        SchemeHost::registerSymbol("hl-notification-timeout", (void*)hlNotificationTimeout);
+        SchemeHost::registerSymbol("hl-notification-color", (void*)hlNotificationColor);
+        SchemeHost::registerSymbol("hl-notification-icon", (void*)hlNotificationIcon);
+        SchemeHost::registerSymbol("hl-notification-font-size", (void*)hlNotificationFontSize);
+        SchemeHost::registerSymbol("hl-notification-elapsed", (void*)hlNotificationElapsed);
+        SchemeHost::registerSymbol("hl-notification-age", (void*)hlNotificationAge);
+        SchemeHost::registerSymbol("hl-notification-alive", (void*)hlNotificationAlive);
+        SchemeHost::registerSymbol("hl-notification-same", (void*)hlNotificationSame);
+        SchemeHost::registerSymbol("hl-notification-text-set", (void*)hlNotificationTextSet);
+        SchemeHost::registerSymbol("hl-notification-timeout-set", (void*)hlNotificationTimeoutSet);
+        SchemeHost::registerSymbol("hl-notification-color-set", (void*)hlNotificationColorSet);
+        SchemeHost::registerSymbol("hl-notification-icon-set", (void*)hlNotificationIconSet);
+        SchemeHost::registerSymbol("hl-notification-font-size-set", (void*)hlNotificationFontSizeSet);
+        SchemeHost::registerSymbol("hl-notification-paused-set", (void*)hlNotificationPausedSet);
+        SchemeHost::registerSymbol("hl-notification-paused-q", (void*)hlNotificationPausedQ);
+        SchemeHost::registerSymbol("hl-notification-dismiss", (void*)hlNotificationDismiss);
+        SchemeHost::registerSymbol("hl-timer-set-enabled", (void*)hlTimerSetEnabled);
+        SchemeHost::registerSymbol("hl-timer-enabled", (void*)hlTimerEnabled);
+        SchemeHost::registerSymbol("hl-timer-set-timeout", (void*)hlTimerSetTimeout);
+        SchemeHost::registerSymbol("hl-timer-cancel", (void*)hlTimerCancel);
+        SchemeHost::registerSymbol("hl-scheme-gesture", (void*)hlSchemeGesture);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-workspace-swipe", (void*)hlSchemeGestureMakerWorkspaceSwipe);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-move", (void*)hlSchemeGestureMakerMove);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-resize", (void*)hlSchemeGestureMakerResize);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-close", (void*)hlSchemeGestureMakerClose);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-scroll-move", (void*)hlSchemeGestureMakerScrollMove);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-float", (void*)hlSchemeGestureMakerFloat);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-fullscreen", (void*)hlSchemeGestureMakerFullscreen);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-special", (void*)hlSchemeGestureMakerSpecial);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-cursor-zoom", (void*)hlSchemeGestureMakerCursorZoom);
+        SchemeHost::registerSymbol("hl-scheme-gesture-maker-custom", (void*)hlSchemeGestureMakerCustom);
+        SchemeHost::registerSymbol("hl-scheme-gesture-remove", (void*)hlSchemeGestureRemove);
+        SchemeHost::registerSymbol("hl-scheme-window-hidden", (void*)hlSchemeWindowHidden);
 
         // window read-side fields (LuaWindow parity)
-        Sregister_symbol("hl-scheme-window-address", (void*)hlSchemeWindowAddress);
-        Sregister_symbol("hl-scheme-window-mapped", (void*)hlSchemeWindowMapped);
-        Sregister_symbol("hl-scheme-window-visible", (void*)hlSchemeWindowVisible);
-        Sregister_symbol("hl-scheme-window-accepts-input", (void*)hlSchemeWindowAcceptsInput);
-        Sregister_symbol("hl-scheme-window-position", (void*)hlSchemeWindowPosition);
-        Sregister_symbol("hl-scheme-window-pin-fullscreened", (void*)hlSchemeWindowPinFullscreened);
-        Sregister_symbol("hl-scheme-window-allowed-over-fullscreen", (void*)hlSchemeWindowAllowedOverFullscreen);
-        Sregister_symbol("hl-scheme-window-tearing-hint", (void*)hlSchemeWindowTearingHint);
-        Sregister_symbol("hl-scheme-window-inhibiting-idle", (void*)hlSchemeWindowInhibitingIdle);
-        Sregister_symbol("hl-scheme-window-focus-history-id", (void*)hlSchemeWindowFocusHistoryId);
-        Sregister_symbol("hl-scheme-window-content-type", (void*)hlSchemeWindowContentType);
-        Sregister_symbol("hl-scheme-window-stable-id", (void*)hlSchemeWindowStableId);
-        Sregister_symbol("hl-scheme-window-tags", (void*)hlSchemeWindowTags);
-        Sregister_symbol("hl-scheme-window-swallowing-id", (void*)hlSchemeWindowSwallowingId);
-        Sregister_symbol("hl-scheme-window-xdg-tag", (void*)hlSchemeWindowXdgTag);
-        Sregister_symbol("hl-scheme-window-xdg-description", (void*)hlSchemeWindowXdgDescription);
-        Sregister_symbol("hl-scheme-window-layout", (void*)hlSchemeWindowLayout);
-        Sregister_symbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
-        Sregister_symbol("hl-scheme-window-pseudo-query", (void*)hlSchemeWindowPseudoQuery);
-        Sregister_symbol("hl-scheme-window-maximized-query", (void*)hlSchemeWindowMaximizedQuery);
-        Sregister_symbol("hl-scheme-window-in-group", (void*)hlSchemeWindowInGroup);
-        Sregister_symbol("hl-scheme-window-group-denied", (void*)hlSchemeWindowGroupDenied);
-        Sregister_symbol("hl-scheme-window-group-locked", (void*)hlSchemeWindowGroupLocked);
-        Sregister_symbol("hl-scheme-groups-locked", (void*)hlSchemeGroupsLocked);
-        Sregister_symbol("hl-scheme-window-group-lock", (void*)hlSchemeWindowGroupLock);
-        Sregister_symbol("hl-scheme-window-prop", (void*)hlSchemeWindowPropGet);
-        Sregister_symbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
-        Sregister_symbol("hl-scheme-window-initial-title", (void*)hlSchemeWindowInitialTitle);
-        Sregister_symbol("hl-scheme-window-x11", (void*)hlSchemeWindowX11);
-        Sregister_symbol("hl-scheme-get-submap-ctx", (void*)+[]() -> ptr {
-            std::vector<ptr> roots;
-            ptr              name  = Sstring_utf8(g_regSubmap.c_str(), g_regSubmap.size());
+        SchemeHost::registerSymbol("hl-scheme-window-address", (void*)hlSchemeWindowAddress);
+        SchemeHost::registerSymbol("hl-scheme-window-mapped", (void*)hlSchemeWindowMapped);
+        SchemeHost::registerSymbol("hl-scheme-window-visible", (void*)hlSchemeWindowVisible);
+        SchemeHost::registerSymbol("hl-scheme-window-accepts-input", (void*)hlSchemeWindowAcceptsInput);
+        SchemeHost::registerSymbol("hl-scheme-window-position", (void*)hlSchemeWindowPosition);
+        SchemeHost::registerSymbol("hl-scheme-window-pin-fullscreened", (void*)hlSchemeWindowPinFullscreened);
+        SchemeHost::registerSymbol("hl-scheme-window-allowed-over-fullscreen", (void*)hlSchemeWindowAllowedOverFullscreen);
+        SchemeHost::registerSymbol("hl-scheme-window-tearing-hint", (void*)hlSchemeWindowTearingHint);
+        SchemeHost::registerSymbol("hl-scheme-window-inhibiting-idle", (void*)hlSchemeWindowInhibitingIdle);
+        SchemeHost::registerSymbol("hl-scheme-window-focus-history-id", (void*)hlSchemeWindowFocusHistoryId);
+        SchemeHost::registerSymbol("hl-scheme-window-content-type", (void*)hlSchemeWindowContentType);
+        SchemeHost::registerSymbol("hl-scheme-window-stable-id", (void*)hlSchemeWindowStableId);
+        SchemeHost::registerSymbol("hl-scheme-window-tags", (void*)hlSchemeWindowTags);
+        SchemeHost::registerSymbol("hl-scheme-window-swallowing-id", (void*)hlSchemeWindowSwallowingId);
+        SchemeHost::registerSymbol("hl-scheme-window-xdg-tag", (void*)hlSchemeWindowXdgTag);
+        SchemeHost::registerSymbol("hl-scheme-window-xdg-description", (void*)hlSchemeWindowXdgDescription);
+        SchemeHost::registerSymbol("hl-scheme-window-layout", (void*)hlSchemeWindowLayout);
+        SchemeHost::registerSymbol("hl-scheme-window-pinned", (void*)hlSchemeWindowPinned);
+        SchemeHost::registerSymbol("hl-scheme-window-pseudo-query", (void*)hlSchemeWindowPseudoQuery);
+        SchemeHost::registerSymbol("hl-scheme-window-maximized-query", (void*)hlSchemeWindowMaximizedQuery);
+        SchemeHost::registerSymbol("hl-scheme-window-in-group", (void*)hlSchemeWindowInGroup);
+        SchemeHost::registerSymbol("hl-scheme-window-group-denied", (void*)hlSchemeWindowGroupDenied);
+        SchemeHost::registerSymbol("hl-scheme-window-group-locked", (void*)hlSchemeWindowGroupLocked);
+        SchemeHost::registerSymbol("hl-scheme-groups-locked", (void*)hlSchemeGroupsLocked);
+        SchemeHost::registerSymbol("hl-scheme-window-group-lock", (void*)hlSchemeWindowGroupLock);
+        SchemeHost::registerSymbol("hl-scheme-window-prop", (void*)hlSchemeWindowPropGet);
+        SchemeHost::registerSymbol("hl-scheme-window-initial-class", (void*)hlSchemeWindowInitialClass);
+        SchemeHost::registerSymbol("hl-scheme-window-initial-title", (void*)hlSchemeWindowInitialTitle);
+        SchemeHost::registerSymbol("hl-scheme-window-x11", (void*)hlSchemeWindowX11);
+        SchemeHost::registerSymbol("hl-scheme-get-submap-ctx", (void*)+[]() -> SchemeValue {
+            std::vector<SchemeValue> roots;
+            SchemeValue              name  = SchemeHost::stringUtf8(g_regSubmap.c_str(), g_regSubmap.size());
             marshRoot(name, roots);
-            ptr reset = Sstring_utf8(g_regSubmapReset.c_str(), g_regSubmapReset.size());
+            SchemeValue reset = SchemeHost::stringUtf8(g_regSubmapReset.c_str(), g_regSubmapReset.size());
             marshRoot(reset, roots);
-            ptr pair = Scons(name, reset);
+            SchemeValue pair = SchemeHost::cons(name, reset);
             marshRoot(pair, roots);
             marshRelease(roots);
             return pair;   // (name . reset)
         });
-        Sregister_symbol("hl-scheme-set-submap-ctx", (void*)+[](const char* name, const char* reset) {
+        SchemeHost::registerSymbol("hl-scheme-set-submap-ctx", (void*)+[](const char* name, const char* reset) {
             g_regSubmap      = name ? name : "";
             g_regSubmapReset = reset ? reset : "";
         });
-        Sregister_symbol("hl-scheme-enter-submap", (void*)+[](const char* name) -> int {
+        SchemeHost::registerSymbol("hl-scheme-enter-submap", (void*)+[](const char* name) -> int {
             if (!g_up || !name)
                 return -1;
             return Config::Actions::setSubmap(name) ? 0 : -1;
@@ -5312,15 +5300,15 @@ namespace Config::Scheme {
 
         // phase 1: the prelude (verified plumbing, unguarded). foreign-procedure
         // resolves symbols at definition time, so symbols must exist before this.
-        Scall1(Stop_level_value(Sstring_to_symbol("load")), Sstring(tryScm("hyprscheme-prelude.scm").c_str()));
+        SchemeHost::call1(SchemeHost::globalRef("load"), SchemeHost::stringVal(tryScm("hyprscheme-prelude.scm").c_str()));
 
         // phase 2: the defun machinery (defines `defun`, which phase 3's
         // converted functions use) ...
-        Scall1(Stop_level_value(Sstring_to_symbol("hl--load")), Sstring(tryScm("hyprscheme-defun.scm").c_str()));
+        SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm("hyprscheme-defun.scm").c_str()));
         // phase 3: ... then the API
-        Scall1(Stop_level_value(Sstring_to_symbol("hl--load")), Sstring(tryScm("hyprscheme-bootstrap.scm").c_str()));
+        SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm("hyprscheme-bootstrap.scm").c_str()));
 
-        if (Stop_level_value(Sstring_to_symbol("hl--ready")) == Sfalse) {
+        if (SchemeHost::globalRef("hl--ready") == SchemeHost::False) {
             LOG(Log::ERR, "[scheme] bootstrap failed, scheme scripting disabled");
             return false;
         }
@@ -5388,7 +5376,7 @@ namespace Config::Scheme {
                 loadedTime = std::filesystem::last_write_time(selft.dli_fname, ec);
             }
         }
-        Sscheme_init(nullptr);
+        SchemeHost::schemeInit();
         // boot files live next to the plugin (.so dir), with the install
         // prefix and the dev kit as fallbacks
         std::string bootDir;
@@ -5407,9 +5395,9 @@ namespace Config::Scheme {
             }
             return std::string(name);
         };
-        Sregister_boot_file(tryBoot("petite.boot").c_str());
-        Sregister_boot_file(tryBoot("scheme.boot").c_str());
-        Sbuild_heap(nullptr, nullptr);
+        SchemeHost::registerBootFile(tryBoot("petite.boot").c_str());
+        SchemeHost::registerBootFile(tryBoot("scheme.boot").c_str());
+        SchemeHost::buildHeap();
 
         if (!attachInterp())
             return;

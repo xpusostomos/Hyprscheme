@@ -1,9 +1,5 @@
 #pragma once
 
-#ifndef HYPRTHEME_SCHEME_H_SEEN
-#define HYPRTHEME_SCHEME_H_SEEN
-#include <scheme.h>
-#endif
 #include <src/layout/algorithm/TiledAlgorithm.hpp>
 #include "SThunkRef.hpp"
 
@@ -32,8 +28,8 @@ namespace Config::Scheme::Layouts {
         std::string name;  // "scheme:NAME"
         bool        active = true;
         bool        didError = false;
-        // the callback spec plist, LOCKED (SThunkRef.hpp — include scheme.h
-        // first): the provider is destroyed at Layouts::clear(), which
+        // the callback spec plist, LOCKED (SThunkRef.hpp): the provider is
+        // destroyed at Layouts::clear(), which
         // unlocks it; the callbacks travel with the provider, no registry
         SThunkRef spec;   // locked; unlocked when the provider is destroyed
     };

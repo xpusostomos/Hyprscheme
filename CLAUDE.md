@@ -178,13 +178,16 @@ in the wiki's building-the-plugin page.
 ## Still open (see also DONE.txt / TODO.txt)
 
 - Possible Chez → Guile migration: full findings + step plan live in
-  `GUILE-CONVERSION.txt` (all claims probed live on Guile 3.0.11;
-  plan = C++ host abstraction on Chez first, alternate backend,
-  commit at each point). The 299 foreign-procedure decls split into
-  146 plain-typed (pointer->procedure) + 153 scheme-object (gsubrs).
-  Generation model and guardians turn out portable (copy-module
-  helper; make-guardian exists); crash-reporter signal interplay is
-  the one unverified item.
+  `GUILE-CONVERSION.txt` (all claims probed live on Guile 3.0.11).
+  STEP 1 DONE: `SchemeHost.hpp` abstraction + `SchemeHostChez.cpp`
+  (the only file including <scheme.h>); all C++ call sites go through
+  `SchemeHost::` and use `SchemeValue` (opaque word). New host ops:
+  globalRef/call0-3/registerSymbol/lock/unlock/word/truthy/stringBytes.
+  A Guile backend = SchemeHostGuile.cpp implementing the same ops.
+  The 299 foreign-procedure decls split into 146 plain-typed
+  (pointer->procedure) + 153 scheme-object (gsubrs). Generation model
+  and guardians portable (copy-module helper; make-guardian exists);
+  crash-reporter signal interplay is the one unverified item.
 - Rollout decision for defun across the API (only hl-exec! converted).
 - doc-name spellcheck for the wiki (balance checker exists).
 - Interactive REPL.

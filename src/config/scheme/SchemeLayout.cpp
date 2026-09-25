@@ -1,7 +1,4 @@
-#ifndef HYPRTHEME_SCHEME_H_SEEN
-#define HYPRTHEME_SCHEME_H_SEEN
-#include <scheme.h>
-#endif
+#include "SchemeHost.hpp"
 #include "SThunkRef.hpp"
 #include "SchemeLayout.hpp"
 
@@ -34,40 +31,40 @@ namespace Config::Scheme::Layouts {
     // only the cons cells are heap objects, pinned with Slock_object while
     // stitching; see the marshalling notes in SchemeManager.cpp).
     template <typename T>
-    static ptr schemeIntList(const std::vector<T>& vals) {
+    static SchemeValue schemeIntList(const std::vector<T>& vals) {
         if (vals.empty())
-            return Snil;
-        ptr l = Snil;
+            return SchemeHost::Nil;
+        SchemeValue l = SchemeHost::Nil;
         for (auto it = vals.rbegin(); it != vals.rend(); ++it) {
-            l = Scons(Sinteger(*it), l);
-            Slock_object(l);
+            l = SchemeHost::cons(SchemeHost::integer(*it), l);
+            SchemeHost::lock(l);
         }
-        for (ptr p = l; Spairp(p); p = Scdr(p))
-            Sunlock_object(p);
+        for (SchemeValue p = l; SchemeHost::isPair(p); p = SchemeHost::cdr(p))
+            SchemeHost::unlock(p);
         return l;
     }
 
-    static ptr dispatchRecalculate(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
+    static SchemeValue dispatchRecalculate(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
                                    const std::vector<SP<Layout::ITarget>>& targets);
-    static ptr dispatchResize(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
+    static SchemeValue dispatchResize(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
                               const std::vector<SP<Layout::ITarget>>& targets, const Vector2D& delta, int corner);
-    static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, ptr result);
+    static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, SchemeValue result);
 
-    static ptr schemeSpec(SP<SSchemeLayoutProvider>& p) { return p->spec.obj; }
-    static ptr callScheme1(const char* fn, ptr spec, ptr a) {
-        return Scall2(Stop_level_value(Sstring_to_symbol(fn)), spec, a);
+    static SchemeValue schemeSpec(SP<SSchemeLayoutProvider>& p) { return p->spec.obj; }
+    static SchemeValue callScheme1(const char* fn, SchemeValue spec, SchemeValue a) {
+        return SchemeHost::call2(SchemeHost::globalRef(fn), spec, a);
     }
 
     static void fireSchemeLayoutWindowOpen(SP<SSchemeLayoutProvider> provider, PHLWINDOW window) {
         if (!provider || !provider->active || !window)
             return;
-        callScheme1("hl--layout-window-open", schemeSpec(provider), Sinteger(Internals::mintWindowHandle(window)));
+        callScheme1("hl--layout-window-open", schemeSpec(provider), SchemeHost::integer(Internals::mintWindowHandle(window)));
     }
 
     static void fireSchemeLayoutWindowClose(SP<SSchemeLayoutProvider> provider, PHLWINDOW window) {
         if (!provider || !provider->active || !window)
             return;
-        callScheme1("hl--layout-window-close", schemeSpec(provider), Sinteger(Internals::mintWindowHandle(window)));
+        callScheme1("hl--layout-window-close", schemeSpec(provider), SchemeHost::integer(Internals::mintWindowHandle(window)));
     }
 
     static std::string normalizeName(std::string name) {
@@ -77,7 +74,7 @@ namespace Config::Scheme::Layouts {
     }
 
     void registerSymbols() {
-        Sregister_symbol("hl-scheme-layout-add", (void*)+[](const char* name, ptr spec) -> int {
+        SchemeHost::registerSymbol("hl-scheme-layout-add", (void*)+[](const char* name, SchemeValue spec) -> int {
             if (!Internals::g_up || !name || !*name)
                 return -1;
 
@@ -150,10 +147,10 @@ namespace Config::Scheme::Layouts {
 
         // a resize callback adjusts its state and returns boxes, or returns
         // #f meaning "state updated, re-run recalculate"
-        const ptr r = dispatchResize(m_parent, m_provider, targets, delta, sc<int>(corner));
-        if (r == Sfalse) {
-            const ptr r2 = dispatchRecalculate(m_parent, m_provider, targets);
-            if (r2 == Sfalse || !applyBoxes(targets, r2))
+        const SchemeValue r = dispatchResize(m_parent, m_provider, targets, delta, sc<int>(corner));
+        if (r == SchemeHost::False) {
+            const SchemeValue r2 = dispatchRecalculate(m_parent, m_provider, targets);
+            if (r2 == SchemeHost::False || !applyBoxes(targets, r2))
                 applyDefaultGrid(targets);
             return;
         }
@@ -230,42 +227,42 @@ namespace Config::Scheme::Layouts {
 
     // reads a proper list of `count` proper lists of 4 exact integers.
     // all accesses are non-allocating, so no GC can move anything mid-read.
-    static bool readBoxList(ptr list, size_t count, std::vector<CBox>& out) {
+    static bool readBoxList(SchemeValue list, size_t count, std::vector<CBox>& out) {
         for (size_t i = 0; i < count; ++i) {
-            if (!Spairp(list))
+            if (!SchemeHost::isPair(list))
                 return false;
 
-            ptr box = Scar(list);
-            list    = Scdr(list);
+            SchemeValue box = SchemeHost::car(list);
+            list    = SchemeHost::cdr(list);
 
             int v[4];
             for (int j = 0; j < 4; ++j) {
-                if (!Spairp(box))
+                if (!SchemeHost::isPair(box))
                     return false;
-                const ptr val = Scar(box);
-                box           = Scdr(box);
-                if (!Sfixnump(val))
+                const SchemeValue val = SchemeHost::car(box);
+                box           = SchemeHost::cdr(box);
+                if (!SchemeHost::isFixnum(val))
                     return false;
-                v[j] = (int)Sfixnum_value(val);
+                v[j] = (int)SchemeHost::fixnumValue(val);
             }
-            if (box != Snil)
+            if (box != SchemeHost::Nil)
                 return false;
 
             out.emplace_back(v[0], v[1], v[2], v[3]);
         }
 
-        return list == Snil;
+        return list == SchemeHost::Nil;
     }
 
     // one dispatcher per callback kind, each calling its own Scheme symbol
     // directly; ids are one real scheme list. returns the callback's return
-    // ptr, or Sfalse when the callback is absent or failed.
-    // ptr, or Sfalse when the callback is absent or failed.
-    static ptr dispatchRecalculate(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
+    // SchemeValue, or SchemeHost::False when the callback is absent or failed.
+    // SchemeValue, or SchemeHost::False when the callback is absent or failed.
+    static SchemeValue dispatchRecalculate(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
                                    const std::vector<SP<Layout::ITarget>>& targets) {
         auto space = parent.lock() ? parent.lock()->space() : nullptr;
         if (!space)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto AREA = space->workArea();
 
@@ -279,11 +276,11 @@ namespace Config::Scheme::Layouts {
         return callScheme1("hl--layout-recalculate", schemeSpec(provider), schemeIntList(vals));
     }
 
-    static ptr dispatchResize(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
+    static SchemeValue dispatchResize(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
                               const std::vector<SP<Layout::ITarget>>& targets, const Vector2D& delta, int corner) {
         auto space = parent.lock() ? parent.lock()->space() : nullptr;
         if (!space)
-            return Sfalse;
+            return SchemeHost::False;
 
         const auto AREA = space->workArea();
 
@@ -298,9 +295,9 @@ namespace Config::Scheme::Layouts {
         return callScheme1("hl--layout-resize", schemeSpec(provider), schemeIntList(vals));
     }
 
-    static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, ptr result) {
+    static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, SchemeValue result) {
         std::vector<CBox> boxes;
-        if (result == Sfalse || !readBoxList(result, targets.size(), boxes))
+        if (result == SchemeHost::False || !readBoxList(result, targets.size(), boxes))
             return false;
 
         for (size_t i = 0; i < targets.size(); ++i)
@@ -313,8 +310,8 @@ namespace Config::Scheme::Layouts {
         if (!m_provider || !m_provider->active)
             return false;
 
-        const ptr r = dispatchRecalculate(m_parent, m_provider, targets);
-        if (r == Sfalse || !applyBoxes(targets, r)) {
+        const SchemeValue r = dispatchRecalculate(m_parent, m_provider, targets);
+        if (r == SchemeHost::False || !applyBoxes(targets, r)) {
             reportError("layout callback failed or returned a malformed box list");
             return false;
         }
@@ -369,13 +366,11 @@ namespace Config::Scheme::Layouts {
         if (!m_provider || !m_provider->active)
             return {};
 
-        const ptr r = callScheme1("hl--layout-msg", schemeSpec(m_provider), Sstring_utf8(sv.data(), sv.size()));
+        const SchemeValue r = callScheme1("hl--layout-msg", schemeSpec(m_provider), SchemeHost::stringUtf8(sv.data(), sv.size()));
 
         std::string out;
-        if (Sstringp(r)) {
-            for (iptr i = 0; i < Sstring_length(r); ++i)
-                out += (char)Sstring_ref(r, i);
-        }
+        if (SchemeHost::isString(r))
+            out = SchemeHost::stringBytes(r);
 
         if (!out.empty())
             return Config::configError(std::format("layout {}: {}", m_provider->name, out), Config::eConfigErrorLevel::ERROR, Config::eConfigErrorCode::INVALID_ARGUMENT);

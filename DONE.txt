@@ -61,6 +61,12 @@ and TODO.txt's archived sections.)
 - Makefile: compositor binary is a plugin prerequisite (rebuild chain
   is automatic).
 
+== INFRASTRUCTURE (Guile path, step 1) ==
+- SchemeHost.hpp + SchemeHostChez.cpp: backend-neutral C++ vocabulary
+  (~20 ops); SchemeManager/SchemeLayout use only SchemeHost:: and
+  SchemeValue; <scheme.h> included by exactly one file. Suite 12/12
+  unchanged. (Plan: GUILE-CONVERSION.txt.)
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.
