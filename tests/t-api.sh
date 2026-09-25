@@ -62,20 +62,20 @@ ok '(hl-window-focus! w)'
 ok '(hl-window-float-set! w)'
 ok '(hl-window-size-set! w 300 200 (quote relative))'
 ok '(hl-window-position-set! w 60 60 (quote relative))'
-ok '(hl-window-float-set! w #f)'
+ok '(hl-window-float-set! w #:on? #f)'
 ok '(hl-window-fullscreen-set! w)'
 ok '(= 2 (hl-window-fullscreen-mode w))'
-ok '(begin (hl-window-fullscreen-set! w #f) (= 0 (hl-window-fullscreen-mode w)))'
-ok '(begin (hl-window-fullscreen-set! w #t) (= 2 (hl-window-fullscreen-mode w)))'
-ok '(begin (hl-window-fullscreen-set! w #f) (= 0 (hl-window-fullscreen-mode w)))'
+ok '(begin (hl-window-fullscreen-set! w #:on? #f) (= 0 (hl-window-fullscreen-mode w)))'
+ok '(begin (hl-window-fullscreen-set! w #:on? #t) (= 2 (hl-window-fullscreen-mode w)))'
+ok '(begin (hl-window-fullscreen-set! w #:on? #f) (= 0 (hl-window-fullscreen-mode w)))'
 ok '(hl-window-maximized-set! w)'
 ok '(= 1 (hl-window-fullscreen-mode w))'
-ok '(begin (hl-window-maximized-set! w #f) (= 0 (hl-window-fullscreen-mode w)))'
-ok '(begin (hl-window-maximized-set! w #t) (= 1 (hl-window-fullscreen-mode w)))'
-ok '(begin (hl-window-maximized-set! w #f) (= 0 (hl-window-fullscreen-mode w)))'
+ok '(begin (hl-window-maximized-set! w #:on? #f) (= 0 (hl-window-fullscreen-mode w)))'
+ok '(begin (hl-window-maximized-set! w #:on? #t) (= 1 (hl-window-fullscreen-mode w)))'
+ok '(begin (hl-window-maximized-set! w #:on? #f) (= 0 (hl-window-fullscreen-mode w)))'
 ok '(hl-window-fullscreen-state w 0 0)'
 ok '(hl-window-pseudo-set! w)'
-ok '(hl-window-pseudo-set! w #f)'
+ok '(hl-window-pseudo-set! w #:on? #f)'
 ok '(boolean? (hl-window-pseudo? w))'
 ok '(boolean? (hl-window-maximized? w))'
 ok '(hl-window-move-direction! w "r")'
@@ -89,9 +89,9 @@ ok '(hl-window-tag-add! w "api-tag")'
 ok '(hl-window-tags-clear! w)'
 ok '(boolean? (hl-window-pinned-set! w))'
 ok '(hl-window-float-set! w)'
-ok '(begin (hl-window-pinned-set! w #t) (hl-window-pinned? w))'
-ok '(begin (hl-window-pinned-set! w #f) (not (hl-window-pinned? w)))'
-ok '(hl-window-float-set! w #f)'
+ok '(begin (hl-window-pinned-set! w #:on? #t) (hl-window-pinned? w))'
+ok '(begin (hl-window-pinned-set! w #:on? #f) (not (hl-window-pinned? w)))'
+ok '(hl-window-float-set! w #:on? #f)'
 # swallow toggle moved later (it swallows incoming windows, hiding them, which
 # stalls destroy-based checks — see the notes by the sacrificial kill)
 ok '(hl-window-prop-set! w "opacity" "0.9")'
@@ -138,18 +138,18 @@ ok '(hl-window-signal! w 28)'
 
 # groups
 ok '(hl-window-group-set! w)'
-ok '(hl-window-group-set! w #t)'
-ok '(hl-window-group-set! w #t)'
+ok '(hl-window-group-set! w #:on? #t)'
+ok '(hl-window-group-set! w #:on? #t)'
 ok '(hl-window-group? w)'
-ok '(hl-window-group-lock-set! w #t)'
+ok '(hl-window-group-lock-set! w #:on? #t)'
 ok '(boolean? (hl-window-group-lock? w))'
-ok '(hl-window-group-lock-set! w #f)'
+ok '(hl-window-group-lock-set! w #:on? #f)'
 ok '(boolean? (not (hl-window-group-lock? w)))'
 ok '(begin (hl-window-group-move-in! w2 "r") #t)'
-ok '(hl-groups-lock-set! #t)'
+ok '(hl-groups-lock-set! #:on? #t)'
 ok '(boolean? (hl-groups-locked?))'
-ok '(hl-window-group-set! w #f)'
-ok '(hl-window-group-set! w #f)'
+ok '(hl-window-group-set! w #:on? #f)'
+ok '(hl-window-group-set! w #:on? #f)'
 ok '(boolean? (hl-group-window-active! w 1))'
 ok '(boolean? (hl-group-window-move-next! w))'
 ok '(hl-window-group-set! w)'
@@ -157,8 +157,8 @@ ok '(hl-window-group-set! w)'
 # ---- groups as objects (upstream HL.Group parity) ----------------------------
 # deterministic start: release the global group lock (set above), force w and
 # w2 out of any group, then make w a group
-noerr '(begin (hl-groups-lock-set! #f) (hl-window-group-set! w #f) (hl-window-group-set! w2 #f) #t)'
-ok '(begin (hl-window-group-set! w #t) #t)'
+noerr '(begin (hl-groups-lock-set! #:on? #f) (hl-window-group-set! w #:on? #f) (hl-window-group-set! w2 #:on? #f) #t)'
+ok '(begin (hl-window-group-set! w #:on? #t) #t)'
 ok '(let* ((gs (hl-workspace-groups (hl-window-workspace w)))
        (g (and (pair? gs) (car gs))))
      (and (hl-group? g) (hl-group=? g g)))'
@@ -182,7 +182,7 @@ ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
 # dissolve: remove w, ungroup w2 -> the group dies; old records read stale (#f)
 ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
      (begin (hl-group-remove! g w2)          ; group is now {w} alone
-            (hl-window-group-set! w #f)      ; ungroup the last member
+            (hl-window-group-set! w #:on? #f)      ; ungroup the last member
             (not (hl-group-size g))))'       ; -> dissolved, stale record reads #f
 
 # sacrificial window: kill, then close
@@ -223,8 +223,8 @@ ok '(hl-window-monitor-set! w (hl-active-monitor))'
 ok '(hl-monitor-workspace-special-set! (hl-active-monitor) "api-special")'
 ok '(hl-workspace-special? (hl-monitor-active-special-workspace (hl-active-monitor)))'
 ok '(begin (hl-monitor-workspace-special-set! (hl-active-monitor) #f) (not (hl-monitor-active-special-workspace (hl-active-monitor))))'
-ok '(begin (hl-workspace-special-set! "api-special" #t) (hl-workspace-special? (hl-monitor-active-special-workspace (hl-active-monitor))))'
-ok '(begin (hl-workspace-special-set! "api-special" #f) (not (hl-monitor-active-special-workspace (hl-active-monitor))))'
+ok '(begin (hl-workspace-special-set! "api-special" #:on? #t) (hl-workspace-special? (hl-monitor-active-special-workspace (hl-active-monitor))))'
+ok '(begin (hl-workspace-special-set! "api-special" #:on? #f) (not (hl-monitor-active-special-workspace (hl-active-monitor))))'
 ok '(boolean? (hl-monitor-swap! (hl-active-monitor) (hl-active-monitor)))'
 ok '(let ((l (hl-workspace-windows (hl-active-workspace)))) (list? l))'
 
@@ -283,22 +283,22 @@ noerr '(hl-monitor-active-workspace am)'
 noerr '(hl-monitor-active-special-workspace am)'
 ok '(boolean? (hl-monitor-alive? am))'
 ok '(hl-monitor-rule-add!=? am am)'
-ok '(hl-monitor-rule-add! (hl-monitor-name am) (quote reserved) (quote (top 0)))'
+ok '(hl-monitor-rule-add! (hl-monitor-name am) #:reserved (quote (top 0)))'
 
 # ---- config -----------------------------------------------------------------
 ok '(hl-config-add! "general:gaps_in" 5)'
 noerr '(hl-config-get "general:gaps_in")'
 
 # ---- devices (per-device config — upstream hl.device parity) -----------------
-ok '(hl-device-add! "api-input" (quote enabled) #t)'
-ok '(hl-device-add! "api-input" (quote natural_scroll) #t (quote sensitivity) 0.6)'
-ok '(hl-device-add! "api-input" (quote region_position) (quote (10 20)))'
-ok '(hl-device-add! "api-input" (quote repeat_rate) 25)'
-bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" (quote bogus_field) #t))))')
+ok '(hl-device-add! "api-input" #:enabled #t)'
+ok '(hl-device-add! "api-input" #:natural_scroll #t #:sensitivity 0.6)'
+ok '(hl-device-add! "api-input" #:region_position (quote (10 20)))'
+ok '(hl-device-add! "api-input" #:repeat_rate 25)'
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" #:bogus_field #t))))')
 [[ "$bad_device" == *"bogus_field"* ]] || { echo "FAIL: unknown device field not rejected => [$bad_device]"; FAILED=1; }
-bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" (quote natural_scroll) "yes"))))')
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" #:natural_scroll "yes"))))')
 [[ "$bad_device" == *"#t or #f"* ]] || { echo "FAIL: bad device type not rejected => [$bad_device]"; FAILED=1; }
-bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" (quote sensitivity) 5))))')
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" #:sensitivity 5))))')
 [[ "$bad_device" == *"range"* ]] || { echo "FAIL: out-of-range device value not rejected => [$bad_device]"; FAILED=1; }
 
 # ---- cursor -----------------------------------------------------------------
@@ -320,49 +320,51 @@ bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (dis
 [[ "$bad_exec" == *"bogus_effect"* ]] || { echo "FAIL: unknown exec effect not rejected => [$bad_exec]"; FAILED=1; }
 
 # ---- live notifications (upstream hl.notification object parity) ------------
-ok '(let ((n (hl-notification-add! (quote text) "api-notif" (quote timeout) 5000
-         (quote icon) "info" (quote font-size) 15 (quote color) "0x80FF80FF")))
+ok '(let ((n (hl-notification-add! #:text "api-notif" #:timeout 5000 #:icon "info" #:font-size 15 #:color "0x80FF80FF")))
      (and (string? (hl-notification-text n))
        (equal? (hl-notification-text n) "api-notif")
        (= (hl-notification-timeout n) 5000)
        (integer? (hl-notification-icon n))
        (= (hl-notification-font-size n) 15)
        (integer? (hl-notification-color n))))'
-ok '(let ((n (hl-notification-add! (quote text) "api-rw" (quote timeout) 9000)))
+ok '(let ((n (hl-notification-add! #:text "api-rw" #:timeout 9000)))
      (and (begin (hl-notification-text-set! n "api-rw-2") #t)
        (equal? (hl-notification-text n) "api-rw-2")
        (begin (hl-notification-timeout-set! n 7000) (= (hl-notification-timeout n) 7000))
        (begin (hl-notification-font-size-set! n 18) (= (hl-notification-font-size n) 18))
        (begin (hl-notification-icon-set! n "warn") (= (hl-notification-icon n) 0))))'
-ok '(let ((n (hl-notification-add! (quote text) "api-pause" (quote timeout) 60000)))
-     (and (hl-notification-paused-set! n #t) (hl-notification-paused? n)
+ok '(let ((n (hl-notification-add! #:text "api-pause" #:timeout 60000)))
+     (and (hl-notification-paused-set! n #:on? #t) (hl-notification-paused? n)
        (hl-notification-paused-set! n) (not (hl-notification-paused? n))
        (hl-notification-paused-set! n) (hl-notification-paused? n)))'
-ok '(let ((n (hl-notification-add! (quote text) "api-elapsed" (quote timeout) 60000)))
+ok '(let ((n (hl-notification-add! #:text "api-elapsed" #:timeout 60000)))
      (and (number? (hl-notification-elapsed n)) (number? (hl-notification-age n))
        (>= (hl-notification-age n) (hl-notification-elapsed n))))'
-ok '(let ((n (hl-notification-add! (quote text) "api-dup" (quote timeout) 60000))
-         (m (hl-notification-add! (quote text) "api-dup" (quote timeout) 60000)))
+ok '(let ((n (hl-notification-add! #:text "api-dup" #:timeout 60000))
+         (m (hl-notification-add! #:text "api-dup" #:timeout 60000)))
      (and (not (hl-notification=? n m)) (hl-notification=? n n)))'
 ok '(begin (hl-notification-dismiss! (car (filter (lambda (n) (equal? (hl-notification-text n) "api-dup")) (hl-notifications)))) #t)'
 WAIT_FOR 8 '(not (exists (lambda (n) (equal? (hl-notification-text n) "api-dup")) (map hl-notification-text (hl-notifications))))' >/dev/null 2>&1 || true
 ok '(let ((n (car (filter (lambda (n) (equal? (hl-notification-text n) "api-notif")) (hl-notifications)))))
      (and n (hl-notification-alive? n)))'
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote timeout) 100))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:timeout 100))))')
 [[ "$bad_notif" == *"'text is required"* ]] || { echo "FAIL: missing text not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote text) "x"))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:text "x"))))')
 [[ "$bad_notif" == *"'timeout is required"* ]] || { echo "FAIL: missing timeout not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote text) "x" (quote timeout) 100 (quote icon) "bogus"))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:text "x" #:timeout 100 #:icon "bogus"))))')
 [[ "$bad_notif" == *"bad 'icon"* ]] || { echo "FAIL: bad icon not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote text) "x" (quote timeout) 100 (quote font-size) 0))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:text "x" #:timeout 100 #:font-size 0))))')
 [[ "$bad_notif" == *"font-size"* ]] || { echo "FAIL: bad font-size not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! (quote text) "x" (quote timeout) 100 (quote bogus_field) 1))))')
-[[ "$bad_notif" == *"bogus_field"* ]] || { echo "FAIL: unknown notification field not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (let ((n (hl-notification-add! (quote text) "x" (quote timeout) 100))) (hl-notification-timeout-set! n -5)))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:text "x" #:timeout 100 #:bogus_field 1))))')
+# Guile's define* raises keyword-argument-error without naming the keyword
+# (no irritants in the exception) — assert the rejection, not the name
+[[ "$bad_notif" == *"nrecognized keyword"* ]] || { echo "FAIL: unknown notification field not rejected => [$bad_notif]"; FAILED=1; }
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (let ((n (hl-notification-add! #:text "x" #:timeout 100))) (hl-notification-timeout-set! n -5)))))')
 [[ "$bad_notif" == *">= 0"* ]] || { echo "FAIL: negative timeout not rejected => [$bad_notif]"; FAILED=1; }
 
 # ---- notifications / misc ---------------------------------------------------
 ok '(hl-notify! "api coverage" 100)'
+ok '(boolean? (hl-notify! "api coverage opts" 100 #:icon "info" #:font-size 13))'
 ok '(boolean? (hl-is-key-down "Return"))'
 ok '(list? (hl-loaded-plugins))'
 ok '(string? (hl-version))'
@@ -382,7 +384,7 @@ ok '(boolean? (hl-release-input-capture!))'
 ok '(boolean? (hl-global! "hyprscheme:test"))'
 out=$($SCHEME '(hl-permission-add! "/nonexistent/api-test" (quote screencopy) (quote allow))' 2>&1)
 [[ "$out" == *startup* ]] || { echo "FAIL: hl-permission-add! runtime reply => [$out]"; FAILED=1; }
-ok '(hl-monitor-power-set! #f #t)'
+ok '(hl-monitor-power-set! #f #:on? #t)'
 noerr '(hl-urgent-window)'
 noerr '(hl-last-window)'
 noerr '(hl-window-from "class:^api-main$")'
@@ -400,13 +402,13 @@ ok '(hl-focus-urgent!)'
 
 # ---- curves, animations, rules ----------------------------------------------
 ok '(hl-curve-add! "api-curve" (quote bezier) 0.25 0.1 0.25 1.0)'
-ok '(hl-animation-add! "fadeIn" (quote speed) 2 (quote curve) "api-curve")'
-ok '(hl-rule? (hl-window-rule-add! "api-rule" (quote match) (quote (class "^api-main$")) (quote opacity) "0.9"))'
-$SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" (quote match) (quote (namespace "^nope$")) (quote blur) #f)))' >/dev/null 2>&1
-$SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" (quote match) (quote (namespace "^nope$")) (quote blur) #f))' >/dev/null
+ok '(hl-animation-add! "fadeIn" #:speed 2 #:curve "api-curve")'
+ok '(hl-rule? (hl-window-rule-add! "api-rule" #:match (quote (class "^api-main$")) #:opacity "0.9"))'
+$SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" #:match (quote (namespace "^nope$")) #:blur #f)))' >/dev/null 2>&1
+$SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" #:match (quote (namespace "^nope$")) #:blur #f))' >/dev/null
 ok '(hl-rule? api-layer-rule)'
 ok '(boolean? (hl-rule-enabled? api-layer-rule))'
-ok '(hl-rule-enabled-set! api-layer-rule #f)'
+ok '(hl-rule-enabled-set! api-layer-rule #:on? #f)'
 
 # ---- layouts ----------------------------------------------------------------
 ok '(string? (hl-layout-add! "api-layout" (quote recalculate) (lambda (count W H wins) (quote ()))))'
@@ -421,23 +423,23 @@ val '(hl-current-submap)' '""'
 
 # ---- binds ------------------------------------------------------------------
 # device-inclusive semantics: listed devices default to inclusive (8192); an
-# explicit 'device-inclusive #f opts OUT
-val '(hl--bind-flags (quote (devices ("k1"))) "x")' '8192'
-val '(hl--bind-flags (quote (devices ("k1") device-inclusive #f)) "x")' '0'
-val '(hl--bind-flags (quote (device-inclusive #t)) "x")' '8192'
-val '(hl--bind-flags (quote ()) "x")' '0'
+# explicit #:device-inclusive #f opts OUT
+val '(hl--bind-flags #:devices (quote ("k1")))' '8192'
+val '(hl--bind-flags #:devices (quote ("k1")) #:device-inclusive #f)' '0'
+val '(hl--bind-flags #:device-inclusive #t)' '8192'
+val '(hl--bind-flags)' '0'
 # exclusivity rules (upstream's three checks at the binding layer)
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags (quote (click #t drag #t)) "x"))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags #:click #t #:drag #t))))')
 [[ "$bad_bf" == *"click and drag are exclusive"* ]] || { echo "FAIL: click+drag not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags (quote (release #t repeat #t)) "x"))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags #:release #t #:repeat #t))))')
 [[ "$bad_bf" == *"incompatible with repeat"* ]] || { echo "FAIL: release+repeat not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags (quote (long-press #t repeat #t)) "x"))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags #:long-press #t #:repeat #t))))')
 [[ "$bad_bf" == *"incompatible with repeat"* ]] || { echo "FAIL: long-press+repeat not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags (quote (mouse #t repeat #t)) "x"))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags #:mouse #t #:repeat #t))))')
 [[ "$bad_bf" == *"mouse is exclusive"* ]] || { echo "FAIL: mouse+repeat not rejected => [$bad_bf]"; FAILED=1; }
 ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F13>") (lambda () #f)))'
 ok '(hl-bind? (hl-bind-add! (hl-kbd "C-M-<F15>") (lambda () #f)))'
-ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F16>") (lambda () #f) (quote release) #t (quote description) "api"))'
+ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F16>") (lambda () #f) #:release #t #:description "api"))'
 ok '(let ((b (hl-bind-add! (hl-kbd "s-<F18>") (lambda () #f)))) (hl-unbind! b))'
 ok '(let ((b (hl-bind-add! (hl-kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key! "SUPER F19"))'
 # function keys use emacs' bracketed notation; Hyprland matches key names
@@ -474,10 +476,10 @@ ok '(hl-bind? (hl-bind-add! (hl-key "SUPER+F22") (lambda () #f)))'
 # ---- timers -----------------------------------------------------------------
 ok '(hl-timer? (hl-after 5000 (lambda () #f)))'
 ok '(let ((t (hl-repeat 5000 (lambda () #f))))
-     (and (boolean? (hl-timer-enabled-set! t #f))
+     (and (boolean? (hl-timer-enabled-set! t #:on? #f))
           (eq? (hl-timer-enabled? t) #f)
           (boolean? (hl-timer-set-timeout t 6000))
-          (boolean? (hl-timer-enabled-set! t #t))
+          (boolean? (hl-timer-enabled-set! t #:on? #t))
           (boolean? (hl-timer-enabled-set! t))))'
 
 # ---- events: registration returns a listener id -----------------------------
@@ -515,25 +517,25 @@ ok '(hl-event? (hl-layer-open-notification-add! (lambda (ns) #f)))'
 ok '(hl-event? (hl-layer-close-notification-add! (lambda (ns) #f)))'
 
 # ---- auto-consuming protocol: a bind thunk returning #f DECLINES the key ---
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F26>") (lambda () #f) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F26>") (lambda () #f) #:auto-consuming #t)))
      (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F27>") (lambda () #t) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F27>") (lambda () #t) #:auto-consuming #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F28>") (lambda () (error "boom")) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F28>") (lambda () (error "boom")) #:auto-consuming #t)))
      (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
 
 # ---- bind result protocol (upstream {ok, pass_event, error, request_release}) ----
 # a non-plist truthy value normalizes to ok #t, like upstream's non-table returns
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F29>") (lambda () "done") (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F29>") (lambda () "done") #:auto-consuming #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
 # pass-event: handled AND forwarded to the focused window (Keybinds Manager CONSUMES)
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F30>") (lambda () (quote (pass-event #t))) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F30>") (lambda () (quote (pass-event #t))) #:auto-consuming #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t pass-event #t))) (hl-unbind! b)))'
 # explicit decline with an error message
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F31>") (lambda () (quote (ok #f (quote error) "not now"))) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F31>") (lambda () (quote (ok #f (quote error) "not now"))) #:auto-consuming #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #f error "not now"))) (hl-unbind! b)))'
 # request-release: handled; asks the manager to trigger the release event (click/drag binds)
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F32>") (lambda () (quote (request-release #t))) (quote auto-consuming) #t)))
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F32>") (lambda () (quote (request-release #t))) #:auto-consuming #t)))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t request-release #t))) (hl-unbind! b)))'
 
 # the C++ side reads the same plists: ok #f fails the result, which stops a
@@ -551,48 +553,49 @@ val '(hl-state-ref (quote proto-ticks) 0)' '1'
 # ---- gestures (registration only; no trackpad in the harness) ----------------
 # recipes are values: hl-make-* builds an opaque (maker . args) pair
 ok '(hl-gesture-action? (hl-make-workspace-swipe-gesture))'
-ok '(hl-gesture-action? (hl-make-custom-gesture (quote finish) (lambda args #f)))'
+ok '(hl-gesture-action? (hl-make-custom-gesture #:finish (lambda args #f)))'
 ok '(hl-gesture-action? (hl-make-cursor-zoom-gesture 2.0 (quote live)))'
 # registrations across the spec space (fingers/mods/axis must stay disjoint
 # within this file AND from the doc-test blocks, which self-clean)
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 4 (quote direction) "swipe" (quote action) (hl-make-workspace-swipe-gesture)))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "pinch" (quote action) (hl-make-move-gesture)))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 2 (quote direction) "up" (quote mods) (hl-key "SUPER") (quote action) (hl-make-close-gesture)))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "down" (quote action) (hl-make-float-gesture)))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "left" (quote action) (hl-make-special-workspace-gesture "mynotes")))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "right" (quote action) (hl-make-cursor-zoom-gesture 2.0 (quote live))))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 3 (quote direction) "up" (quote mods) (hl-key "ALT") (quote action) (hl-make-fullscreen-gesture (quote maximize))))'
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 5 (quote direction) "swipe" (quote action) (hl-make-custom-gesture (quote finish) (lambda args #f))))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 4 #:direction "swipe" #:action (hl-make-workspace-swipe-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "pinch" #:action (hl-make-move-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 2 #:direction "up" #:mods (hl-key "SUPER") #:action (hl-make-close-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "down" #:action (hl-make-float-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "left" #:action (hl-make-special-workspace-gesture "mynotes")))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "right" #:action (hl-make-cursor-zoom-gesture 2.0 (quote live))))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "up" #:mods (hl-key "ALT") #:action (hl-make-fullscreen-gesture (quote maximize))))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 5 #:direction "swipe" #:action (hl-make-custom-gesture #:finish (lambda args #f))))'
 # mods is a mask: multiple space-separated modifiers are permitted
-ok '(hl-gesture? (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote mods) (hl-key "ALT+SHIFT") (quote action) (hl-make-move-gesture)))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 4 #:direction "up" #:mods (hl-key "ALT+SHIFT") #:action (hl-make-move-gesture)))'
 # one recipe, two registrations — fresh C++ instance each (same recipe value)
-ok '(let ((r (hl-make-scroll-move-gesture))) (and (hl-gesture? (hl-gesture-add! (quote fingers) 6 (quote direction) "horizontal" (quote action) r)) (hl-gesture? (hl-gesture-add! (quote fingers) 6 (quote direction) "vertical" (quote action) r))))'
+ok '(let ((r (hl-make-scroll-move-gesture))) (and (hl-gesture? (hl-gesture-add! #:fingers 6 #:direction "horizontal" #:action r)) (hl-gesture? (hl-gesture-add! #:fingers 6 #:direction "vertical" #:action r))))'
 # remove!: #t while registered, #f on the second call (spec-keyed removal)
-ok '(let ((g (hl-gesture-add! (quote fingers) 9 (quote direction) "up" (quote action) (hl-make-resize-gesture)))) (and (eq? #t (hl-gesture-remove! g)) (eq? #f (hl-gesture-remove! g))))'
+ok '(let ((g (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-resize-gesture)))) (and (eq? #t (hl-gesture-remove! g)) (eq? #f (hl-gesture-remove! g))))'
 # removal frees the spec — the overshadowed direction registers afterwards
-ok '(let ((g (hl-gesture-add! (quote fingers) 9 (quote direction) "up" (quote action) (hl-make-resize-gesture)))) (and (hl-gesture-remove! g) (hl-gesture? (hl-gesture-add! (quote fingers) 9 (quote direction) "vertical" (quote action) (hl-make-resize-gesture)))))'
+ok '(let ((g (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-resize-gesture)))) (and (hl-gesture-remove! g) (hl-gesture? (hl-gesture-add! #:fingers 9 #:direction "vertical" #:action (hl-make-resize-gesture)))))'
 # errors
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote bogus_field) #t))))')
-[[ "$bad_gest" == *"bogus_field"* ]] || { echo "FAIL: unknown gesture field not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up"))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:bogus_field 1))))')
+# Guile's define* raises keyword-argument-error without naming the keyword
+[[ "$bad_gest" == *"nrecognized keyword"* ]] || { echo "FAIL: unknown gesture field not rejected => [$bad_gest]"; FAILED=1; }
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up"))))')
 [[ "$bad_gest" == *"action is required"* ]] || { echo "FAIL: missing gesture action not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote action) "workspace"))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:action "workspace"))))')
 [[ "$bad_gest" == *"hl-gesture-action"* ]] || { echo "FAIL: string action not rejected => [$bad_gest]"; FAILED=1; }
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-float-gesture (quote bogus)))))')
 [[ "$bad_gest" == *"toggle float tile"* ]] || { echo "FAIL: bad float mode not rejected => [$bad_gest]"; FAILED=1; }
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-custom-gesture))))')
 [[ "$bad_gest" == *"at least one"* ]] || { echo "FAIL: empty custom gesture not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-custom-gesture (quote start) "not a thunk"))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-custom-gesture #:start "not a thunk"))))')
 [[ "$bad_gest" == *"needs a procedure"* ]] || { echo "FAIL: non-procedure custom field not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote action) (hl-make-move-gesture) (quote scale) 0.05))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:action (hl-make-move-gesture) #:scale 0.05))))')
 [[ "$bad_gest" == *"scale"* ]] || { echo "FAIL: degenerate scale not rejected => [$bad_gest]"; FAILED=1; }
 # 'mods is a token list — a string or an unknown token is rejected
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote mods) "SUPER" (quote action) (hl-make-move-gesture)))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:mods "SUPER" #:action (hl-make-move-gesture)))))')
 [[ "$bad_gest" == *"list of modifier tokens"* ]] || { echo "FAIL: string mods not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 4 (quote direction) "up" (quote mods) (list "SUPR") (quote action) (hl-make-move-gesture)))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:mods (list "SUPR") #:action (hl-make-move-gesture)))))')
 [[ "$bad_gest" == *"unknown modifier token"* ]] || { echo "FAIL: unknown mod token not rejected => [$bad_gest]"; FAILED=1; }
 # the manager's overshadow rule now surfaces as an error (was silently dropped)
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! (quote fingers) 9 (quote direction) "up" (quote action) (hl-make-move-gesture)))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-move-gesture)))))')
 [[ "$bad_gest" == *"overshadowed"* ]] || { echo "FAIL: overshadowed gesture not rejected => [$bad_gest]"; FAILED=1; }
 
 # ---- session lock escape hatch + scheduled prop refresh ----------------------

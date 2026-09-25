@@ -143,7 +143,7 @@ if [[ $w != "#t" ]]; then echo "FAIL: fixture window never appeared"; exit 1; fi
 BASE_EVENTS=$($SCHEME '(length (hl-notifications))' 2>/dev/null); BASE_EVENTS=${BASE_EVENTS:-0}
 
 # the rule pool: created once, toggled forever
-eval_scheme fixture "(begin (define soak-rule (hl-window-rule-add! \"soak-rule\" 'match (quote (class \"^soak-churn\")) 'opacity \"0.9\")) (define soak-rule2 (hl-window-rule-add! \"soak-rule2\" 'match (quote (class \"^soak-churn\")) 'float #t)) #t)"
+eval_scheme fixture "(begin (define soak-rule (hl-window-rule-add! \"soak-rule\" #:match (quote (class \"^soak-churn\")) #:opacity \"0.9\")) (define soak-rule2 (hl-window-rule-add! \"soak-rule2\" #:match (quote (class \"^soak-churn\")) #:float #t)) #t)"
 
 # the custom layout: a shifting master/stack whose ratio wobbles via
 # hl-layout-msg; recalc errors fall back to the default grid (that path
@@ -172,7 +172,7 @@ eval_scheme fixture "(let ((mfact (vector 0.5)) (opens (vector 0)) (closes (vect
                         (else #f))))
   #t)"
 # workspace 9 runs the layout; pool windows live there
-eval_scheme fixture "(begin (hl-workspace-rule-add! \"9\" 'layout \"scheme:soak-layout\") #t)"
+eval_scheme fixture "(begin (hl-workspace-rule-add! \"9\" #:layout \"scheme:soak-layout\") #t)"
 
 # spawn the LIVE POOL (kept open for the whole run, rearranged every iteration)
 eval_scheme fixture "(begin (hl-exec! \"foot -a soak-pool-1\") (hl-exec! \"foot -a soak-pool-2\") (hl-exec! \"foot -a soak-pool-3\") (hl-exec! \"foot -a soak-pool-4\") (hl-exec! \"foot -a soak-pool-5\") #t)"
@@ -208,7 +208,7 @@ while (( SECONDS < END )); do
     [[ $out == "#t" ]] || { ERRORS=$((ERRORS+1)); CAT_ERRORS[events]=$((${CAT_ERRORS[events]:-0}+1)); printf '%s iter=%s cat=events expr=event-remove-semantics\n  out=%s\n' "$(date +%H:%M:%S)" "$ITER" "$out" >> "$ELOG"; }
     # bubble objects: dismiss! semantics — dismiss returns #t, and the handle
     # reads stale (#f) from every getter afterwards
-    eval_scheme events2 "(let ((n (hl-notification-add! (quote text) \"soak\" (quote timeout) 10))) (and (hl-notification-dismiss! n) (not (hl-notification-text n))))"
+    eval_scheme events2 "(let ((n (hl-notification-add! #:text \"soak\" #:timeout 10))) (and (hl-notification-dismiss! n) (not (hl-notification-text n))))"
     out=$REPLY
     [[ $out == "#t" ]] || { ERRORS=$((ERRORS+1)); CAT_ERRORS[notifs]=$((${CAT_ERRORS[notifs]:-0}+1)); printf '%s iter=%s cat=notifs expr=bubble-remove-semantics\n  out=%s\n' "$(date +%H:%M:%S)" "$ITER" "$out" >> "$ELOG"; }
 
@@ -219,17 +219,17 @@ while (( SECONDS < END )); do
     eval_scheme binds "(hl-unbind! (hl-bind-add! (hl-key \"SUPER+F$((ITER % 12 + 13))\") (lambda () #f)))"
 
     # gestures: add + remove cycle
-    eval_scheme gestures "(hl-gesture-remove! (hl-gesture-add! (quote fingers) 8 (quote direction) \"up\" (quote action) (hl-make-move-gesture)))"
+    eval_scheme gestures "(hl-gesture-remove! (hl-gesture-add! #:fingers 8 #:direction \"up\" #:action (hl-make-move-gesture)))"
 
     # rules: toggle the pool
     eval_scheme rules "(begin (hl-rule-enabled-set! soak-rule (not (hl-rule-enabled? soak-rule))) #t)"
 
     # notifications: object create + cancel
-    eval_scheme notifs "(begin (hl-notification-dismiss! (hl-notification-add! (quote text) \"soak\" (quote timeout) 10)) #t)"
+    eval_scheme notifs "(begin (hl-notification-dismiss! (hl-notification-add! #:text \"soak\" #:timeout 10)) #t)"
 
     # getters + actions on the live window
     eval_scheme getters "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (string? (hl-window-title w)) (boolean? (hl-window-floating? w)) (integer? (hl-window-pid w)) (pair? (hl-window-size w)) #t))"
-    eval_scheme actions "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (begin (hl-window-focus! w) (hl-window-float-set! w) (hl-window-float-set! w #f) (hl-window-position-set! w 10 10 (quote relative)) #t)))"
+    eval_scheme actions "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (begin (hl-window-focus! w) (hl-window-float-set! w) (hl-window-float-set! w #:on? #f) (hl-window-position-set! w 10 10 (quote relative)) #t)))"
 
     # exec
     eval_scheme exec "(integer? (hl-exec! \"true\"))"
@@ -243,9 +243,9 @@ while (( SECONDS < END )); do
     (hl-window-focus! w)
     (case (modulo $ITER 6)
       ((0) (hl-window-float-set! w))
-      ((1) (hl-window-float-set! w #f))
-      ((2) (hl-window-fullscreen-set! w) (hl-window-fullscreen-set! w #f))
-      ((3) (hl-window-maximized-set! w) (hl-window-maximized-set! w #f))
+      ((1) (hl-window-float-set! w #:on? #f))
+      ((2) (hl-window-fullscreen-set! w) (hl-window-fullscreen-set! w #:on? #f))
+      ((3) (hl-window-maximized-set! w) (hl-window-maximized-set! w #:on? #f))
       ((4) (hl-window-workspace-set! w \"8\") (hl-window-workspace-set! w \"9\"))
       ((5) (hl-window-move-direction! w \"r\") (hl-window-center! w)))
     (when (hl-window-floating? w)

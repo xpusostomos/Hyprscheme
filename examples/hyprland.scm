@@ -10,30 +10,30 @@
 
 ;; options follow the thunk as a plist
 (hl-bind-add! (hl-kbd "s-q") (lambda () (hl-window-close!))
-         'description "Close the focused window")
+         #:description "Close the focused window")
 
 ;; a submap: binds inside are scoped to it, no modifiers needed
 (hl-bind-add! (hl-kbd "s-g") (lambda () (hl-submap-activate! "resize")))
 (hl-submap "resize"
   (lambda ()
-    (hl-bind-add! (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 'relative)) 'repeat #t)
-    (hl-bind-add! (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 'relative))  'repeat #t)
+    (hl-bind-add! (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 'relative)) #:repeat #t)
+    (hl-bind-add! (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 'relative))  #:repeat #t)
     (hl-bind-add! (hl-kbd "g")     (lambda () (hl-submap-exit!)))))
 
 ;; ---- events ---------------------------------------------------------------
 (hl-window-open-notification-add! (lambda (w)
   (hl-notify! (string-append "opened: " (hl-window-class w)) 3000)))
 (hl-workspace-active-notification-add! (lambda (ws)
-  (hl-notify! (string-append "workspace: " (hl-workspace-name ws)) 1500 'icon "info")))
+  (hl-notify! (string-append "workspace: " (hl-workspace-name ws)) 1500 #:icon "info")))
 
 ;; ---- window rules (a plist; match is a nested plist too) ------------------
-(hl-window-rule-add! "float-htop" 'match '(class "^htop$") 'float #t 'center #t)
+(hl-window-rule-add! "float-htop" #:match '(class "^htop$") #:float #t #:center #t)
 (hl-window-rule-add! "priv-browsers"
-  'match '(class "^(Tor Browser|Mullvad Browser)$")
-  'float #t 'fullscreen_state "0 0")
+  #:match '(class "^(Tor Browser|Mullvad Browser)$")
+  #:float #t #:fullscreen_state "0 0")
 
 ;; ---- per-device input config ----------------------------------------------
-(hl-device-add! "my-touchpad" 'natural_scroll #t 'tap_to_click #t)
+(hl-device-add! "my-touchpad" #:natural_scroll #t #:tap_to_click #t)
 
 ;; ---- config options -------------------------------------------------------
 (hl-config-add! "general:gaps_in" 5)

@@ -14,8 +14,8 @@ okv '(hl-config-add! "decoration:rounding" 12)' '#t' 'int option 2'
 okv '(hl-curve-add! "cfg-spring" (quote spring) 250 25 1)' '#t' 'spring curve'
 
 # workspace-rule gap fields accept scalars and per-side plists
-okv '(hl-workspace-rule-add! "cfg-gaps" (quote gaps_out) 0 (quote gaps_in) 8)' '#t' 'ws-rule scalar gaps'
-okv '(hl-workspace-rule-add! "cfg-gaps2" (quote gaps_in) (quote (top 8 bottom 4)))' '#t' 'ws-rule plist gaps'
+okv '(hl-workspace-rule-add! "cfg-gaps" #:gaps_out 0 #:gaps_in 8)' '#t' 'ws-rule scalar gaps'
+okv '(hl-workspace-rule-add! "cfg-gaps2" #:gaps_in (quote (top 8 bottom 4)))' '#t' 'ws-rule plist gaps'
 
 # bad type raises with the config system's own message
 out=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-config-add! "general:gaps_in" "abc"))))')
