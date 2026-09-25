@@ -5300,12 +5300,35 @@ namespace Config::Scheme {
 
         // phase 1: the prelude (verified plumbing, unguarded). foreign-procedure
         // resolves symbols at definition time, so symbols must exist before this.
-        SchemeHost::call1(SchemeHost::globalRef("load"), SchemeHost::stringVal(tryScm("hyprscheme-prelude.scm").c_str()));
-
-        // phase 1b: the backend compatibility layer, if the host needs one
-        // (Guile: foreign-procedure shim + Chez-only procedure definitions)
-        if (const char* compat = SchemeHost::compatFile())
-            SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm(compat).c_str()));
+        // phase 1a: the backend compatibility layer, if the host needs one —
+        // BEFORE the prelude: `guard` (used by the prelude) is an imported
+        // macro on Guile, and the compat file defines the procedural load the
+        // prelude's real-load captures. Contained: errors never unwind
+        // through C++ frames.
+        if (const char* compat = SchemeHost::compatFile()) {
+            if (!SchemeHost::evalFile(tryScm(compat).c_str())) {
+                LOG(Log::ERR, "[scheme] backend compat layer failed to load, scheme scripting disabled");
+                return false;
+            }
+        }
+        // phase 1b: the prelude (verified plumbing; errors contained at the
+        // host). foreign-procedure resolves symbols at definition time, so
+        // symbols must exist before this.
+        if (!SchemeHost::evalFile(tryScm("hyprscheme-prelude.scm").c_str())) {
+            LOG(Log::ERR, "[scheme] prelude failed to load, scheme scripting disabled");
+            return false;
+        }
+        // the guarded loader must exist before anything else loads — if the
+        // machinery is missing (a compat/prelude failure), stop here instead
+        // of letting an unbound globalRef unwind into C++
+        // only hl--load: it is a real procedure in both backends. (A first
+        // version also checked `foreign-procedure` — on Chez that is a SYNTAX
+        // keyword, top-level-bound? answers #f for it, and the check silently
+        // disabled scheme everywhere.)
+        if (!SchemeHost::isBound("hl--load")) {
+            LOG(Log::ERR, "[scheme] interpreter machinery incomplete, scheme scripting disabled");
+            return false;
+        }
 
         // phase 2: the defun machinery (defines `defun`, which phase 3's
         // converted functions use) ...
@@ -5358,7 +5381,6 @@ namespace Config::Scheme {
             return;
         }
         done = true;
-
         g_configPath = userConfigPath();
         if (g_configPath.empty() || !std::filesystem::exists(g_configPath)) {
             LOG(Log::INFO, "[scheme] no scheme config found at {} (HYPRSCHEME_CONFIG {}), scheme scripting disabled",

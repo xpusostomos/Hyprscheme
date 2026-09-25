@@ -35,6 +35,11 @@ INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
 LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 
+# the .scm machinery files (the backend block below may add to this)
+SCM_FILES = src/config/scheme/hyprscheme-prelude.scm \
+            src/config/scheme/hyprscheme-bootstrap.scm \
+            src/config/scheme/hyprscheme-defun.scm
+
 # the Scheme backend: SchemeHostChez.cpp (default) or SchemeHostGuile.cpp
 BACKEND ?= chez
 ifeq ($(BACKEND),guile)
@@ -105,10 +110,6 @@ src/plugin-main.o: plugin-main.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # ---- install ---------------------------------------------------------------
-
-SCM_FILES = src/config/scheme/hyprscheme-prelude.scm \
-            src/config/scheme/hyprscheme-bootstrap.scm \
-            src/config/scheme/hyprscheme-defun.scm
 
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme

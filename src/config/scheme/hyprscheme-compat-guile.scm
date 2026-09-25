@@ -23,6 +23,11 @@
 
 (define (andmap f l) (and-map f l))     ; Chez spelling of Guile's and-map
 (define (list* . args) (apply cons* args))
+
+;; on Guile the `load` BINDING is a syntax transformer; the prelude will do
+;; (define real-load load) and needs a PROCEDURE. Defining load here — the
+;; prelude then captures it into real-load before re-shadowing load itself.
+(define (load f) (primitive-load f))
 (define (exact v) (inexact->exact v))
 
 ;; eof-object: Guile has the predicate but no 0-arg constructor; the eof
@@ -65,7 +70,7 @@
 ;; no such hook yet (step 4 of the migration), so the drain never fires and
 ;; dead handles leak until then. The C++ watchdog thread backstop is
 ;; unaffected.
-(define (collect-request-handler f) (void))
+(define (collect-request-handler f) (if #f #f))
 
 ;; ---- watchdog stubs ------------------------------------------------------------
 ;; Chez's timer-interrupt machinery is not ported yet (step 5): the watchdog

@@ -81,6 +81,15 @@ namespace SchemeHost {
     SchemeValue call2(SchemeValue fn, SchemeValue a1, SchemeValue a2);
     SchemeValue call3(SchemeValue fn, SchemeValue a1, SchemeValue a2, SchemeValue a3);
 
+    // is a top-level binding present? (the loader's sanity checks)
+    bool isBound(const char* name);
+
+    // load a file of forms into the working environment. Chez: the unguarded
+    // load (an error here is fatal, as before). Guile: primitive-load wrapped
+    // in a catch so errors NEVER unwind through C++ frames (they corrupt the
+    // heap otherwise) — returns false and the caller disables scheme.
+    bool evalFile(const char* path);
+
     // ---- backend hook --------------------------------------------------------
     // file to load between the prelude and the defun machinery (Chez: none —
     // its primitives are native; Guile: the compatibility layer)

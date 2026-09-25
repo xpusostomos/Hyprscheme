@@ -115,6 +115,13 @@ namespace SchemeHost {
         return value(Scall3(val(fn), val(a1), val(a2), val(a3)));
     }
 
+    bool isBound(const char* name) {
+        return call1(globalRef("top-level-bound?"), symbol(name)) == True;
+    }
+    bool evalFile(const char* path) {
+        call1(globalRef("load"), stringVal(path));
+        return true; // errors propagate unguarded, as they always have
+    }
     const char* compatFile() {
         return nullptr; // Chez primitives are native; no compatibility layer
     }

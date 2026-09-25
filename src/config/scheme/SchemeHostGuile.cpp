@@ -126,6 +126,27 @@ namespace SchemeHost {
         return value(scm_call_3(val(fn), val(a1), val(a2), val(a3)));
     }
 
+    bool isBound(const char* name) {
+        // a locally-bound variable (not an imported one): the machinery is
+        // defined in the working module, imports don't count
+        return scm_module_local_variable(scm_current_module(),
+                                         scm_from_locale_symbol(name)) != SCM_BOOL_F;
+    }
+    // primitive-load under a catch: a Scheme error must never unwind through
+    // C++ frames (the compositor heap corrupts). The prelude is loaded with
+    // this too — its "unguarded" contract becomes "contained at the host".
+    static SCM loadFileThunk(void* path_) {
+        scm_primitive_load(scm_from_locale_string((const char*)path_));
+        return SCM_BOOL_T;
+    }
+    static SCM loadFileHandler(void*, SCM, SCM) {
+        return SCM_BOOL_F;
+    }
+    bool evalFile(const char* path) {
+        SCM ok = scm_c_catch(SCM_BOOL_T, loadFileThunk, (void*)path,
+                             loadFileHandler, NULL, NULL, NULL);
+        return scm_is_true(ok);
+    }
     const char* compatFile() {
         return "hyprscheme-compat-guile.scm";
     }
