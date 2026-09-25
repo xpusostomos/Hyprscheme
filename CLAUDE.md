@@ -205,8 +205,10 @@ in the wiki's building-the-plugin page.
   asyncs, and FOREIGN CALLS MUST WRAP IN call-with-blocked-asyncs (a
   watchdog escape inside compositor C++ crashed the compositor);
   stderr goes through (fdopen 2 "w") — never open-file "/dev/stderr"
-  (fresh offset overwrites the log). Remaining: soak time, crash-reporter interplay. (The dead-handle
-  drain is DONE: after-gc-hook runs hl--drain-handles! — guarded.) NOTE: plugin LOG() is swallowed by an
+  (fresh offset overwrites the log). Dead-handle drain DONE (after-gc-hook runs hl--drain-handles!,
+  guarded), crash-reporter interplay VERIFIED (kill -SEGV → proper
+  report; guile's init doesn't displace our handlers), 5-minute soak
+  on guile PASS. NOTE: plugin LOG() is swallowed by an
   upstream logger refactor (inline header var — two copies); Guile
   call errors ride fd 2 prints in the host.
 - Rollout decision for defun across the API (only hl-exec! converted).

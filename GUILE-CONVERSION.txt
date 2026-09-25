@@ -282,8 +282,17 @@ Gives up:
      inside the hook), no-ops until the bootstrap defines it (module-
      variable check), and a failing drain reports instead of killing the
      GC trigger. Verified: counting hook fires per gc in the compositor.
-   REMAINING on the Guile path: crash-reporter interplay (step 5,
-   unverified), longer soak, plugin LOG() still swallowed (upstream).
+   - CRASH-REPORTER INTERPLAY VERIFIED (step 5): kill -SEGV against a
+     compositor with the guile plugin loaded routes through the plugin's
+     schemeCrashHandler into Hyprland's CrashReporter — a full report
+     with backtrace is written (frame #2 = scheme-plugin.so, the plugin's
+     own handler). libguile's init adds no SEGV/ABRT displacement; libgc
+     registers one extra RT signal (thread suspension) — harmless.
+     (Baseline without a plugin also reports — Hyprland's own handler.)
+   - 5-MINUTE SOAK ON GUILE: PASS (300s, 156 iterations, 14046 evals,
+     0 errors, 0 crash markers).
+   REMAINING on the Guile path: nothing blocking. Plugin LOG() still
+   swallowed (upstream inline-logger refactor, affects all plugins).
    COMMIT.
 4. GC plumbing swap: marshRoot/SThunkRef -> protect/unprotect (or a
    Scheme-side registry); guardians verified native. COMMIT.

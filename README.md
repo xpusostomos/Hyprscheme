@@ -86,6 +86,8 @@ layouts — silent and bad).
 make install                # plugin, Scheme sources + boot files: ~/.local/lib/hyprscheme
 make install-compositor     # matched compositor: ~/.local/bin/hyprland-scheme
                             # + a session entry in ~/.local/share/wayland-sessions
+make guile && make install  # also builds/installs the Guile artifact
+                            # (scheme-plugin-guile.so; needs guile-3.0 dev)
 ```
 
 `PREFIX` selects the destination (default `~/.local`).
@@ -98,7 +100,11 @@ hl.plugin.load("/home/YOU/.local/lib/hyprscheme/scheme-plugin.so")
 ```
 
 and reload. The plugin loads once, during config processing, before
-the rest of the config runs.
+the rest of the config runs. A second backend artifact,
+`scheme-plugin-guile.so`, installs next to the default — point
+`hl.plugin.load` at either one (both are compiled against the same
+compositor; `hyprctl plugins list` shows the backend in the
+description).
 
 ## Usage
 

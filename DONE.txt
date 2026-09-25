@@ -92,9 +92,13 @@ and TODO.txt's archived sections.)
   after each collection (guarded: early GCs during the bootstrap load
   no-op until the drain exists, and a failing drain can't kill the GC
   trigger). Verified in-compositor: a counting hook fired per gc.
-  Remaining before parity: crash-reporter interplay, longer soak on
-  Guile, plugin LOG() swallowed (upstream issue).
-  Details in GUILE-CONVERSION.txt step 3.
+  Crash-reporter interplay VERIFIED on Guile: a real SIGSEGV delivery
+  routes through the plugin's schemeCrashHandler into Hyprland's
+  CrashReporter — full report with backtrace written (the plugin's
+  handler is installed after scm_init_guile, last-wins; a counting
+  check showed guile's init adds no SEGV/ABRT displacement). 5-minute
+  soak on the guile artifact: PASS (14k evals, 0 errors, 0 crash
+  markers). Remaining: plugin LOG() swallowed (upstream issue).
 
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
