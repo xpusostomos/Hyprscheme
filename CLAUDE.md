@@ -188,7 +188,12 @@ in the wiki's building-the-plugin page.
   `SchemeHost::` and use `SchemeValue` (opaque word). New host ops:
   globalRef/call0-3/registerSymbol/lock/unlock/word/truthy/stringBytes.
   STEP 2 DONE: `SchemeHostGuile.cpp` + `hyprscheme-compat-guile.scm`;
-  `make BACKEND=guile` flips backends. The foreign-procedure shim is
+  The artifacts co-exist: `make` builds scheme-plugin.so (Chez, the
+  default) and `make guile` builds scheme-plugin-guile.so; both install
+  side by side next to the shared .scm machinery (compat-guile is only
+  ever loaded by the Guile host). Switch by pointing the config's
+  hl.plugin.load at either .so, or PLUGIN=scheme-plugin-guile.so
+  tests/run.sh. The foreign-procedure shim is
   DECLARATIVE (no per-function shims): C++ registers typed fn pointers
   via scm_from_pointer; scheme-object crosses the FFI as a raw word.
   STEP 3 DONE: SUITE 12/12 ON GUILE (chez 12/12 unchanged). The

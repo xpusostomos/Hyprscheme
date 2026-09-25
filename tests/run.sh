@@ -11,6 +11,9 @@ set -u
 cd "$(dirname "$0")/.."
 
 BIN=${BIN:-$HOME/.local/bin/hyprland-scheme}
+# the plugin to load: scheme-plugin.so (Chez) or scheme-plugin-guile.so —
+# both install side by side; PLUGIN=scheme-plugin-guile.so tests/run.sh
+PLUGIN=${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin.so}
 FILTER=${1:-}
 WORK=$(mktemp -d /tmp/hyprscheme-test.XXXXXX)
 export WORK
@@ -62,7 +65,7 @@ export HYPRLAND_INSTANCE_SIGNATURE
 if [[ -z $HYPRLAND_INSTANCE_SIGNATURE ]]; then
   echo "FAIL: compositor never became responsive"; tail -20 "$WORK/compositor.log"; exit 1
 fi
-if ! timeout 20 env HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl plugin load "$HOME/.local/lib/hyprscheme/scheme-plugin.so" | grep -q ok; then
+if ! timeout 20 env HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl plugin load "$PLUGIN" | grep -q ok; then
   echo "FAIL: plugin load"; tail -20 "$WORK/compositor.log"; exit 1
 fi
 sleep 1

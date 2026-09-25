@@ -1,4 +1,5 @@
 #include <src/plugins/PluginAPI.hpp>
+#include "SchemeHost.hpp"
 #include <src/debug/crash/CrashReporter.hpp>
 #include <csignal>
 #include <cstring>
@@ -32,7 +33,10 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     Config::Scheme::init();
-    return {"scheme", "Chez Scheme scripting for Hyprland", "Chris", "1.0"};
+    // both artifacts register the name "scheme" (Hyprland keys plugins by
+// handle, the name is hyprctl display metadata); the description tells the
+// backends apart
+    return {"scheme", std::string("Scheme scripting for Hyprland [") + SchemeHost::backendName() + "]", "Chris", "1.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

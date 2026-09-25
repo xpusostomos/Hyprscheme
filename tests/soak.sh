@@ -34,9 +34,11 @@ BATCH_EVALS=8      # hyprctl scheme evals per iteration batch
 MAX_WINDOWS=6      # concurrent churn windows
 
 BIN="${BIN:-$HOME/.local/bin/hyprland-scheme}"
+# the plugin to load: scheme-plugin.so (Chez) or scheme-plugin-guile.so
+PLUGIN="${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin.so}"
 [[ -x $BIN ]] || BIN=hyprland-scheme
 command -v "$BIN" >/dev/null 2>&1 || { echo "FAIL: no hyprland-scheme binary (make install-compositor?)"; exit 1; }
-[[ -f $HOME/.local/lib/hyprscheme/scheme-plugin.so ]] || { echo "FAIL: plugin not installed"; exit 1; }
+[[ -f $PLUGIN ]] || { echo "FAIL: plugin not installed"; exit 1; }
 
 WORK=/tmp/hyprscheme-soak.$$
 mkdir -p "$WORK"
@@ -86,7 +88,7 @@ done
 export HYPRLAND_INSTANCE_SIGNATURE
 [[ -n $HYPRLAND_INSTANCE_SIGNATURE ]] || { echo "FAIL: compositor never became responsive"; tail -30 "$CLOG"; exit 1; }
 
-if ! timeout 20 env HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl plugin load "$HOME/.local/lib/hyprscheme/scheme-plugin.so" | grep -q ok; then
+if ! timeout 20 env HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl plugin load "$PLUGIN" | grep -q ok; then
   echo "FAIL: plugin load"; tail -20 "$CLOG"; exit 1
 fi
 sleep 1

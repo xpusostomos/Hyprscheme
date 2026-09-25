@@ -61,6 +61,15 @@ and TODO.txt's archived sections.)
 - Makefile: compositor binary is a plugin prerequisite (rebuild chain
   is automatic).
 
+== INFRASTRUCTURE (both backends co-exist) ==
+- Two artifacts install side by side: scheme-plugin.so (Chez, the
+  default name) and scheme-plugin-guile.so (make guile). The .scm
+  machinery is shared; only hyprscheme-compat-guile.scm is Guile-only
+  (the Chez host never loads it). Plugin metadata shows the backend
+  (SchemeHost::backendName). Harness: PLUGIN=scheme-plugin-guile.so
+  tests/run.sh picks the artifact. Hyprland keys plugins by handle,
+  not name — no collision rejection.
+
 == INFRASTRUCTURE (Guile path, step 1) ==
 - SchemeHost.hpp + SchemeHostChez.cpp: backend-neutral C++ vocabulary
   (~20 ops); SchemeManager/SchemeLayout use only SchemeHost:: and

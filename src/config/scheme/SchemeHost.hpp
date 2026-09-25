@@ -95,6 +95,10 @@ namespace SchemeHost {
     // its primitives are native; Guile: the compatibility layer)
     const char* compatFile();
 
+    // the backend's name, for the plugin metadata ("chez" / "guile") — the
+    // artifacts can be installed side by side and differ only here
+    const char* backendName();
+
     // ---- lifecycle ----------------------------------------------------------
     // C functions become Scheme-callable primitives (Chez: Sregister_symbol;
     // later Guile: gsubr)

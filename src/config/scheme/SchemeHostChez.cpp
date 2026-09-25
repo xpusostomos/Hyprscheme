@@ -122,6 +122,9 @@ namespace SchemeHost {
         call1(globalRef("load"), stringVal(path));
         return true; // errors propagate unguarded, as they always have
     }
+    const char* backendName() {
+        return "chez";
+    }
     const char* compatFile() {
         return nullptr; // Chez primitives are native; no compatibility layer
     }

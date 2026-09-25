@@ -1,7 +1,9 @@
 # Hyprscheme — Chez Scheme scripting for Hyprland, as a plugin.
 #
 #   make               build Chez (PIC, in place) and Hyprland (in place) as
-#                      needed, then the plugin — everything where it lives
+#                      needed, then the plugin (scheme-plugin.so, Chez)
+#   make guile         also build the Guile artifact (scheme-plugin-guile.so;
+#                      needs guile-3.0 dev headers)
 #   make install       install plugin + boot files locally
 #   make install-compositor  also install the compositor as 'hyprland-scheme'
 #   make clean         remove the plugin build products (not chez/hyprland)
@@ -35,28 +37,36 @@ INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
 LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 
-# the .scm machinery files (the backend block below may add to this)
+# the plugin artifacts: scheme-plugin.so (Chez, the default name) and
+# scheme-plugin-guile.so. Both can be installed side by side — the .scm
+# machinery is SHARED (prelude/bootstrap/defun run on both backends;
+# hyprscheme-compat-guile.scm is only ever loaded by the Guile host) —
+# and the compositor loads whichever .so the config points at.
 SCM_FILES = src/config/scheme/hyprscheme-prelude.scm \
             src/config/scheme/hyprscheme-bootstrap.scm \
-            src/config/scheme/hyprscheme-defun.scm
+            src/config/scheme/hyprscheme-defun.scm \
+            src/config/scheme/hyprscheme-compat-guile.scm
 
-# the Scheme backend: SchemeHostChez.cpp (default) or SchemeHostGuile.cpp
-BACKEND ?= chez
-ifeq ($(BACKEND),guile)
-SCHEME_HOST = src/config/scheme/SchemeHostGuile.cpp
+# guile-3.0 cflags are needed to compile SchemeHostGuile.cpp; harmless for
+# the rest (only that file includes libguile headers). Its LIBS stay out of
+# the Chez artifact's link line.
 INCLUDES   += `pkg-config --cflags guile-3.0`
-LIBS       += `pkg-config --libs guile-3.0`
-SCM_FILES  += src/config/scheme/hyprscheme-compat-guile.scm
-else
-SCHEME_HOST = src/config/scheme/SchemeHostChez.cpp
-endif
+GUILIBS     = `pkg-config --libs guile-3.0`
 
-SRC = $(SCHEME_HOST) \
-      src/config/scheme/SchemeManager.cpp src/config/scheme/SchemeLayout.cpp
-OBJ = $(SRC:.cpp=.o) src/plugin-main.o
-TARGET = scheme-plugin.so
+COMMON_OBJS = src/config/scheme/SchemeManager.o src/config/scheme/SchemeLayout.o \
+              src/plugin-main.o
+HOST_CHEZ   = src/config/scheme/SchemeHostChez.o
+HOST_GUILE  = src/config/scheme/SchemeHostGuile.o
+OBJ         = $(COMMON_OBJS) $(HOST_CHEZ) $(HOST_GUILE)
+
+TARGET       = scheme-plugin.so
+TARGET_GUILE = scheme-plugin-guile.so
 
 all: $(TARGET)
+
+# the Guile artifact (needs guile-3.0 dev headers)
+.PHONY: guile
+guile: $(TARGET_GUILE)
 
 # ---- Chez (in place) -------------------------------------------------------
 # The workarea's libkernel.a + boot files are the plugin's inputs. chez's own
@@ -93,15 +103,15 @@ hyprland:
 # the compositor binary is a prerequisite: a rebuilt Hyprland forces a
 # plugin relink (it resolves Hyprland symbols at load time and must stay
 # in sync with the tree it was compiled against)
-ifeq ($(BACKEND),guile)
-# the Guile backend: no Chez kernel, libguile from pkg-config
-$(TARGET): $(OBJ) $(HYPRLAND_SRC)/build/Hyprland
-	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(LIBS)
-else
-$(TARGET): $(OBJ) $(CHEZ_KERNEL) $(HYPRLAND_SRC)/build/Hyprland | $(CHEZ_BOOT)/petite.boot
+# the compositor binary is a prerequisite of both artifacts: a rebuilt
+# Hyprland forces a relink (the plugins resolve Hyprland symbols at load time)
+$(TARGET): $(COMMON_OBJS) $(HOST_CHEZ) $(CHEZ_KERNEL) $(HYPRLAND_SRC)/build/Hyprland | $(CHEZ_BOOT)/petite.boot
 	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(CHEZ_KERNEL) \
 	    $(CHEZ_WORK)/lz4/lib/liblz4.a $(LIBS)
-endif
+
+# the Guile artifact: no Chez kernel, libguile from pkg-config
+$(TARGET_GUILE): $(COMMON_OBJS) $(HOST_GUILE) $(HYPRLAND_SRC)/build/Hyprland
+	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(LIBS) $(GUILIBS)
 
 src/plugin-main.o: plugin-main.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
@@ -115,9 +125,11 @@ install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 $(SCM_FILES) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-ifeq ($(BACKEND),chez)
 	install -m 644 $(CHEZ_BOOT)/petite.boot $(CHEZ_BOOT)/scheme.boot $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-endif
+	@if [ -f $(TARGET_GUILE) ]; then \
+	    install -m 644 $(TARGET_GUILE) $(DESTDIR)$(PREFIX)/lib/hyprscheme/; \
+	    echo "Guile artifact installed: $(TARGET_GUILE)"; \
+	fi
 	@echo ""
 	@echo "Plugin installed: $(DESTDIR)$(PREFIX)/lib/hyprscheme/scheme-plugin.so"
 	@echo "Load into a compositor built from $(HYPRLAND_SRC):"
@@ -142,9 +154,9 @@ install-compositor: $(TARGET) $(HYPRLAND_SRC)/build/Hyprland
 	@echo "hyprland-scheme installed at: $(DESTDIR)$(PREFIX)/bin/hyprland-scheme"
 
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(OBJ) $(TARGET) $(TARGET_GUILE)
 
 distclean: clean
 	rm -rf build
 
-.PHONY: all chez hyprland install install-compositor clean distclean
+.PHONY: all chez hyprland guile install install-compositor clean distclean

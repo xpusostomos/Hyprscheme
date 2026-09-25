@@ -189,6 +189,9 @@ namespace SchemeHost {
                              loadFileHandler, NULL, NULL, NULL);
         return scm_is_true(ok);
     }
+    const char* backendName() {
+        return "guile";
+    }
     const char* compatFile() {
         return "hyprscheme-compat-guile.scm";
     }
