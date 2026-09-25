@@ -179,6 +179,22 @@
                          0))))
     ticks))
 
+;; ---- defun -----------------------------------------------------------------------
+;; Chez exposes no way to ask a closure for its formals, so hyprscheme-defun.scm
+;; (loaded ONLY on Chez — SchemeManager skips it here) captures arglists and
+;; docstrings into a table for describe-function. Guile's define does this
+;; natively: a leading string literal in the body becomes the procedure's
+;; documentation and the formals are introspectable, so on this backend defun is
+;; just define, with the formals spliced into the lambda —
+;; (defun f (x . rest) "doc" body...) lands as (define (f x . rest) "doc"
+;; body...), and describe-function does not exist here (the REPL's ,describe
+;; and procedure-documentation take its place).
+(define-syntax defun
+  (lambda (x)
+    (syntax-case x ()
+      [(_ name formals body ...)
+       #'(define (name . formals) body ...)])))
+
 ;; ---- define-record-type ----------------------------------------------------------
 ;; Chez's R6RS shorthand: (define-record-type name (fields f ...)) generates
 ;; make-<name>, <name>? and <name>-<field> accessors. Guile's srfi-9 needs the

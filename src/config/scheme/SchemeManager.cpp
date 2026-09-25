@@ -5331,8 +5331,13 @@ namespace Config::Scheme {
         }
 
         // phase 2: the defun machinery (defines `defun`, which phase 3's
-        // converted functions use) ...
-        SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm("hyprscheme-defun.scm").c_str()));
+        // converted functions use) — Chez only: Chez cannot introspect
+        // procedures, so the machinery records arglists/docstrings for
+        // describe-function. On Guile (the only backend with a compat
+        // layer) defun is aliased onto plain define there and the machinery
+        // is unnecessary — the REPL's ,describe does the same for free.
+        if (!SchemeHost::compatFile())
+            SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm("hyprscheme-defun.scm").c_str()));
         // phase 3: ... then the API
         SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm("hyprscheme-bootstrap.scm").c_str()));
 

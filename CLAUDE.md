@@ -53,8 +53,9 @@ via `dladdr` on a known symbol, with fallbacks to the source tree
    bare `load`). An error here can kill the process, which is why it
    must stay "verified, static".
 2. `hyprscheme-defun.scm` — through guarded `hl--load`: the defun
-   machinery. Must load **before** the bootstrap because converted API
-   functions use `defun`.
+   machinery (**Chez only**; on Guile the compat layer aliases `defun`
+   onto define instead). Must load **before** the bootstrap because
+   converted API functions use `defun`.
 3. `hyprscheme-bootstrap.scm` — the API itself, guarded; ends with
    `(set! hl--ready #t)`. If anything fails, `hl--ready` stays `#f`
    and the C++ side disables scheme loudly.
@@ -119,13 +120,16 @@ cross-generation bridge.
   dispatching cond.
 - Binds validate exclusivity (long-press/release vs repeat conflicts)
   at the Scheme level; hyprland does not.
-- defun machinery (opt-in): `(defun name formals "doc" body...)`
+- defun machinery (**Chez only**): `(defun name formals "doc" body...)`
   captures arglist verbatim + docstring + source file into
   `hl--function-table`; `(describe-function 'f)` renders text through
-  a hook list (`hl--describe-hooks`, help-fns pattern). Only `hl-exec!`
-  is converted so far — the rest awaits Chris's verdict. Plain defines
-  describe as "no recorded arglist" (documented limitation: Chez can't
-  introspect closure formals).
+  a hook list (`hl--describe-hooks`, help-fns pattern). describe-function
+  is Chez-only: on Guile `hyprscheme-defun.scm` is not loaded at all —
+  the compat layer aliases `defun` onto plain define (Guile stores a
+  leading string literal in the body as the procedure's documentation,
+  and formals are introspectable) and Guile's own `,describe` takes
+  over. Chez still can't introspect closure formals, so plain defines
+  describe as "no recorded arglist" there (documented limitation).
 
 ## Docs (wiki lives in `../Hyprscheme.wiki`)
 
@@ -211,7 +215,9 @@ in the wiki's building-the-plugin page.
   on guile PASS. NOTE: plugin LOG() is swallowed by an
   upstream logger refactor (inline header var — two copies); Guile
   call errors ride fd 2 prints in the host.
-- Rollout decision for defun across the API (only hl-exec! converted).
+- defun rollout across the API is DONE (every public function is a defun
+  with a docstring; private `--` functions stay plain defines). On Guile
+  defun is an alias for define and the docstrings are Guile-native.
 - doc-name spellcheck for the wiki (balance checker exists).
 - Interactive REPL.
 - Event self-removal-during-fire test.
