@@ -1,0 +1,71 @@
+DONE.txt — implemented and verified. The authoritative "it is done"
+ledger; when something is finished it moves here. (TODO.txt keeps only
+genuinely open items; deeper notes per batch live in the git history
+and TODO.txt's archived sections.)
+
+== CORE API (complete, at upstream Lua parity) ==
+- Handle model: windows, workspaces, monitors, groups, layer surfaces,
+  notifications, timers, binds, rules, gestures, events — all opaque
+  records with identity (=?) and staleness (alive?), no global
+  registries (counted locks / guardians; destruction-driven release).
+- Window/workspace/monitor query+action surface (full field parity:
+  title, class, address, pid, geometry, state toggles, tags, layout
+  info, group ops, monitor rules + hardware getters).
+- Binds: token lists (hl-kbd/hl-key generators), all flags, devices,
+  submaps (define/activate/exit/universal), mouse/click/drag, auto-
+  consuming result protocol (ok/pass-event/request-release/error).
+- Events: the full compositor event bus wired (34 events).
+- Rules: window/layer/workspace rules with runtime enable/disable.
+- Exec: (hl-exec! cmd . effects) — one function, plist rule object.
+- Timers: one-shot + repeating, live pause/retime/cancel.
+- Notifications: one-shot + full live-object surface (text/timeout/
+  color/icon/font/pause/dismiss).
+- Gestures: typed action values — hl-make-{workspace-swipe,move,resize,
+  close,scroll-move,float,fullscreen,special,cursor-zoom}-gesture +
+  hl-make-custom-gesture (start/update/finish); hl-gesture-add! returns
+  a handle; removal by spec. Documented: bind-gestures.md.
+- Custom layouts: recalculate/resize/window-open/window-close/layout-msg
+  callbacks; resize falls back to recalculate; errors contained.
+- Device config (hl-device-add!), permissions, animations, monitors,
+  workspace rules, exec with rule object, screenshare/keyboard-key.
+- hl-state (cross-reload state; the one accepted extension) with
+  remove!.
+
+== INFRASTRUCTURE ==
+- Scheme machinery in real files: hyprscheme-{prelude,bootstrap,defun}.scm
+  in src/config/scheme/, installed next to the plugin, read from disk at
+  startup (plugin dir via dladdr; source tree + HYPRSCHEME_SCM_DIR as
+  dev overrides). No embedded blobs; writeSchemeFile is gone.
+- defun machinery (opt-in, one demo conversion so far): defun macro
+  captures the arglist VERBATIM (syntax-case; pattern vars named
+  formals/docstring so 'args/'doc stay literal) + docstring + source
+  file (hl--load-source parameter, bound by the prelude's file loader)
+  into hl--function-table (eq-hashtable, persistent env).
+  (describe-function 'f) -> text; hl--describe-hooks for later layers.
+- hyprctl scheme eval channel; per-generation environments (fresh env
+  per reload, persistent API layer); watchdog (config-settable budget);
+  crash-reporter integration; HYPRSCHEME_CONFIG override.
+- Modifiers: mods are token lists everywhere (hl-kbd/hl-key generate
+  them); no string parsing inside the API. Terminal dash = pure mod
+  list ((hl-kbd "C-M-")).
+- Exec: single (hl-exec! cmd . rules); no shell/raw split, no execvp.
+
+== TESTS + TOOLING ==
+- tests/run.sh: 12-file suite, 12/12 green against a nested
+  compositor; t-coverage fails if a public API lacks a test.
+- tests/soak.sh [SECONDS]: sustained-load soak (live window pool,
+  custom layout under load, event/timer/bind/gesture churn); SOAK_TRACE
+  per-eval tracing; logs to /tmp/hyprscheme-soak-last/.
+- Wiki (../Hyprscheme.wiki): full reference incl. building-the-plugin
+  page; doc-example test runs every ```scheme block.
+- Makefile: compositor binary is a plugin prerequisite (rebuild chain
+  is automatic).
+
+== OPEN (the short list, also in TODO.txt) ==
+- defun rollout decision: hl-exec! is the sample; converting the rest
+  of the API (and defcustom, describe-variable) awaits the user's look.
+- Doc-name spellcheck for the wiki (balance checker exists, name check
+  doesn't).
+- Interactive REPL; editor completion stub (decision: no .lua-style
+  stub — no consumer for it in Scheme-land).
+- Event self-removal-during-fire test.

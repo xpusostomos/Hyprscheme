@@ -1,0 +1,21 @@
+Hyprscheme extensions backlog — APIs BEYOND upstream Lua parity
+(the standing rule: the core API provides what Lua provides. Everything in
+this file is a deliberate extension and must justify itself separately.)
+
+== WORKSPACE GROUPS (IMPLEMENTED 2026-09-22 — moved to core, was never
+  an extension) ==
+The original 2026-09-20 note wrongly claimed "Lua has only groupCount".
+  Upstream exposes workspace.groups/get_groups returning full LuaGroup
+  objects (members/size/current/current_index/locked/denied/add/remove).
+  The implementation is in core (hl-workspace-groups + hl-group record
+  family — see TODO.txt). This file was the wrong home for it all along;
+  the entry dies here.
+
+== CROSS-RELOAD STATE (accepted extension, 2026-09-22) ==
+hl-state-set!/ref/keys/remove! — a Hyprscheme extension beyond parity:
+  upstream Lua has NO cross-reload state (its whole Lua world is rebuilt
+  per reload). Justification: without it a Scheme config has no way to
+  keep ANYTHING across a reload (files aside), and the test suite leans
+  on it (api-unload flag, proto-ticks). Per Chris: fine for tests, not
+  to be leaned on by core features. Remove! added 2026-09-22; docs in
+  scheme-utilities.md ("Cross-reload state", extension status stated).

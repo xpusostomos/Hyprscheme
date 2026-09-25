@@ -1,0 +1,227 @@
+GUILE-CONVERSION.txt — the Chez → Guile investigation (Sep 2026)
+
+Everything below was VERIFIED LIVE on Guile 3.0.11 (the machine has
+guile + guile-3.0.pc). Scratch probes live in /tmp/guile-spike,
+/tmp/guile-gc.cpp, /tmp/guile-defun.scm; do not trust claims not
+backed by a probe. Nothing in the repo changed for this file.
+
+WHY: Chris is weighing whether Chez was the wrong extension-language
+choice — Guile has a much bigger third-party/community ecosystem.
+Outcome of the investigation: migration is doable, mostly mechanical,
+and the plan below starts by splitting generic vs Chez-specific code
+WHILE STILL RUNNING CHEZ, then builds an alternate backend, committing
+at each point so we can move backwards.
+
+==================================================================
+1. WHAT ACTUALLY SPLITS (quantified)
+==================================================================
+
+C++ side (SchemeManager.cpp + SchemeLayout.cpp + SThunkRef.hpp):
+- 686 Chez C-API call sites, but only ~15 DISTINCT functions:
+  Sregister_symbol (298 sites), Sfalse/Strue, Sstring_to_symbol,
+  Sstring/Sstring_utf8, Stop_level_value, Scall0..3, Sfixnump,
+  Sboolean_value, marshRoot/marshRelease/SThunkRef (87 lines).
+- => the whole C++ port funnels through a thin host abstraction of
+  ~15 ops (eval string/file, register function, call closure, catch,
+  box/unbox). Nothing else in the C++ side knows Chez exists.
+
+Scheme side (the 3 .scm files):
+- hyprscheme-bootstrap.scm: 299 foreign-procedure declarations
+  (153 typed scheme-object, 146 plain int/string/double) + the
+  entire hl-* API which is plain portable Scheme (~2000 lines).
+- prelude/defun: dialect surface is small (see table below).
+
+The API layer (handles, binds, rules, events, gestures, layouts) is
+backend-agnostic by construction — it does not need rewriting.
+
+==================================================================
+2. GUILE FFI — verified working (spike /tmp/guile-spike)
+==================================================================
+
+All four plugin-shaped mechanics passed:
+
+a. C++ -> Scheme primitive registration: scm_c_define_gsubr (analog of
+   Sregister_symbol). All args arrive as SCM; C++ unboxes
+   (scm_to_int/scm_to_locale_string/...).
+b. C++ calling Scheme closures: scm_call_0/1/...; errors contained
+   from C++ via scm_c_catch (the hl--report analog works).
+c. Typed Scheme->C FFI: (use-modules (system foreign)) then
+   (pointer->procedure RET-TYPE (dynamic-func "name" handle)
+    (list ARG-TYPES...)) — 1:1 replacement for plain-typed
+   foreign-procedure. int/double/string all worked.
+d. Embedding in a shared lib: works (that is the plugin's shape).
+
+The 299 foreign-procedure declarations split into two kinds:
+- 146 plain-typed: mechanical pointer->procedure rewrite (1:1), OR
+  also make them gsubrs for uniformity.
+- 153 scheme-object-typed (all the handle/record APIs): NO Guile FFI
+  type exists for SCM. These become gsubrs — ~153 thin unboxing shims
+  in C++ (mechanical; scm_to_* on entry, wrap in SCM on return).
+  Uniform alternative: ALL 298 as gsubrs; Scheme-side foreign
+  declarations then just disappear (gsubr = a normal binding).
+
+GC protection for C++-held values (the marshRoot analog): verified —
+scm_gc_protect_object / scm_gc_unprotect_object. C++-held closures
+survived 50 forced GC cycles, stayed callable from both C++ and
+Scheme-side gsubr calls, state advanced correctly. GOTCHA LEARNED:
+protecting an immediate (a fixnum) corrupts GC state and later
+SIGILLs the process — protect heap objects only. SThunkRef/marshRoot
+map onto this directly.
+
+==================================================================
+3. THE THINGS I CALLED "GENUINELY HARD" — RESEARCHED, MOSTLY DEMOTED
+==================================================================
+
+i. Generation model (copy-environment) — WAS LISTED HARD, IS NOT.
+   Guile's environment objects are modules, and (guile) exports the
+   full manipulation toolbox: make-fresh-user-module, module-define!,
+   module-for-each, module-set!, module-use!, set-current-module,
+   interaction-environment. There is no one-call copy-environment,
+   but a 10-line helper reproduces Chez semantics exactly, ALL SIX
+   properties verified live:
+     1. generation code sees the persistent API
+     2. user definitions stay in the generation
+     3. set! inside a generation works, does NOT leak back
+        (fresh locations, shared values — same as Chez)
+     4. generations independent of each other
+     5. mutable values shared across the copy (hl--state bridge)
+   (define (copy-module src)
+     (let ((dst (make-fresh-user-module)))
+       (module-for-each (lambda (sym var)
+                          (module-define! dst sym (variable-ref var)))
+                        src)
+       dst))
+   TRAP: the naive Guile-native design — fresh module that
+   module-use!s the API interface — has WRONG semantics: used
+   interfaces share variable locations, so set! in a generation
+   leaks into the persistent API. Use the explicit copy.
+   Work remaining: helper + rewrite of hl--reset + the load/eval
+   shadows. Not a redesign.
+
+ii. Guardians — WAS LISTED HARD, IS NOT. make-guardian EXISTS in
+   Guile (verified), plus weak tables. The handle-reaping design
+   carries over nearly as-is.
+
+iii. GC plumbing — verified above (scm_gc_protect_object).
+
+iv. defun machinery — verified: Guile's expander substitutes pattern
+   variables INSIDE (quote ...) in templates IDENTICALLY to Chez
+   (the exact production macro from hyprscheme-defun.scm ran
+   unchanged on Guile; metadata captured correctly: 'args → the
+   arglist, 'doc → the docstring). syntax-case is supported.
+   Re-verify describe-function end-to-end during migration, but no
+   rework expected.
+
+v. Watchdog — the real mechanism today is Chez's timer interrupts
+   (set-timer / timer-interrupt-handler / current-time /
+   time-nanosecond) in the prelude's hl--wd-enter/exit. Guile's
+   equivalent is sigaction + Guile asyncs: a SIGALRM handler throws
+   and catch unwinds a TIGHT infinite Scheme loop — verified live
+   (asyncs deliver at procedure-entry safe points, and the VM hits
+   them in a self-recursive loop). Same recovery semantics via
+   call/cc escape. Chez's time functions map to (current-time).
+   Foreign calls remain non-interruptible on both backends (C++
+   log-only watchdog thread stays as the backstop).
+
+vi. Crash-reporter signal interplay — the ONE genuinely unverified
+   item. Guile installs its own signal handlers (notably a SIGSEGV
+   handler for stack-overflow detection; libgc may use internal
+   signals). Today's plugin re-installs handlers to route crashes to
+   Hyprland's CrashReporter::createAndSaveCrash. Must re-verify the
+   coexistence on Guile during migration; not spike-testable.
+
+==================================================================
+4. DIALECT MAPPING (counts from the current sources)
+==================================================================
+
+| Chez                         | Guile                                    | count |
+|------------------------------|------------------------------------------|-------|
+| foreign-procedure (299)      | gsubrs (scheme-object) or pointer->procedure (plain-typed); declarations DELETED | 299 |
+| errorf                       | error + format                           | 89 |
+| #!eof                        | (eof-object)  — NOTE: Guile's reader treats `#!...!#` as a BLOCK COMMENT, so `#!eof` is a read error! | 10 |
+| andmap                       | and-map                                  | 3 |
+| list*                        | cons*                                    | 2 |
+| make-eq-hashtable/hashtable-*| (rnrs hashtables) — works unchanged      | ok |
+| guard                        | (ice-9 exceptions) import; works         | 17 |
+| define-record-type           | native (srfi-9 syntax identical)         | 10 |
+| make-parameter/parameterize  | native                                   | 3 |
+| dynamic-wind                 | native                                   | 2 |
+| exact->inexact/inexact->exact| native                                   | 28 |
+| string-index                 | (srfi srfi-13) same signature            | 2 |
+| copy-environment             | copy-module helper (see above)           | 1 |
+| make-guardian                | make-guardian (native!)                  | 1 |
+| set-timer/timer-interrupt-handler/current-time (watchdog) | sigaction + asyncs + (current-time) | watchdog block |
+| interaction-environment      | native (returns current module)          | 2 |
+| set-timer 0 / hl--wd-*       | sigaction SIGALRM + throw/catch, call/cc escape | watchdog |
+| syntax-case defun            | works IDENTICALLY (verified)             | 1 |
+
+Also discovered: Guile's reader opens a block comment at `#!` — any
+user config using Chez-style `#!optional`/`#!key`/`#!rest` lambda
+keywords would silently comment things out. Our codebase uses NO
+lambda-list keywords (only the 10 `#!eof`s), but this is a user-config
+landmine to document in the wiki if we move.
+
+Also: GUILE_AUTO_COMPILE=0 for tests (avoid ~/.cache/guile writes in
+nested-test environments; observed the cache write during probing).
+
+==================================================================
+5. TRADE-OFFS (what Guile buys, what we give up)
+==================================================================
+
+Buys:
+- Batteries: srfi-1/13/69, ice-9 modules, regex, guile-json etc;
+  official embedding documentation; bigger community. (For THIS
+  program the actual consumption would be modest — the hl-* API is
+  the library — but user-written helper libraries become plausible.)
+- The build SHRINKS: no PIC kernel, no boot files, no BUILDCHEZ.md,
+  no in-place Chez tree. `pkg-config guile-3.0` — same pattern as the
+  lua55 we already consume for Hyprland's config.
+- 299 foreign-procedure declarations deleted.
+
+Gives up:
+- Self-containment: today the plugin statically embeds its
+  interpreter; with Guile it depends on the system's libguile-3.0 +
+  its runtime modules. This matches how Hyprland consumes liblua, but
+  it is a different deployment model. Chez speed is also lost (Guile 3
+  JIT is decent; irrelevant for config scripting).
+- ABI stability: libguile-3.0 soname is stable within 3.0.x; 4.0 will
+  break the C API (new rebuild, like Hyprland header churn).
+- License: LGPL vs Chez's Apache (footnote, not a blocker).
+
+==================================================================
+6. MIGRATION PLAN (commit at each point, per Chris)
+==================================================================
+
+1. C++ host abstraction FIRST, while still on Chez: a thin
+   SchemeHost interface (~15 ops: init, eval string/file, register
+   function, call closure N-ary, catch, box/unbox, datum-to-string).
+   Port SchemeManager/Layout onto it with ZERO behavior change; suite
+   stays 12/12. COMMIT.
+2. Guile backend implementing the same interface (SchemeGuile.cpp),
+   linked via pkg-config guile-3.0; `make BACKEND=guile` selects it.
+   Both backends coexist. gsubr shims for all 298 registered
+   functions (153 need real unboxing, rest trivial). Suite green on
+   both. COMMIT.
+3. Scheme-side port: copy-module helper replaces copy-environment in
+   hl--reset; load/eval shadows target modules; dialect renames per
+   the table; the 10 #!eof; errorf; andmap; list*; imports at file
+   tops (rnrs hashtables, ice-9 exceptions, srfi-13). defun verified
+   — no rework needed beyond re-running its tests. COMMIT.
+4. GC plumbing swap: marshRoot/SThunkRef -> protect/unprotect (or a
+   Scheme-side registry); guardians verified native. COMMIT.
+5. Watchdog port: set-timer/timer-interrupt-handler -> sigaction
+   SIGALRM + asyncs + call/cc escape; C++ log thread unchanged.
+   Crash-reporter interplay re-verified here (the open item).
+   COMMIT.
+6. Build/install: drop BUILDCHEZ.md, CHEZ_DIR, boot files, PIC
+   kernel; pkg-config guile-3.0; keep .scm-files-next-to-plugin
+   design (backend-independent). Tests + soak through the suite.
+   COMMIT.
+
+The 12-file suite + soak harness are backend-agnostic and carry the
+whole migration — they are why this is tractable.
+
+Size estimate: steps 3-4 mechanical days; step 2 a few days; steps 1
+and 5 hold the unknowns. Risk profile better than first reported
+(two of the three original "hard" items turned out portable with a
+small helper, verified above).

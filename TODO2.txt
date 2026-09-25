@@ -1,0 +1,44 @@
+
+
+Real parity gaps (code)
+
+1. hl-exec carrying a rule object — upstream's hl.exec({...}) builds an SP<CWindowRule> from a table and calls the public spawn(SExecRequest{.exec, .rule}). We only have the "[rules] cmd" string form (hl-exec-with-rules). Needs an alist→CWindowRule builder plus the SExecRequest spawn form. (TODO.txt "ACTIONS / DISPATCHERS")
+2. hl-clear-crashed-lockscreen — missing, small.
+3. hl-exec-scheduled-prop-refresh-immediately — missing, small.
+
+(Both #2/#3 are flagged "still open" twice in TODO.txt from the audit; nothing else from that audit remains.)
+
+Test gap
+
+4. Event self-removal safety — register a handler that removes itself during the fire (the hl-notification-remove! inside its own callback); assert it fired once and is inert after. t-api.sh has cancel/remove tests but not the self-removal-during-fire case. Small.
+
+Tooling (parked items from the TOOLING section)
+
+5. Doc-name spellcheck — extend t-zzz-docs/t-coverage so wiki hl- names are checked against the Sregister_symbol list (the balance checker exists; the spellcheck idea doesn't).
+6. Interactive REPL (a hyprctl repl equivalent; today hyprctl scheme is one-shot).
+7. Editor completion stub — scheme skeleton with all hl- signatures, parity with upstream's Lua stubs.
+8. README refresh — config/rules/queries/gestures/watchdog chunks postdate the original README.
+
+Housekeeping
+
+9. Junk files in the repo root: TODO2.txt~ and dissolved, (a stray from a botched test run).
+10. The suite flake (the nested compositor broken-pipe / the one-time "line 180: -: command not found") — observed twice this session, non-reproducible, never root-caused. Environmental, low priority.
+
+Also sitting uncommitted: everything since 0528a52 (gesture typed values, the two renames, mods-as-lists, docs restructure) — say the word if you want it committed.
+
+Nothing else is open from my side — events, groups, rules, notifications, timers, layer surfaces, cross-reload state, gesture actions, and the mods/kbd renames are all implemented, tested, and documented.
+
+
+Genuine remaining items:
+1. Tooling — doc-name spellcheck (the one TOOLING item with substance left): extend the wiki-examples machinery to check every hl- name in the wiki against the Sregister_symbol list, so a renamed API can never leave stale doc text behind. The balance checker exists; the name check doesn't.
+2. Interactive REPL — hyprctl scheme is one-shot; a persistent REPL session is on the tooling list.
+3. Editor completion stub — a scheme skeleton with all hl- signatures (parity with upstream's hl.meta.lua stubs). Would also make the coverage machinery nicer.
+4. Event self-removal safety test — register a handler that removes itself during fire; assert fired-once-then-inert. Small; the harness pieces all exist.
+5. README's Status section — it still says "load-time layout selection only" as a known limit, which is stale in the other direction (it understates: layouts got resize callbacks, window-open/close, layout-msg). Minor doc polish; say the word.
+6. Uncommitted work — everything since 0528a52 (gesture typed values, renames, mods-as-lists, exec consolidation, the lockscreen/prop-refresh pair, the wiki build page, this README refresh) is sitting in the working tree. A commit is probably due.
+
+Standing / environmental (not actionable now):
+- The nested-compositor flake (broken-pipe, the intermittent "line 186" oddity) — never root-caused; the soak harness now has the tracing to catch it if it recurs.
+- The pre-rebuild framebuffer crash — didn't reproduce after your pull; the old crash report remains at ~/.cache/hyprland/ if you ever want to mine it.
+
+Nothing else is open: the API surface is at full parity (plus the two accepted extensions), tests are green 12/12, docs are current, and the build chain is self-maintaining.

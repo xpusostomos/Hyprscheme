@@ -301,7 +301,7 @@
 ;; The API's one convention for named fields: a flat "keyword" list
 ;;   'release #t 'description "x"
 ;; — the same shape Guile uses for #:keyword arguments. A MISSING value
-;; reports the DEFAULT; pass #!eof when absence must be told apart from an
+;; reports the DEFAULT; pass (eof-object) when absence must be told apart from an
 ;; explicit #f (an option that was given the value #f).
 
 (define (hl--plist-cdr l)
@@ -312,7 +312,7 @@
         tail)))
 
 ;; public: read a field out of any plist (gesture events, config tables);
-;; missing key reports DEFAULT — pass #!eof to tell absent apart from #f
+;; missing key reports DEFAULT — pass (eof-object) to tell absent apart from #f
 (define (hl-plist-get plist key . default)
   (apply hl--plist-get plist key default))
 
@@ -1761,21 +1761,21 @@ the C++ layer parses it on the plain path. Returns the new pid."
                 (errorf 'hl-gesture-add! "unknown field ~a" k)))
             (let loop ((l fields) (acc '()))
               (if (null? l) (reverse acc) (loop (cddr l) (cons (car l) acc)))))
-  (let* ((fingers   (hl--plist-get fields 'fingers #!eof))
-         (direction (hl--plist-get fields 'direction #!eof))
-         (action    (hl--plist-get fields 'action #!eof))
+  (let* ((fingers   (hl--plist-get fields 'fingers (eof-object)))
+         (direction (hl--plist-get fields 'direction (eof-object)))
+         (action    (hl--plist-get fields 'action (eof-object)))
          (mods      (hl--plist-get fields 'mods '()))
          (scale     (hl--plist-get fields 'scale 1.0))
          (inhibit   (hl--plist-get fields 'disable-inhibit #f)))
-    (cond ((eq? fingers #!eof)
+    (cond ((eq? fingers (eof-object))
            (errorf 'hl-gesture-add! "field 'fingers' is required"))
           ((not (and (integer? fingers) (exact? fingers) (>= fingers 2)))
            (errorf 'hl-gesture-add! "field 'fingers' must be an integer >= 2"))
-          ((eq? direction #!eof)
+          ((eq? direction (eof-object))
            (errorf 'hl-gesture-add! "field 'direction' is required"))
           ((not (string? direction))
            (errorf 'hl-gesture-add! "field 'direction' must be a string"))
-          ((eq? action #!eof)
+          ((eq? action (eof-object))
            (errorf 'hl-gesture-add! "an action is required — 'action (hl-make-...-gesture ...)"))
           ((not (hl-gesture-action? action))
            (errorf 'hl-gesture-add! "field 'action' must be an hl-gesture-action (see the hl-make-*-gesture constructors)"))
@@ -2263,8 +2263,8 @@ the C++ layer parses it on the plain path. Returns the new pid."
   v)
 
 (define (hl-state-ref k . default)
-  (let ((v (hl--plist-get hl--state k #!eof)))
-    (if (eq? v #!eof) (if (null? default) #f (car default)) v)))
+  (let ((v (hl--plist-get hl--state k (eof-object))))
+    (if (eq? v (eof-object)) (if (null? default) #f (car default)) v)))
 
 (define (hl-state-keys)
   (let loop ((l hl--state) (acc '()))
