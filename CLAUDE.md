@@ -44,9 +44,15 @@ Lua feature has a `hl-*` equivalent.
   Hyprland, plugin). A mismatched pairing either fails loud (renamed
   symbol) or misbehaves silently (changed class layout). Never run the
   plugin against a Hyprland built from a different tree.
-- Packaging: `chez/packaging/PKGBUILD` (frozen Chez variant) builds a
-  pinned Hyprland + Chez plugin and ships the matched compositor as
-  `hyprland-scheme`. Guile packaging is still open.
+- Packaging: `packaging/PKGBUILD` — Arch package building a pinned
+  Hyprland + the Guile plugin (installs via the Makefile's DESTDIR
+  rule) and ships the matched compositor as `hyprland-scheme`. The
+  frozen Chez variant lives at `chez/packaging/PKGBUILD`.
+- `tools/syntax-check.scm` — after ANY scripted edit to a machinery
+  `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs
+  Guile's own reader over the files and reports read errors with the
+  reader's file:line:col (exit 1 on failure). Catches the
+  paren/quote/docstring-corruption class of bug at the edit site.
 
 ## How the plugin loads Scheme
 
@@ -56,8 +62,8 @@ via `dladdr` on a known symbol, with fallbacks to the source tree
 (`SOURCE_DIR` compile define) and `HYPRSCHEME_SCM_DIR` env var:
 
 1. `hyprscheme-compat-guile.scm` — the Guile compat layer, loaded first
-   (before the prelude): defines `load` procedurally, aliases `defun`
-   onto define, and everything else the Chez-native machinery assumed.
+   (before the prelude): defines `load` procedurally and everything else
+   the Chez-native machinery assumed.
 2. `hyprscheme-prelude.scm` — error plumbing, loaded through the
    guarded `hl--load`. An error here disables scheme, which is why it
    must stay "verified, static".
@@ -129,16 +135,12 @@ cross-generation bridge.
   dispatching cond.
 - Binds validate exclusivity (long-press/release vs repeat conflicts)
   at the Scheme level; hyprland does not.
-- defun machinery (**Chez only**): `(defun name formals "doc" body...)`
-  captures arglist verbatim + docstring + source file into
-  `hl--function-table`; `(describe-function 'f)` renders text through
-  a hook list (`hl--describe-hooks`, help-fns pattern). describe-function
-  is Chez-only: on Guile `hyprscheme-defun.scm` is not loaded at all —
-  the compat layer aliases `defun` onto plain define (Guile stores a
-  leading string literal in the body as the procedure's documentation,
-  and formals are introspectable) and Guile's own `,describe` takes
-  over. Chez still can't introspect closure formals, so plain defines
-  describe as "no recorded arglist" there (documented limitation).
+- Documentation: every public function is a plain `define` whose body
+  starts with a Guile docstring (leading string literal; Guile stores
+  it as the procedure's documentation and introspects formals — the
+  REPL's `,describe` / `procedure-documentation` surface it). The defun
+  machinery (arglist capture + describe-function) exists only in the
+  frozen `chez/` tree.
 
 ## Docs (wiki lives in `../Hyprscheme.wiki`)
 
@@ -224,9 +226,9 @@ in the wiki's building-the-plugin page.
   on guile PASS. NOTE: plugin LOG() is swallowed by an
   upstream logger refactor (inline header var — two copies); Guile
   call errors ride fd 2 prints in the host.
-- defun rollout across the API is DONE (every public function is a defun
-  with a docstring; private `--` functions stay plain defines). On Guile
-  defun is an alias for define and the docstrings are Guile-native.
+- defun is fully retired from the main tree: every public function is a
+  plain `define` with a Guile docstring (private `--` functions too).
+  The defun/describe-function machinery is frozen in `chez/` only.
 - doc-name spellcheck for the wiki (balance checker exists).
 - Interactive REPL.
 - Event self-removal-during-fire test.

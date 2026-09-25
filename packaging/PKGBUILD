@@ -1,0 +1,76 @@
+# Maintainer: Chris Bitmead <chris@bitmead.com>
+#
+# Hyprscheme: Guile Scheme scripting for Hyprland.
+#
+# This package ships a Hyprland build from a pinned upstream commit
+# together with the scheme plugin compiled against it, because the
+# plugin resolves Hyprland's own symbols at load time and therefore
+# must match the running compositor's build exactly.
+#
+# It installs as an alternative compositor (hyprland-scheme) so it can
+# coexist with the system Hyprland; launch it via the provided desktop
+# entry or a nested session.
+
+pkgname=hyprscheme
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Guile Scheme scripting for Hyprland (compositor + plugin)"
+arch=(x86_64)
+url="https://github.com/xpusostomos/Hyprscheme"
+license=(BSD)
+depends=(glibc ncurses lz4 zlib libinput wayland xorg-xwayland
+         hyprlang hyprutils hyprcursor hyprgraphics aquamarine
+         polkit-gnome xdg-desktop-portal-hyprland
+         guile)
+makedepends=(git cmake gcc pkg-config meson)
+optdepends=('uwsm: session launcher for the desktop entry'
+            'foot: terminal used by the example config')
+source=("hyprscheme::git+https://github.com/xpusostomos/Hyprscheme"
+        "hyprland-src::git+https://github.com/hyprwm/Hyprland#commit=c26dbf93")
+sha256sums=('SKIP' 'SKIP')
+options=(!strip)
+
+prepare() {
+  cd Hyprscheme
+  # submodules for the vendored trees
+  git -C "$srcdir/hyprland-src" submodule update --init
+}
+
+build() {
+  cd Hyprscheme
+
+  # 1. stock Hyprland (no scheme in-tree) from the pinned commit
+  cmake -B build-hl -S "$srcdir/hyprland-src" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build-hl -j"$(nproc)"
+
+  # 2. the plugin, against the same tree's headers (default target:
+  #    scheme-plugin-guile.so; the interpreter is the system Guile)
+  make HYPRLAND_SRC="$srcdir/hyprland-src"
+}
+
+package() {
+  cd Hyprscheme
+
+  # the plugin + its .scm machinery, via the Makefile's own install rule
+  make install DESTDIR="$pkgdir" PREFIX=/usr
+
+  # the compositor, under its own name so it coexists with the system hyprland
+  install -Dm755 build-hl/build/Hyprland "$pkgdir/usr/bin/hyprland-scheme"
+
+  # session entry for display-manager logins (SDDM/LightDM pick these up);
+  # uwsm users launch via `uwsm start -e hyprland-scheme` instead
+  if [ -f build-hl/systemd/hyprland-uwsm.desktop ]; then
+    sed -e 's|Name=Hyprland (uwsm-managed)|Name=Hyprland (Scheme)|' \
+        -e 's|-D Hyprland hyprland.desktop|-D Hyprland hyprscheme.desktop|' \
+        build-hl/systemd/hyprland-uwsm.desktop \
+        > "$pkgdir/usr/share/wayland-sessions/hyprland-scheme.desktop"
+  fi
+
+  # docs
+  install -Dm644 examples/hyprland.scm \
+    "$pkgdir/usr/share/doc/hyprscheme/examples/hyprland.scm"
+  install -Dm644 README.md \
+    "$pkgdir/usr/share/doc/hyprscheme/README.md"
+}
