@@ -1,7 +1,9 @@
 # Hyprscheme — notes for working in this repo
 
-Hyprscheme embeds Chez Scheme inside Hyprland as a loadable plugin
-(`scheme-plugin.so`). Configs are `~/.config/hypr/hyprland.scm`; the
+Hyprscheme embeds Guile Scheme inside Hyprland as a loadable plugin
+(`scheme-plugin-guile.so`). The original Chez backend is DEPRECATED:
+frozen in `chez/` (see `chez/README.md`), still buildable there, no
+longer developed — don't evolve it. Configs are `~/.config/hypr/hyprland.scm`; the
 companion Lua config (`hyprland.lua`) loads the plugin. The design
 target is parity with upstream Hyprland's Lua scripting API — every
 Lua feature has a `hl-*` equivalent.
@@ -25,22 +27,26 @@ Lua feature has a `hl-*` equivalent.
 
 ## Build environment (in place, no copies/staging)
 
-- `make` builds everything in place: **PIC Chez** (`../ChezScheme`,
-  built with `-fPIC`; details in `BUILDCHEZ.md`), **Hyprland**
-  (`../Hyprland`, built in `<tree>/build`), then the plugin.
+- `make` builds in place: **Hyprland** (`../Hyprland`, built in
+  `<tree>/build`), then the Guile plugin (needs `guile-3.0` dev
+  headers). The Chez build lives frozen in `chez/` with its own
+  Makefile (and `BUILDCHEZ.md`); its paths point at the SAME
+  `../../ChezScheme` / `../../Hyprland` trees.
 - The compositor **binary is a make prerequisite** of the plugin — a
   Hyprland rebuild forces a plugin relink automatically (the plugin
   resolves Hyprland symbols at load time).
-- `make install` → `~/.local/lib/hyprscheme/`: the `.so`, the three
-  `.scm` machinery files, and the Chez boot files.
+- `make install` → `~/.local/lib/hyprscheme/`: the `.so` and the three
+  `.scm` machinery files (prelude, bootstrap, compat-guile). No boot
+  files — the interpreter is the system Guile.
   `make install-compositor` → `~/.local/bin/hyprland-scheme` +
   session `.desktop`. `PREFIX` selects the destination.
 - **If anything starts crashing weirdly, rebuild all three** (Chez,
   Hyprland, plugin). A mismatched pairing either fails loud (renamed
   symbol) or misbehaves silently (changed class layout). Never run the
   plugin against a Hyprland built from a different tree.
-- Packaging: `packaging/PKGBUILD` builds a pinned Hyprland + plugin and
-  ships the matched compositor as `hyprland-scheme`.
+- Packaging: `chez/packaging/PKGBUILD` (frozen Chez variant) builds a
+  pinned Hyprland + Chez plugin and ships the matched compositor as
+  `hyprland-scheme`. Guile packaging is still open.
 
 ## How the plugin loads Scheme
 
@@ -49,16 +55,19 @@ Three real `.scm` files (no embedded blobs — they were extracted out of
 via `dladdr` on a known symbol, with fallbacks to the source tree
 (`SOURCE_DIR` compile define) and `HYPRSCHEME_SCM_DIR` env var:
 
-1. `hyprscheme-prelude.scm` — error plumbing, loaded unguarded (via
-   bare `load`). An error here can kill the process, which is why it
+1. `hyprscheme-compat-guile.scm` — the Guile compat layer, loaded first
+   (before the prelude): defines `load` procedurally, aliases `defun`
+   onto define, and everything else the Chez-native machinery assumed.
+2. `hyprscheme-prelude.scm` — error plumbing, loaded through the
+   guarded `hl--load`. An error here disables scheme, which is why it
    must stay "verified, static".
-2. `hyprscheme-defun.scm` — through guarded `hl--load`: the defun
-   machinery (**Chez only**; on Guile the compat layer aliases `defun`
-   onto define instead). Must load **before** the bootstrap because
-   converted API functions use `defun`.
 3. `hyprscheme-bootstrap.scm` — the API itself, guarded; ends with
    `(set! hl--ready #t)`. If anything fails, `hl--ready` stays `#f`
    and the C++ side disables scheme loudly.
+
+(The deprecated Chez tree loaded prelude → defun → bootstrap; that
+machinery — including the defun/describe-function file — is frozen in
+`chez/`.)
 
 Everything evaluates into the **persistent** environment. Each config
 reload calls `hl--reset`, which copies the interaction environment into
@@ -67,7 +76,7 @@ upstream's per-generation lua_State). `load`/`eval` are shadowed to
 target the current generation. `hl--state` is the one deliberate
 cross-generation bridge.
 
-## Chez-in-C++ cheat sheet (things that are NOT obvious)
+## Chez-in-C++ cheat sheet (frozen `chez/` tree; things that are NOT obvious)
 
 - Only `Scall0..Scall3` exist. More args → pass ONE list and destructure
   in Scheme (the layout dispatchers do exactly this).

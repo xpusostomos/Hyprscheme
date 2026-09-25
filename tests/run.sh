@@ -11,9 +11,12 @@ set -u
 cd "$(dirname "$0")/.."
 
 BIN=${BIN:-$HOME/.local/bin/hyprland-scheme}
-# the plugin to load: scheme-plugin.so (Chez) or scheme-plugin-guile.so —
-# both install side by side; PLUGIN=scheme-plugin-guile.so tests/run.sh
-PLUGIN=${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin.so}
+# the plugin to load: scheme-plugin-guile.so (the maintained backend; Chez is
+# deprecated, frozen in chez/). An absolute path is required — the compositor
+# resolves plugin paths against ITS cwd, not the caller's, so a bare name
+# like PLUGIN=scheme-plugin-guile.so fails to load.
+PLUGIN=${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin-guile.so}
+case $PLUGIN in /*) ;; *) PLUGIN=$PWD/$PLUGIN ;; esac
 FILTER=${1:-}
 WORK=$(mktemp -d /tmp/hyprscheme-test.XXXXXX)
 export WORK
