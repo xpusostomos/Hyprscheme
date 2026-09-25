@@ -18,6 +18,9 @@ export XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state
 # the scheme config reaches the plugin through HYPRSCHEME_CONFIG — dogfoods
 # the override on every run (if the env handling breaks, no test passes)
 export HYPRSCHEME_CONFIG=$XDG_CONFIG_HOME/hypr/hyprland.scm
+# the Guile backend must not auto-compile inside the compositor (slow first
+# load, ~/.cache/guile writes); harmless on the Chez backend
+export GUILE_AUTO_COMPILE=0
 mkdir -p "$XDG_CONFIG_HOME/hypr" "$XDG_STATE_HOME"
 cp tests/config/hyprland.lua "$XDG_CONFIG_HOME/hypr/"
 cp tests/config/hyprland.scm "$XDG_CONFIG_HOME/hypr/"

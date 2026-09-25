@@ -18,6 +18,8 @@
 #include "SchemeHost.hpp"
 
 #include <libguile.h>
+#include <cstring>
+#include <cstdlib>
 
 namespace SchemeHost {
 
@@ -139,7 +141,14 @@ namespace SchemeHost {
         scm_primitive_load(scm_from_locale_string((const char*)path_));
         return SCM_BOOL_T;
     }
-    static SCM loadFileHandler(void*, SCM, SCM) {
+    static SCM loadFileHandler(void*, SCM tag, SCM args) {
+        SCM msg = scm_simple_format(SCM_BOOL_F, scm_from_locale_string("load error: ~a: ~a"),
+                                    scm_list_2(tag, args));
+        char*    s   = scm_to_locale_string(msg);
+        (void)!::write(2, "[gc-crumb] ", 11);
+        (void)!::write(2, s, strlen(s));
+        (void)!::write(2, "\n", 1);
+        free(s);
         return SCM_BOOL_F;
     }
     bool evalFile(const char* path) {
@@ -158,6 +167,9 @@ namespace SchemeHost {
         scm_c_define(name, scm_from_pointer(fn, NULL));
     }
     void schemeInit() {
+        // no auto-compilation inside the compositor: deterministic startup,
+        // no ~/.cache/guile writes (must be set before scm_init_guile)
+        setenv("GUILE_AUTO_COMPILE", "0", 0);
         scm_init_guile();
         // marshalling primitives for the Scheme-side FFI shim
         scm_c_define_gsubr("hl--scm->word", 1, 0, 0, (scm_t_subr)scmToWord);

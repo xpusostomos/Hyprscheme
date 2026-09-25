@@ -73,6 +73,14 @@ and TODO.txt's archived sections.)
   hl--ready, evals + describe-function work. Reload/guardian/watchdog
   still chez-only (steps 3-5).
 
+== IN PROGRESS (Guile path, step 3) ==
+- Guile machinery boots; eval channel + describe-function + foreign
+  calls + getters work. Compat layer hardened (format arity, void
+  rebinding, stderr port, srfi-9 record shorthand, generation
+  imports). Remaining: FFI crash class (pass-shortcut kills the
+  compositor), (hl-layers) empty, watchdog stub, guardian drain.
+  Details in GUILE-CONVERSION.txt step 3.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

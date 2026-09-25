@@ -211,11 +211,43 @@ Gives up:
    (copy-environment wired but untested), guardian drain (no
    collect-request-hook yet), watchdog (stubbed), full suite.
    COMMIT.
-3. Scheme-side port: copy-module helper replaces copy-environment in
-   hl--reset; load/eval shadows target modules; dialect renames per
-   the table; the 10 #!eof; errorf; andmap; list*; imports at file
-   tops (rnrs hashtables, ice-9 exceptions, srfi-13). defun verified
-   — no rework needed beyond re-running its tests. COMMIT.
+3. IN PROGRESS (Sep 25). The Guile machinery now BOOTS and the eval
+   channel works (hl--eval, describe-function, foreign calls, query
+   getters all answer). Compat-layer fixes landed so far, each found
+   by the suite:
+   - curried (define-syntax (name x) ...) is CHEZ-only; Guile wants a
+     plain lambda transformer
+   - (system foreign) must be imported (uintptr_t/int32/...) — AND it
+     exports `void` = the ffi type = the integer 0, which the prelude's
+     (void) then APPLIES ("Wrong type to apply: (0)" killed every
+     eval); capture the type as hl--ffi-void-type and rebind (void)
+   - Chez's (format "fmt" ...) has no destination; Guile's does — a
+     Chez-style format wrapper
+   - (srfi srfi-9) for define-record-type, plus a compat macro
+     translating Chez's (fields ...) shorthand (names preserved:
+     make-<n>, <n>?, <n>-<field>); srfi-9 aliased via a RENAMED
+     import (Guile has no (define-syntax new old) aliasing)
+   - R6RS exists/for-all = srfi-1 any/every
+   - generations must copy the source module's IMPORTS too
+     (module-use! of (module-uses src)) — locals alone miss guard,
+     the rnrs tables, srfi-13
+   - Guile's default error port does not reach the compositor's
+     stderr in this embedded context; compat rebinds
+     current-error-port to (open-file "/dev/stderr" "a") — APPEND
+     mode, "w" truncates the compositor's own log!
+   - plugin sets GUILE_AUTO_COMPILE=0 before scm_init_guile; the
+     suite exports it too
+   REMAINING (the current 10-fail state): FFI marshalling crashes —
+   (hl-layers) returns empty, (hl-window-pass-shortcut!) KILLS the
+   compositor (crash in CWindow::~CWindow ← CFocusState::window —
+   corruption class), and everything downstream of it. Suspects: the
+   scheme-object word crossing (hl--scm->word / word->scm) around
+   event/timer/gesture records, and GC interaction during FFI calls.
+   ALSO: plugin LOG() output is swallowed entirely — upstream moved
+   Log::logger to an inline header variable, so the plugin compiles
+   its own uninitialized copy (affects ALL plugins, not just ours);
+   diagnostics currently ride raw write(2) breadcrumbs.
+   COMMIT.
 4. GC plumbing swap: marshRoot/SThunkRef -> protect/unprotect (or a
    Scheme-side registry); guardians verified native. COMMIT.
 5. Watchdog port: set-timer/timer-interrupt-handler -> sigaction

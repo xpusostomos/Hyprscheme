@@ -151,6 +151,10 @@ cross-generation bridge.
 - Nested instance discovery accepts ONLY directories that did not
   exist before launch (a stale-dir match once made a test drive the
   REAL session — the harnesses are written defensively about this).
+- **NEVER delete anything under `$XDG_RUNTIME_DIR/hypr/`** — that
+  includes the user's LIVE session IPC dir (doing so broke the real
+  session's hyprctl until the session restarted). Stray nested
+  instances are killed with `pkill -f hyprland-scheme` only.
 - When a nested compositor misbehaves, suspect a stale plugin/compositor
   pairing first; rebuild all three.
 
@@ -187,10 +191,13 @@ in the wiki's building-the-plugin page.
   `make BACKEND=guile` flips backends. The foreign-procedure shim is
   DECLARATIVE (no per-function shims): C++ registers typed fn pointers
   via scm_from_pointer; scheme-object crosses the FFI as a raw word.
-  The 299 foreign-procedure decls split into 146 plain-typed
-  (pointer->procedure) + 153 scheme-object (gsubrs). Generation model
-  and guardians portable (copy-module helper; make-guardian exists);
-  crash-reporter signal interplay is the one unverified item.
+  STEP 3 PARTIAL: the machinery boots and the eval channel works
+  (10/12 suite red — FFI crash class remaining, see
+  GUILE-CONVERSION.txt step 3 for the full gotcha list). Generation
+  model and guardians portable; crash-reporter signal interplay is
+  the one unverified item. NOTE: plugin LOG() is swallowed by an
+  upstream logger refactor (inline header var — two copies); debug
+  diagnostics ride raw write(2) until that's addressed.
 - Rollout decision for defun across the API (only hl-exec! converted).
 - doc-name spellcheck for the wiki (balance checker exists).
 - Interactive REPL.
