@@ -274,9 +274,16 @@ Gives up:
    - Loader cleanup: no more write(2) breadcrumbs; compat loads first,
      prelude next, machinery check on hl--load only, defun + bootstrap
      through the guarded hl--load.
-   REMAINING on the Guile path: soak test, guardian drain (step 4,
-   collect-request-hook), crash-reporter interplay (step 5, unverified),
-   plugin LOG() still swallowed (upstream inline-logger refactor).
+   - THE GUARDIAN DRAIN: Guile HAS the analog — after-gc-hook runs after
+     each collection, and the bootstrap's hl--handle-guardian +
+     hl--drain-handles! port as-is (the earlier "Guile has no such hook"
+     was wrong; after-gc-hook exists in 3.0.11). The hook runs only the
+     drain (the Chez handler's trailing (collect) would re-enter gc from
+     inside the hook), no-ops until the bootstrap defines it (module-
+     variable check), and a failing drain reports instead of killing the
+     GC trigger. Verified: counting hook fires per gc in the compositor.
+   REMAINING on the Guile path: crash-reporter interplay (step 5,
+   unverified), longer soak, plugin LOG() still swallowed (upstream).
    COMMIT.
 4. GC plumbing swap: marshRoot/SThunkRef -> protect/unprotect (or a
    Scheme-side registry); guardians verified native. COMMIT.

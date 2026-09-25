@@ -88,8 +88,12 @@ and TODO.txt's archived sections.)
   primitives, watchdog via sigaction+asyncs, error rendering of boot-9
   templates, fdopen-2 stderr port (shared offset — no log overwriting),
   call-with-blocked-asyncs around foreign calls (compositor crash fix).
-  Remaining before parity: soak test on Guile, guardian drain,
-  crash-reporter interplay, plugin LOG() swallowed (upstream issue).
+  Guardian drain LIVE on Guile: after-gc-hook runs hl--drain-handles!
+  after each collection (guarded: early GCs during the bootstrap load
+  no-op until the drain exists, and a failing drain can't kill the GC
+  trigger). Verified in-compositor: a counting hook fired per gc.
+  Remaining before parity: crash-reporter interplay, longer soak on
+  Guile, plugin LOG() swallowed (upstream issue).
   Details in GUILE-CONVERSION.txt step 3.
 
 == OPEN (the short list, also in TODO.txt) ==

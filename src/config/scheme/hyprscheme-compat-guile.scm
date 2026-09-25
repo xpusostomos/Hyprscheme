@@ -118,11 +118,24 @@
               (module-uses src))
     dst))
 
-;; GC hooks: Chez's collect-request-handler drives handle reaping; Guile has
-;; no such hook yet (step 4 of the migration), so the drain never fires and
-;; dead handles leak until then. The C++ watchdog thread backstop is
-;; unaffected.
-(define (collect-request-handler f) (if #f #f))
+;; GC hooks: Chez's collect-request-handler fires at GC-REQUEST time (the
+;; bootstrap's handler drains dead handles, then calls (collect) to let the
+;; collection proceed). Guile's equivalent hook point is after-gc-hook, which
+;; runs AFTER each collection — same effect for the drain. The bootstrap's
+;; handler ends with (collect), which on Guile would re-enter gc from inside
+;; the hook, so the hook runs ONLY the drain (hl--drain-handles!, defined in
+;; the bootstrap — late binding resolves it at hook time, on the thread that
+;; triggered the GC: the event-loop thread, same as Chez).
+(define (collect-request-handler f) (if #f #f))   ; Chez protocol, unused here
+(define hl--drain-registered #f)
+(add-hook! after-gc-hook
+  (lambda ()
+    ;; the bootstrap defines the drain LATER in its file — early GCs (the
+    ;; load itself is allocation-heavy) must no-op until it exists; and a
+    ;; failing drain must not kill whatever triggered the GC
+    (when (module-variable (current-module) 'hl--drain-handles!)
+      (guard (e (#t (hl--report e)))
+        (hl--drain-handles!)))))
 
 ;; ---- the watchdog (Chez timer-interrupt machinery, Guile-style) ------------------
 ;; The prelude's watchdog runs callbacks under a wall-clock budget: it arms
