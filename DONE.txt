@@ -74,11 +74,13 @@ and TODO.txt's archived sections.)
   still chez-only (steps 3-5).
 
 == IN PROGRESS (Guile path, step 3) ==
-- Guile machinery boots; eval channel + describe-function + foreign
-  calls + getters work. Compat layer hardened (format arity, void
-  rebinding, stderr port, srfi-9 record shorthand, generation
-  imports). Remaining: FFI crash class (pass-shortcut kills the
-  compositor), (hl-layers) empty, watchdog stub, guardian drain.
+- SUITE 12/12 ON GUILE (and 12/12 on chez, unchanged). Compat layer
+  complete: format arity, void rebinding, record shorthand on core
+  primitives, watchdog via sigaction+asyncs, error rendering of boot-9
+  templates, fdopen-2 stderr port (shared offset — no log overwriting),
+  call-with-blocked-asyncs around foreign calls (compositor crash fix).
+  Remaining before parity: soak test on Guile, guardian drain,
+  crash-reporter interplay, plugin LOG() swallowed (upstream issue).
   Details in GUILE-CONVERSION.txt step 3.
 
 == OPEN (the short list, also in TODO.txt) ==

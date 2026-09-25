@@ -191,13 +191,19 @@ in the wiki's building-the-plugin page.
   `make BACKEND=guile` flips backends. The foreign-procedure shim is
   DECLARATIVE (no per-function shims): C++ registers typed fn pointers
   via scm_from_pointer; scheme-object crosses the FFI as a raw word.
-  STEP 3 PARTIAL: the machinery boots and the eval channel works
-  (10/12 suite red — FFI crash class remaining, see
-  GUILE-CONVERSION.txt step 3 for the full gotcha list). Generation
-  model and guardians portable; crash-reporter signal interplay is
-  the one unverified item. NOTE: plugin LOG() is swallowed by an
-  upstream logger refactor (inline header var — two copies); debug
-  diagnostics ride raw write(2) until that's addressed.
+  STEP 3 DONE: SUITE 12/12 ON GUILE (chez 12/12 unchanged). The
+  gotcha list lives in GUILE-CONVERSION.txt step 3 — headline items:
+  boot-9's error template-wraps messages ("~A" + irritants — display
+  code must render them); srfi-9 constructor/accessors are syntax
+  transformers (records must expand onto core record primitives so
+  forward references late-bind); the watchdog is sigaction SIGALRM +
+  asyncs, and FOREIGN CALLS MUST WRAP IN call-with-blocked-asyncs (a
+  watchdog escape inside compositor C++ crashed the compositor);
+  stderr goes through (fdopen 2 "w") — never open-file "/dev/stderr"
+  (fresh offset overwrites the log). Remaining: soak, guardian drain,
+  crash-reporter interplay. NOTE: plugin LOG() is swallowed by an
+  upstream logger refactor (inline header var — two copies); Guile
+  call errors ride fd 2 prints in the host.
 - Rollout decision for defun across the API (only hl-exec! converted).
 - doc-name spellcheck for the wiki (balance checker exists).
 - Interactive REPL.

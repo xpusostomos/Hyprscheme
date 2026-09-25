@@ -5306,7 +5306,6 @@ namespace Config::Scheme {
         // prelude's real-load captures. Contained: errors never unwind
         // through C++ frames.
         if (const char* compat = SchemeHost::compatFile()) {
-            { const char* m = "[gc-crumb] compat load\n"; (void)!::write(2, m, strlen(m)); }
             if (!SchemeHost::evalFile(tryScm(compat).c_str())) {
                 LOG(Log::ERR, "[scheme] backend compat layer failed to load, scheme scripting disabled");
                 return false;
@@ -5315,7 +5314,6 @@ namespace Config::Scheme {
         // phase 1b: the prelude (verified plumbing; errors contained at the
         // host). foreign-procedure resolves symbols at definition time, so
         // symbols must exist before this.
-        { const char* m = "[gc-crumb] prelude load\n"; (void)!::write(2, m, strlen(m)); }
         if (!SchemeHost::evalFile(tryScm("hyprscheme-prelude.scm").c_str())) {
             LOG(Log::ERR, "[scheme] prelude failed to load, scheme scripting disabled");
             return false;
@@ -5323,13 +5321,11 @@ namespace Config::Scheme {
         // the guarded loader must exist before anything else loads — if the
         // machinery is missing (a compat/prelude failure), stop here instead
         // of letting an unbound globalRef unwind into C++
-        { const char* m = "[gc-crumb] machinery check\n"; (void)!::write(2, m, strlen(m)); }
         // only hl--load: it is a real procedure in both backends. (A first
         // version also checked `foreign-procedure` — on Chez that is a SYNTAX
         // keyword, top-level-bound? answers #f for it, and the check silently
         // disabled scheme everywhere.)
         if (!SchemeHost::isBound("hl--load")) {
-            { const char* m = "[gc-crumb] MACHINERY CHECK FAILED\n"; (void)!::write(2, m, strlen(m)); }
             LOG(Log::ERR, "[scheme] interpreter machinery incomplete, scheme scripting disabled");
             return false;
         }
@@ -5337,14 +5333,8 @@ namespace Config::Scheme {
         // phase 2: the defun machinery (defines `defun`, which phase 3's
         // converted functions use) ...
         SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm("hyprscheme-defun.scm").c_str()));
-        // phase 3: ... then the API (TEMP DIAGNOSTIC: evalFile so errors
-        // surface through fd 2)
-        if (!SchemeHost::evalFile(tryScm("hyprscheme-bootstrap.scm").c_str()))
-            { const char* m = "[gc-crumb] bootstrap evalFile FAILED\n"; (void)!::write(2, m, strlen(m)); }
-        { const char* m = "[gc-crumb] bootstrap loaded, ready?\n"; (void)!::write(2, m, strlen(m)); }
-        if (SchemeHost::globalRef("hl--ready") == SchemeHost::False) {
-            { const char* m = "[gc-crumb] BOOTSTRAP FAILED (hl--ready #f)\n"; (void)!::write(2, m, strlen(m)); }
-        }
+        // phase 3: ... then the API
+        SchemeHost::call1(SchemeHost::globalRef("hl--load"), SchemeHost::stringVal(tryScm("hyprscheme-bootstrap.scm").c_str()));
 
         if (SchemeHost::globalRef("hl--ready") == SchemeHost::False) {
             LOG(Log::ERR, "[scheme] bootstrap failed, scheme scripting disabled");

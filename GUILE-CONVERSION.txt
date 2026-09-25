@@ -237,16 +237,46 @@ Gives up:
      mode, "w" truncates the compositor's own log!
    - plugin sets GUILE_AUTO_COMPILE=0 before scm_init_guile; the
      suite exports it too
-   REMAINING (the current 10-fail state): FFI marshalling crashes —
-   (hl-layers) returns empty, (hl-window-pass-shortcut!) KILLS the
-   compositor (crash in CWindow::~CWindow ← CFocusState::window —
-   corruption class), and everything downstream of it. Suspects: the
-   scheme-object word crossing (hl--scm->word / word->scm) around
-   event/timer/gesture records, and GC interaction during FFI calls.
-   ALSO: plugin LOG() output is swallowed entirely — upstream moved
-   Log::logger to an inline header variable, so the plugin compiles
-   its own uninitialized copy (affects ALL plugins, not just ours);
-   diagnostics currently ride raw write(2) breadcrumbs.
+   STEP 3 COMPLETE (Sep 25, later session): SUITE 12/12 ON GUILE,
+   chez 12/12 unchanged. The remaining fixes, each caught by the suite:
+   - srfi-9's constructor/accessors are SYNTAX TRANSFORMERS — unappliable
+     as values, and code compiled BEFORE the record exists (bootstrap
+     defines hl-bind-add! long before the hl-bind record) applies them
+     and dies. The compat define-record-type now expands DIRECTLY onto
+     Guile's core record primitives (make-record-type/make-struct/
+     struct-ref): every generated binding is a plain procedure, so
+     forward references late-bind exactly like Chez. NAME binds to the
+     rtd, matching srfi-9.
+   - boot-9's (error msg args...) stores msg as a "~A ~S" TEMPLATE with
+     args as irritants (string-join at boot-9:2052) — display-condition
+     must render the template against the irritants, or reports show
+     the literal "~A".
+   - THE WATCHDOG: ported via sigaction SIGALRM + Guile asyncs (deliver
+     at procedure-entry safe points). Interface parity: timer-interrupt-
+     handler reads/installs, set-timer arms via alarm() and returns the
+     previous value. t-watchdog passes.
+   - THE LOG-CORRUPTION BUG: (open-file "/dev/stderr" ...) reopens the
+     log with a FRESH WRITE OFFSET — error lines OVERWROTE the log's
+     beginning (the t-zz-example "1 -> 0" failures; error lines vanished
+     mid-suite). Fixed with (fdopen 2 "w"): one shared write offset with
+     the compositor's own writes.
+   - Chez's contract "FOREIGN CALLS ARE NOT INTERRUPTIBLE": a SIGALRM
+     async fired inside the compositor's C++ code (crash in
+     CWindow::~CWindow ← CFocusState::window, libguile frames in the
+     stack — crash report 7171). Fixed: the foreign-procedure shim wraps
+     every foreign call in call-with-blocked-asyncs, so watchdog escapes
+     happen only when control returns to Scheme, exactly like Chez.
+   - C++ side: contained calls (scm_c_catch around call0-3 — errors
+     print via fd 2 and return False, never unwinding through C++
+     frames); SchemeHost::truthy/word restored in the Guile host after
+     a regex edit ate them (a MISSING EXPORT = lazy symbol failure at
+     first use: "symbol lookup error ... undefined symbol truthy").
+   - Loader cleanup: no more write(2) breadcrumbs; compat loads first,
+     prelude next, machinery check on hl--load only, defun + bootstrap
+     through the guarded hl--load.
+   REMAINING on the Guile path: soak test, guardian drain (step 4,
+   collect-request-hook), crash-reporter interplay (step 5, unverified),
+   plugin LOG() still swallowed (upstream inline-logger refactor).
    COMMIT.
 4. GC plumbing swap: marshRoot/SThunkRef -> protect/unprotect (or a
    Scheme-side registry); guardians verified native. COMMIT.

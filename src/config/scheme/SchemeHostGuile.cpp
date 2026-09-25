@@ -85,6 +85,12 @@ namespace SchemeHost {
         return scm_is_real(val(v)) && !scm_is_exact_integer(val(v));
     }
 
+    uintptr_t word(SchemeValue v) {
+        return v.raw();
+    }
+    bool truthy(SchemeValue v) {
+        return v.raw() != 0;
+    }
     SchemeValue car(SchemeValue pair) {
         return value(scm_car(val(pair)));
     }
@@ -112,20 +118,47 @@ namespace SchemeHost {
         return out;
     }
 
+
+    // errors must NEVER unwind through C++ frames (the compositor heap
+    // corrupts); contain them at the host and print via fd 2 — the plugin's
+    // LOG() is currently swallowed (upstream logger refactor). A contained
+    // error yields False (C++ callers already treat False as decline).
+    static SCM callHandler(void*, SCM tag, SCM args) {
+        SCM msg = scm_simple_format(SCM_BOOL_F, scm_from_locale_string("[scheme-guile] call error: ~a ~a\n"),
+                                    scm_list_2(tag, args));
+        char*    s = scm_to_locale_string(msg);
+        (void)!::write(2, s, strlen(s));
+        free(s);
+        return SCM_BOOL_F;
+    }
+
     SchemeValue globalRef(const char* name) {
         return value(scm_variable_ref(scm_c_lookup(name)));
     }
+    struct CallArgs { SCM fn; SCM a1; SCM a2; SCM a3; };
+    static SCM callThunk0(void* d) { return scm_call_0(((CallArgs*)d)->fn); }
+    static SCM callThunk1(void* d) { auto* a = (CallArgs*)d; return scm_call_1(a->fn, a->a1); }
+    static SCM callThunk2(void* d) { auto* a = (CallArgs*)d; return scm_call_2(a->fn, a->a1, a->a2); }
+    static SCM callThunk3(void* d) { auto* a = (CallArgs*)d; return scm_call_3(a->fn, a->a1, a->a2, a->a3); }
     SchemeValue call0(SchemeValue fn) {
-        return value(scm_call_0(val(fn)));
+        CallArgs a{val(fn), SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED};
+        SCM r = scm_c_catch(SCM_BOOL_T, callThunk0, &a, callHandler, NULL, NULL, NULL);
+        return scm_is_true(r) ? value(r) : False;
     }
     SchemeValue call1(SchemeValue fn, SchemeValue a1) {
-        return value(scm_call_1(val(fn), val(a1)));
+        CallArgs c{val(fn), val(a1), SCM_UNDEFINED, SCM_UNDEFINED};
+        SCM r = scm_c_catch(SCM_BOOL_T, callThunk1, &c, callHandler, NULL, NULL, NULL);
+        return scm_is_true(r) ? value(r) : False;
     }
     SchemeValue call2(SchemeValue fn, SchemeValue a1, SchemeValue a2) {
-        return value(scm_call_2(val(fn), val(a1), val(a2)));
+        CallArgs c{val(fn), val(a1), val(a2), SCM_UNDEFINED};
+        SCM r = scm_c_catch(SCM_BOOL_T, callThunk2, &c, callHandler, NULL, NULL, NULL);
+        return scm_is_true(r) ? value(r) : False;
     }
     SchemeValue call3(SchemeValue fn, SchemeValue a1, SchemeValue a2, SchemeValue a3) {
-        return value(scm_call_3(val(fn), val(a1), val(a2), val(a3)));
+        CallArgs c{val(fn), val(a1), val(a2), val(a3)};
+        SCM r = scm_c_catch(SCM_BOOL_T, callThunk3, &c, callHandler, NULL, NULL, NULL);
+        return scm_is_true(r) ? value(r) : False;
     }
 
     bool isBound(const char* name) {
