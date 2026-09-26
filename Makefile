@@ -29,21 +29,28 @@ INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
 LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 
 # the plugin artifact. The .scm machinery is installed next to it: the
-# prelude and the bootstrap run on the Guile host, and
-# hyprscheme-compat-guile.scm is the Guile compat layer (loaded before
-# the prelude). hyprscheme-defun.scm is NOT here — it was Chez-only and
-# is frozen in chez/.
+# prelude (error plumbing, watchdog, fire trampolines, layout entry
+# points) and the bootstrap (the API). The Chez-only defun machinery is
+# frozen in chez/.
 SCM_FILES = src/config/scheme/hyprscheme-prelude.scm \
-            src/config/scheme/hyprscheme-bootstrap.scm \
-            src/config/scheme/hyprscheme-compat-guile.scm
+            src/config/scheme/hyprscheme-bootstrap.scm
 
-# guile-3.0 cflags/libs: SchemeHostGuile.cpp includes libguile headers
+# guile-3.0 cflags/libs: Guile.cpp, Handles.* and Bindings.hpp include
+# libguile headers
 INCLUDES   += `pkg-config --cflags guile-3.0`
 GUILIBS     = `pkg-config --libs guile-3.0`
 
-COMMON_OBJS = src/config/scheme/SchemeManager.o src/config/scheme/SchemeLayout.o \
-              src/plugin-main.o
-HOST_GUILE  = src/config/scheme/SchemeHostGuile.o
+# one translation unit per object family; each owns its entry points and their
+# registration (see src/config/scheme/SchemeInternals.hpp)
+COMMON_OBJS = src/config/scheme/Host.o src/config/scheme/SchemeLayout.o \
+              src/config/scheme/Layer.o src/config/scheme/Timer.o \
+              src/config/scheme/Notification.o src/config/scheme/Gesture.o \
+              src/config/scheme/Rule.o src/config/scheme/Bind.o \
+              src/config/scheme/Config.o src/config/scheme/Workspace.o src/config/scheme/Monitor.o \
+              src/config/scheme/Query.o src/config/scheme/Window.o src/config/scheme/Group.o \
+              src/config/scheme/Exec.o src/config/scheme/Event.o \
+              src/config/scheme/Handles.o src/plugin-main.o
+HOST_GUILE  = src/config/scheme/Guile.o
 OBJ         = $(COMMON_OBJS) $(HOST_GUILE)
 
 TARGET       = scheme-plugin-guile.so

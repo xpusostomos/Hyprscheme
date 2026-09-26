@@ -18,9 +18,9 @@ okv '(hl-workspace-rule-add! "cfg-gaps" #:gaps_out 0 #:gaps_in 8)' '#t' 'ws-rule
 okv '(hl-workspace-rule-add! "cfg-gaps2" #:gaps_in (quote (top 8 bottom 4)))' '#t' 'ws-rule plist gaps'
 
 # bad type raises with the config system's own message
-out=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-config-add! "general:gaps_in" "abc"))))')
+out=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-config-add! "general:gaps_in" "abc"))))')
 [[ "$out" == *"css_gap"* ]] || { echo "bad-type gave: $out"; exit 1; }
 
 # unknown key raises
-out=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-config-add! "nonsense:key" 1))))')
+out=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-config-add! "nonsense:key" 1))))')
 [[ "$out" == *"unknown config key"* ]] || { echo "bad-key gave: $out"; exit 1; }

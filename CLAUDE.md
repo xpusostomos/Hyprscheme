@@ -8,6 +8,7 @@ companion Lua config (`hyprland.lua`) loads the plugin. The design
 target is parity with upstream Hyprland's Lua scripting API — every
 Lua feature has a `hl-*` equivalent.
 
+
 ## Chris's rules (the non-negotiables)
 
 - **Agree a plan before changing anything.** Never start editing code,
@@ -27,6 +28,7 @@ Lua feature has a `hl-*` equivalent.
 
 ## Build environment (in place, no copies/staging)
 
+- @chez is deprecated. Don't work on that code
 - `make` builds in place: **Hyprland** (`../Hyprland`, built in
   `<tree>/build`), then the Guile plugin (needs `guile-3.0` dev
   headers). The Chez build lives frozen in `chez/` with its own
@@ -35,8 +37,8 @@ Lua feature has a `hl-*` equivalent.
 - The compositor **binary is a make prerequisite** of the plugin — a
   Hyprland rebuild forces a plugin relink automatically (the plugin
   resolves Hyprland symbols at load time).
-- `make install` → `~/.local/lib/hyprscheme/`: the `.so` and the three
-  `.scm` machinery files (prelude, bootstrap, compat-guile). No boot
+- `make install` → `~/.local/lib/hyprscheme/`: the `.so` and the two
+  `.scm` machinery files (prelude, bootstrap). No boot
   files — the interpreter is the system Guile.
   `make install-compositor` → `~/.local/bin/hyprland-scheme` +
   session `.desktop`. `PREFIX` selects the destination.
@@ -56,18 +58,17 @@ Lua feature has a `hl-*` equivalent.
 
 ## How the plugin loads Scheme
 
-Three real `.scm` files (no embedded blobs — they were extracted out of
-`SchemeManager.cpp` in Sep 2026), installed next to the `.so`, found
+Two real `.scm` files (no embedded blobs — they were extracted out of
+the C++ in Sep 2026), installed next to the `.so`, found
 via `dladdr` on a known symbol, with fallbacks to the source tree
 (`SOURCE_DIR` compile define) and `HYPRSCHEME_SCM_DIR` env var:
 
-1. `hyprscheme-compat-guile.scm` — the Guile compat layer, loaded first
-   (before the prelude): defines `load` procedurally and everything else
-   the Chez-native machinery assumed.
-2. `hyprscheme-prelude.scm` — error plumbing, loaded through the
-   guarded `hl--load`. An error here disables scheme, which is why it
-   must stay "verified, static".
-3. `hyprscheme-bootstrap.scm` — the API itself, guarded; ends with
+1. `hyprscheme-prelude.scm` — error plumbing, the callback watchdog,
+   the fire trampolines and the custom-layout entry points, in plain
+   Guile (standard-library imports only, no dialect shims). Loaded
+   through the guarded `hl--load`. An error here disables scheme, which
+   is why it must stay "verified, static".
+2. `hyprscheme-bootstrap.scm` — the API itself, guarded; ends with
    `(set! hl--ready #t)`. If anything fails, `hl--ready` stays `#f`
    and the C++ side disables scheme loudly.
 
@@ -75,12 +76,58 @@ via `dladdr` on a known symbol, with fallbacks to the source tree
 machinery — including the defun/describe-function file — is frozen in
 `chez/`.)
 
+Every C entry point is registered by C++ as a **gsubr** (`Bindings.hpp`:
+`bind<Fn>()` wraps the function in a trampoline that unboxes arguments and
+boxes the result, validating both), so the boundary is plain SCM in, plain
+SCM out — no foreign-procedure, no value smuggling, no libffi. The runtime
+side (interpreter startup, contained file loads, contained calls, GC
+pinning) is `Guile.hpp`/`Guile.cpp`. The bootstrap's wrappers call those
+gsubrs under internal `hl--c-*` names.
+
 Everything evaluates into the **persistent** environment. Each config
 reload calls `hl--reset`, which copies the interaction environment into
 a fresh generation (user definitions can't leak across reloads, like
 upstream's per-generation lua_State). `load`/`eval` are shadowed to
 target the current generation. `hl--state` is the one deliberate
 cross-generation bridge.
+
+## The C++ layout: one translation unit per object family
+
+`src/config/scheme/` is split by object family (FABLE §4.7 Step G), not
+by layer. Each family file **owns its entry points and registers them**
+(`void registerX()`), and `attachInterp` calls each one — so nothing
+outside a family needs its entry points declared:
+
+`Host.cpp` (init, reload, inotify watch, IPC, crash handler, the
+watchdog, `attachInterp`, `shutdown`) plus `Window`, `Workspace`,
+`Monitor`, `Group`, `Layer`, `Bind`, `Event`, `Timer`, `Rule`, `Config`,
+`Notification`, `Gesture`, `Exec`, `Query`, and `SchemeLayout.cpp` for
+the custom-layout entry points. `Handles.*` is the object model,
+`Bindings.hpp` the gsubr trampoline, `Guile.*` the runtime.
+
+- **`SchemeInternals.hpp` is the one shared header.** It carries
+  `g_up`, `g_configError`, `g_eventConnections`, the handle/result
+  plumbing (`boolResult`, `windowHandleResult`, `wsGet`, `monGet`), the
+  selector/name lookups, and a `registerX()` declaration per family.
+  Templates and trivial helpers are `inline` here; anything with real
+  weight is declared here and defined in the family that owns it.
+- **Adding a family**: a new `.cpp` defining its entry points and
+  `registerX()`, a `registerX();` call in `attachInterp` and a
+  declaration in `SchemeInternals.hpp`, and **a line in the Makefile's
+  `COMMON_OBJS`**. Miss that last one and the plugin still *links* — the
+  failure appears only when the compositor loads it
+  (`undefined symbol: …registerX`). `tools/bind-audit.py` checks the
+  built `.so` for exactly this.
+- A family's private state (`g_timerIndex`, the rule engine's maps, the
+  gesture makers' singletons) stays `static` in its own file. State the
+  host tears down at the reload boundary is exposed as a function
+  (`cancelAllTimers`, `clearSchemeRules`, `dropEventHandlers`), never as
+  a shared global.
+- `tools/bind-audit.py` — run after touching the registration list or
+  the bootstrap. It reports the total registered, any `hl--c-*` the
+  machinery calls that nobody registers, duplicate names, entries
+  registered but never called (dead C code), and undefined family
+  symbols in the built `.so`. Exits 1 on a problem.
 
 ## Chez-in-C++ cheat sheet (frozen `chez/` tree; things that are NOT obvious)
 
@@ -196,29 +243,24 @@ in the wiki's building-the-plugin page.
 
 ## Still open (see also DONE.txt / TODO.txt)
 
-- Possible Chez → Guile migration: full findings + step plan live in
-  `GUILE-CONVERSION.txt` (all claims probed live on Guile 3.0.11).
-  STEP 1 DONE: `SchemeHost.hpp` abstraction + `SchemeHostChez.cpp`
-  (the only file including <scheme.h>); all C++ call sites go through
-  `SchemeHost::` and use `SchemeValue` (opaque word). New host ops:
-  globalRef/call0-3/registerSymbol/lock/unlock/word/truthy/stringBytes.
-  STEP 2 DONE: `SchemeHostGuile.cpp` + `hyprscheme-compat-guile.scm`;
-  The artifacts co-exist: `make` builds scheme-plugin.so (Chez, the
-  default) and `make guile` builds scheme-plugin-guile.so; both install
-  side by side next to the shared .scm machinery (compat-guile is only
-  ever loaded by the Guile host). Switch by pointing the config's
-  hl.plugin.load at either .so, or PLUGIN=scheme-plugin-guile.so
-  tests/run.sh. The foreign-procedure shim is
-  DECLARATIVE (no per-function shims): C++ registers typed fn pointers
-  via scm_from_pointer; scheme-object crosses the FFI as a raw word.
+- Chez → Guile migration: DONE, and the migration scaffolding is gone.
+  The findings + step plan live in `GUILE-CONVERSION.txt` (probed live on
+  Guile 3.0.11) as the historical record. `SchemeHost.hpp` /
+  `SchemeHostGuile.cpp` (the two-backend abstraction) were replaced by
+  `Bindings.hpp` + `Guile.hpp`/`Guile.cpp`; `SchemeValue`, the word
+  smuggling, the marshalling and `hyprscheme-compat-guile.scm` no longer
+  exist. The Chez artifact is not built by this tree at all (frozen in
+  `chez/`).
   STEP 3 DONE: SUITE 12/12 ON GUILE (chez 12/12 unchanged). The
   gotcha list lives in GUILE-CONVERSION.txt step 3 — headline items:
   boot-9's error template-wraps messages ("~A" + irritants — display
   code must render them); srfi-9 constructor/accessors are syntax
   transformers (records must expand onto core record primitives so
   forward references late-bind); the watchdog is sigaction SIGALRM +
-  asyncs, and FOREIGN CALLS MUST WRAP IN call-with-blocked-asyncs (a
-  watchdog escape inside compositor C++ crashed the compositor);
+  asyncs (the old FFI shim also had to wrap every call in
+  call-with-blocked-asyncs — a watchdog escape inside compositor C++
+  crashed it once; the gsubr boundary needs no such wrapper, since asyncs
+  are not delivered inside a C function);
   stderr goes through (fdopen 2 "w") — never open-file "/dev/stderr"
   (fresh offset overwrites the log). Dead-handle drain DONE (after-gc-hook runs hl--drain-handles!,
   guarded), crash-reporter interplay VERIFIED (kill -SEGV → proper

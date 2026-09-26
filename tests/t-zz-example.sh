@@ -30,4 +30,13 @@ ok '(hl-layout-msg "narrower")'
 # done poking — give the workspaces their normal tiled layout back
 $SCHEME '(hl-config-add! "general:layout" "dwindle")' >/dev/null
 
+# clean up after the example: the layout it registered ("scheme:master-stack")
+# stays in the compositor's layout registry for the rest of the session, and
+# the wiki doc test that runs next registers layouts of its own — it would hit
+# "layout master-stack rejected" for a name this test had taken. A config
+# reload is the documented layout lifecycle (the registry is cleared and the
+# config re-loaded per generation), so it restores the harness config's state.
+$SCHEME '(hl-config-reload!)' >/dev/null
+sleep 0.5
+
 [[ $FAILED -eq 0 ]]

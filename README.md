@@ -1,6 +1,6 @@
 # Hyprscheme
 
-Chez Scheme scripting for [Hyprland](https://hypr.land), as a loadable
+Guile Scheme scripting for [Hyprland](https://hypr.land), as a loadable
 plugin. Write your window management logic — keybinds, layouts, timers,
 event reactions, queries — in Scheme.
 
@@ -27,7 +27,7 @@ event reactions, queries — in Scheme.
 
 A full API — binds, timers, window queries and actions, events, custom
 layouts with state, submaps, trackpad gestures — runs inside the
-compositor via an embedded Chez Scheme interpreter. Scripting errors
+compositor on the system Guile interpreter. Scripting errors
 are contained: a broken config or a failing callback never takes the
 compositor down.
 
@@ -46,22 +46,18 @@ live in the wiki (`../Hyprscheme.wiki`).
 - **Hyprland from source, built in place** — the plugin compiles
   against its headers and runs inside the binary built from the same
   tree (`../Hyprland` by default; `make` builds it if missing)
-- **Chez Scheme** built as a position-independent kernel, checked out
-  as `../ChezScheme` (built in place by `make` when needed; see
-  `BUILDCHEZ.md` for the details)
+- **Guile 3.0 development headers** (`guile-3.0` on Arch) — the plugin
+  links libguile and the machinery runs on the system interpreter; no
+  bundled interpreter and no boot files
 
 ## Building
 
 ```sh
-make    # builds Chez and Hyprland as needed, then the plugin
+make    # builds Hyprland as needed, then the plugin
 ```
 
 Everything builds **in place** — no copies, no staging:
 
-- `CHEZ_DIR` — the Chez Scheme checkout (default `../ChezScheme`);
-  built with `CFLAGS=-fPIC` (or the upstream `--pic` flag when
-  present). The plugin consumes its workarea objects and boot files
-  directly.
 - `HYPRLAND_SRC` — the Hyprland checkout (default `../Hyprland`),
   built in place in `<tree>/build`. The plugin compiles against those
   headers, and the compositor binary is a make prerequisite — a rebuilt
@@ -83,11 +79,9 @@ layouts — silent and bad).
 ## Installing
 
 ```sh
-make install                # plugin, Scheme sources + boot files: ~/.local/lib/hyprscheme
+make install                # plugin + Scheme machinery: ~/.local/lib/hyprscheme
 make install-compositor     # matched compositor: ~/.local/bin/hyprland-scheme
                             # + a session entry in ~/.local/share/wayland-sessions
-make guile && make install  # also builds/installs the Guile artifact
-                            # (scheme-plugin-guile.so; needs guile-3.0 dev)
 ```
 
 `PREFIX` selects the destination (default `~/.local`).
@@ -96,15 +90,13 @@ Then add to your `hyprland.lua` (the Lua config — the old
 `plugin = path` hyprlang directive does not exist there):
 
 ```lua
-hl.plugin.load("/home/YOU/.local/lib/hyprscheme/scheme-plugin.so")
+hl.plugin.load("/home/YOU/.local/lib/hyprscheme/scheme-plugin-guile.so")
 ```
 
 and reload. The plugin loads once, during config processing, before
-the rest of the config runs. A second backend artifact,
-`scheme-plugin-guile.so`, installs next to the default — point
-`hl.plugin.load` at either one (both are compiled against the same
-compositor; `hyprctl plugins list` shows the backend in the
-description).
+the rest of the config runs. The Chez backend is deprecated and frozen
+in `chez/` (see `chez/README.md`); `scheme-plugin-guile.so` is the
+artifact this tree builds.
 
 ## Usage
 
@@ -138,13 +130,13 @@ patching the system one.
 
 ## How it works
 
-The plugin statically embeds a position-independent Chez Scheme kernel
-(see `BUILDCHEZ.md` for the build) and registers Scheme callbacks as
-first-class citizens of the compositor: keybinds fire Scheme closures,
-custom layouts are Scheme functions returning geometry, events deliver
-window handles as Scheme records. Crash reporting survives the Chez
-runtime's own signal handling via a re-installed handler that calls
-Hyprland's exported crash reporter.
+The plugin links libguile and runs its machinery (three `.scm` files,
+installed next to the `.so`) on the system interpreter, registering
+Scheme callbacks as first-class citizens of the compositor: keybinds
+fire Scheme closures, custom layouts are Scheme functions returning
+geometry, events deliver window handles as Scheme records. Crash
+reporting survives the interpreter's own signal handling via a
+re-installed handler that calls Hyprland's exported crash reporter.
 
 ## Session integration
 

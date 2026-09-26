@@ -1,5 +1,15 @@
 # FABLE.md — a whole-project review of Hyprscheme (Guile era)
 
+> **Status of this document's findings:** the work is tracked in
+> `FABLE-DONE.md`, whose headings use THIS document's references — `§2.x`
+> for the defects below, `§4.x Step N` for the purge — so the two line up
+> directly. As of 2026-09-26: **done** — §2.1, §2.13, §2.17, §2.18, §2.19,
+> and the purge's §4.1 Step A and §4.2 Step B; **partly** — §2.6 (the two
+> doc blocks that failed are fixed; the other stale names remain) and §2.14
+> (install refreshed and guarded; the Chez-era leftovers are still there);
+> **not started** — §2.2–§2.5, §2.7–§2.12, §2.15, §2.16; **deferred by
+> Chris** — §4.7 Step G; **open** — §12.
+
 Written 2026-09-26 by Claude Fable 5 at Chris's request: "review the
 whole thing … find flaws, style problems, parity gaps, reorganisation
 ideas, what would make it more Scheme-like / Guile-friendly / Emacs-like
@@ -115,16 +125,18 @@ error message; and a dozen naming inconsistencies.
 
 **Top ten actions**, in the order I would do them:
 
-1. Fix `tests/t-coverage.sh` (it extracts zero APIs) and the 13 untested
-   public functions it would have flagged. §2.1
+1. Make the suite trustworthy: the doc test currently runs against a
+   dead compositor (§2.13) and `t-coverage` extracts nothing (§2.1).
+   Until those two are fixed, a green run says very little.
 2. Fix `hl-monitor-rule-add!=?` → `hl-monitor=?` (bootstrap, t-api, wiki). §2.2
 3. Remove the two `/tmp/hs-*` debug `ofstream`s. §2.3
 4. Type-check handle accessors (or move to foreign object types) so a
    typo can't crash the compositor. §2.4
 5. Pass the work-area origin to custom layouts (and reconsider the
    layout API against Lua's `ctx`/target model). §2.5, §5
-6. Sweep the wiki for stale names/option syntax; make `t-zzz-docs`
-   invoke registered thunks so lambdas get exercised. §2.6, §8
+6. Fix the two failing doc blocks, the stale skip patterns, and the
+   stale names the wiki still shows; make `t-zzz-docs` invoke registered
+   thunks so lambdas get exercised. §2.6, §2.13, §8
 7. Backtraces + source locations in every error report; route errors to
    a place users can find (`hyprctl rollinglog` or a notification). §4.5
 8. Compile the machinery with `guild compile -Wunbound-variable` at
@@ -184,9 +196,15 @@ Ordered roughly by severity. Each has a fix sketch.
 That marker has not existed since the `.scm` files were extracted out of
 `SchemeManager.cpp` (Sep 2026, per CLAUDE.md). `grep -c SCHEME_BOOTSTRAP
 SchemeManager.cpp` → 0. So `apis` is empty, the loop runs zero times and
-the test passes vacuously. Running the intended check by hand against
-`hyprscheme-bootstrap.scm` finds **13 public APIs with no test
-reference**: `hl-group-alive?`, `hl-group-cycle!`, `hl-group-id`,
+the test passes vacuously. There is a second, independent break: the
+pipeline's own `grep -o "^(define (hl-[a-z0-9-?]*"` is rejected by this
+machine's grep (ugrep 7.8.4: `grep: Invalid range end` — the `9-?` reads
+as a collation range), so even with the right file the extraction would
+yield nothing. (Confirmed: the array is empty, the script exits 0.) The
+regex also cannot match `(define*` or a name containing `=`/`!`, so it
+would miss `hl-exec!` and every `hl-*-=?`. Running the intended check by
+hand against `hyprscheme-bootstrap.scm` finds **13 public APIs with no
+test reference**: `hl-group-alive?`, `hl-group-cycle!`, `hl-group-id`,
 `hl-layer=?`, `hl-layer-id`, `hl-layer-pid`, `hl-monitor-id`,
 `hl-notification-color-set!`, `hl-notification-id`, `hl-plist-get`,
 `hl-timer-cancel!`, `hl-windows-from`, `hl-window-swallow-toggle!`.
@@ -296,7 +314,7 @@ Also in this file: layout callbacks are the only Scheme entry that is
 not wrapped in `watchdogEnter/Exit` (`callScheme1`, `:54-56`); and the
 `schemeIntList` helper is a copy of the one in `SchemeManager.cpp`.
 
-### 2.6 Stale wiki examples (MEDIUM — the doc test is probably red)
+### 2.6 Stale wiki examples (MEDIUM — verified failing, see §2.13)
 
 Found by grepping the wiki for names not defined in the bootstrap:
 
@@ -304,9 +322,13 @@ Found by grepping the wiki for names not defined in the bootstrap:
   and the pre-keyword `'repeat #t` option form. The block is a
   ```` ```scheme ```` fence, so `t-zzz-docs` should evaluate it; on the
   current `define*` signature `'repeat #t` raises
-  `keyword-argument-error "Invalid keyword"`. Either the suite has not
-  been run since commit `15d6c55`, or the block is skipped for a reason
-  I could not find. **Run the suite.**
+  `keyword-argument-error "Invalid keyword"` — **confirmed live**: sent
+  through `hyprctl scheme` on its own, the block answers
+  `error: Invalid keyword`. (A second block, `submaps.md:65`, fails with
+  `Unbound variable: thunk` — the placeholder was never skipped, see
+  §2.13.) Only these two blocks fail; the other stale names below sit
+  inside thunks, so the interpreter never resolves them (they still bite
+  the user at keypress time).
 - `code-snippets.md:214-219`: `hl-window-into-group` /
   `hl-window-out-of-group` (now `hl-window-group-move-in!` /
   `-move-out!`) with the rejected direction spellings `"l"/"d"/"u"/"r"`.
@@ -325,10 +347,11 @@ Found by grepping the wiki for names not defined in the bootstrap:
 - `Home.md` pins "commit `c26dbf93`" — fine, but nothing checks it
   against `Makefile:21` `HYPR_COMMIT` and `packaging/PKGBUILD`.
 
-The reason these survive the doc test: a ```` ```scheme ```` block is
-evaluated, but the lambdas *inside* it (bind thunks, handlers) are
-never called, so an unbound name inside a thunk is invisible to the
-interpreter. §8 proposes fixes.
+The reason most of these survive the doc test: a ```` ```scheme ````
+block is evaluated, but the lambdas *inside* it (bind thunks, handlers)
+are never called, so an unbound name inside a thunk is invisible to the
+interpreter. §2.13 is the reason even the two hard failures were
+invisible. §8 proposes fixes.
 
 ### 2.7 Two `plugin-main.cpp`s; the tracked one in `src/` is dead (MEDIUM)
 
@@ -521,10 +544,129 @@ Other inconsistencies worth a single sweep:
   so a header edit does not rebuild dependents; `-O2 -g` fine.
   `pkg-config lua55` is hardwired. No target compiles the `.scm`
   (§4.6). No `check` target running `tests/run.sh`.
+### 2.13 The doc-example test has never actually run in the suite (HIGH)
+
+`tests/t-zz-exit.sh` calls `(hl-exit!)`, which quits the compositor, and
+the harness iterates `tests/t-*.sh` in glob order — where
+`t-zz-exit.sh` sorts **before** `t-zzz-docs.sh` (`e` < `z`). So the
+120-block doc test runs against a dead compositor: every `hyprctl
+scheme` fails to connect, the failure text does not start with
+`error:`, and every block counts as a pass. The exit fixture's own
+comment says it "is named zz so it runs LAST" — the intent was right,
+the name is one `z` short of it.
+
+Verified three ways:
+
+- full suite (as committed): `ok t-zzz-docs`, 12/12;
+- `tests/run.sh zzz-docs` alone, live compositor: **fails** with
+  `submaps.md:33 => [error: Invalid keyword]` and
+  `submaps.md:65 => [error: Unbound variable: thunk]`;
+- replaying the driver's own loop against a live instance: 120 blocks
+  evaluated, 5 skipped, 2 failures — the same two.
+
+So "12/12 green" currently means 11 real greens, 1 vacuous green, and
+two known doc failures hidden behind it. Two secondary defects sit in
+the same harness:
+
+- **Stale skip patterns** (`tests/wiki-examples.skip`): the entry
+  `thunk 'submap-universal` no longer matches its block, which now reads
+  `#:submap-universal` after the keyword conversion, and the `THUNK`
+  entry is case-sensitive against a block spelled `thunk`.
+- **No liveness guard**: if the compositor is gone, the test reports
+  success. Any `hl-version` sanity call that must return a non-empty
+  string would turn this class of silence into a loud failure.
+
+*Fix:* rename the exit fixture to `t-zzzz-exit.sh` (or the doc test to
+`t-zz-a-docs.sh`) so the order is explicit; update the skip patterns;
+add the liveness guard; fix the two blocks (`submaps.md` 33 and 65).
+
+### 2.14 The installed artifacts are stale and the suite defaults to them (MEDIUM)
+
+`~/.local/lib/hyprscheme/` holds a plugin from 2026-09-25 17:19 while
+the tree's is 2026-09-25 20:10 (different md5) — i.e. installed *before*
+the `#:keyword` conversion and the exec consolidation. It also still
+ships `hyprscheme-defun.scm`, `petite.boot`, `scheme.boot` and the Chez
+`scheme-plugin.so` (Chez-era leftovers from an older `make install`).
+`tests/run.sh` defaults to exactly that stale path, so anyone running
+the suite without `PLUGIN=` gets failures that look like code bugs but
+are an old plugin against a new `.scm` (the machinery is loaded from
+`SOURCE_DIR`, the `.so` from the install dir — a mismatch by
+construction). The tree artifact is current with its C++ (newest source
+`SchemeManager.cpp` 20:09, `.so` 20:10) and
+`~/.local/bin/hyprland-scheme` is byte-identical to
+`../Hyprland/build/Hyprland`, so the pairing is fine once the plugin is
+current.
+
+*Fix:* `make install` (and delete the Chez leftovers), plus a
+freshness check in `tests/run.sh`: warn or fail when the installed
+plugin is older than the tree's, or when `SOURCE_DIR`'s `.scm` is newer
+than the `.so` under test.
+
+*Also in the Makefile:* there is no `guile` target, yet `README.md`
+instructs `make guile && make install` — `make guile` fails with
+"No rule to make target 'guile'" (the Guile artifact is the default
+`all` target now). No `-MMD` dependency tracking, no `-Wall -Wextra`,
+no `check` target.
+
+### 2.15 The layout callbacks are not under the watchdog (MEDIUM)
+
+`core.md` states plainly that a callback which runs too long — "an
+infinite loop in a bind or a layout recalculate" — "is aborted from the
+compositor event loop and reported". Binds, timers, events, gestures
+and evals are indeed wrapped in `hl--guarded-run`; **layout callbacks
+are not**: `hl--layout-call` (`hyprscheme-prelude.scm:275-278`) uses
+only a `guard` for errors, and the watchdog timer is armed by
+`hl--wd-enter`, which no layout path calls. A `recalculate` that loops
+therefore freezes the compositor with the C++ detector thread as the
+only backstop — log-only. Either route `hl--layout-recalculate` /
+`hl--layout-resize` / `hl--layout-msg` through `hl--guarded-run` (an
+aborted recalculate would return the `hl--wd-aborted` pair, which
+`readBoxList` rejects, so the layout falls back to `applyDefaultGrid` —
+a sensible outcome), or correct the doc.
+
+### 2.16 Smaller verified items
+
+- `hlSchemeWindowClass` (`SchemeManager.cpp:761-776`) resolves the
+  window twice and writes the `/tmp/hs-sel-debug` line each call (§2.3).
+- `fireSchemeBind(int)` (`:243-280`) calls `hl--bind-fire`, which the
+  prelude no longer defines; dead since the id-path removal.
+- `attachInterp` boot-file discovery (`:5412-5432`) still carries a
+  hardcoded `/home/chris/GITE/chez-pic` and calls `registerBootFile` /
+  `buildHeap`, both no-ops on Guile.
 - `tests/run.sh` `cleanup()` removes `$XDG_RUNTIME_DIR/hypr/$SIG` for
   the *nested* instance — consistent with the CLAUDE.md rule since it
   is the new dir only, but worth a comment given how loudly the rule is
   stated.
+
+### 2.17 `hl-plist-get` raised when its optional DEFAULT was omitted *(found while fixing §2.1)*
+
+The public helper is `(define (hl-plist-get plist key . default) …)` and
+its body was `(apply hl--plist-get plist key default)` — with the default
+omitted, `default` is `()`, so `apply` passed a short argument list and
+the call raised `Wrong number of arguments to hl--plist-get`. The
+docstring documents the argument as optional, and the wiki's own
+conventions page cites `(hl-state-ref KEY [DEFAULT])` as the optional-
+argument style. Fixed by passing it explicitly (`#f` when omitted); a
+test now covers all three shapes (present key, missing key, stored `#f`).
+
+### 2.18 `hl-group-alive?` always returned `#f` *(found while fixing §2.1)*
+
+`hl-scheme-group-alive` returns an **int** (1 alive, 0 gone, −1 before
+init), but the Scheme wrapper compared it with `eq? … #t`, so the
+predicate was constant `#f` — and nothing tested it. Now `(= 1 …)`. An
+audit of every `(eq? (c-… ) #t)` / `(= 1 (c-… ))` in the bootstrap
+against its registered return type found this as the only mismatch of
+its kind (23 comparisons of the first form, 27 of the second, against
+the gsubr bridge's types).
+
+### 2.19 `tests/t-zz-example.sh` leaked a layout registration *(found while fixing §2.13)*
+
+The example config it live-loads registers `scheme:master-stack`, and a
+layout registration survives for the rest of the session — so the
+`master-stack` example in the wiki's custom-layouts page then failed
+with `layout master-stack rejected`, purely because the name was taken.
+The test now ends with `(hl-config-reload!)`, the documented layout
+lifecycle, leaving the harness config's state for the tests that follow.
 
 ---------------------------------------------------------------------
 
@@ -1172,8 +1314,10 @@ build products. Fold the useful parts of `TODO2.txt` into `TODO.txt`.
 
 ## 11. Prioritised roadmap
 
-**Phase 0 — bugs (a day).** §2.1, §2.2, §2.3, §2.7, §2.8's dead code,
-§2.6 doc sweep, run the suite, commit. No design decisions needed.
+**Phase 0 — bugs (a day).** §2.13 (doc-test ordering + skip patterns +
+liveness guard), §2.1 (coverage test), §2.14 (install staleness),
+§2.2, §2.3, §2.15, §2.7, §2.8's dead code, the §2.6 doc fixes, then a
+green suite that means something. No design decisions needed.
 
 **Phase 1 — safety and visibility (a few days).** §2.4 option 1 or 2,
 §2.5 offset fix (backward-compatible variant), §4.5 backtraces +

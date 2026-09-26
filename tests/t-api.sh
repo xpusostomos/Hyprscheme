@@ -28,6 +28,10 @@ val '(hl-kbd "C-M-")' '("CTRL" "ALT")'
 val '(hl-key "CTRL+ALT")' '("CTRL" "ALT")'
 val '(hl-key "SUPER")' '("SUPER")'
 
+# ---- plist helper (public: gesture events and config tables arrive as plists)
+val '(hl-plist-get (quote (a 1 b 2)) (quote b))' '2'
+val '(hl-plist-get (quote (a 1)) (quote missing) (quote dflt))' 'dflt'
+
 # ---- state ------------------------------------------------------------------
 val '(hl-state-set! (quote api-x) 1)' '1'
 val '(hl-state-ref (quote api-x))' '1'
@@ -56,6 +60,12 @@ ok '(boolean? (hl-window-x11? w))'
 ok '(boolean? (hl-window-alive? w))'
 ok '(hl-window=? w w)'
 noerr '(hl-window-fullscreen-handler w)'
+# ---- handle safety: a handle of the WRONG FAMILY is a clean error -----------
+# the record accessors type-check, so this reports instead of reinterpreting a
+# workspace as a window (which used to reach compositor C++ as a bad pointer);
+# the message also carries the origin of the error, not just the text
+bad_handle=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-title aw))))')
+[[ "$bad_handle" == *"expected a hl-window handle"* ]] || { echo "FAIL: wrong-family handle not rejected => [$bad_handle]"; FAILED=1; }
 
 # ---- window actions ---------------------------------------------------------
 ok '(hl-window-focus! w)'
@@ -109,7 +119,8 @@ ok '(let ((a (hl-window-address w))) (and (string? a) (equal? (substring a 0 2) 
 # the address is the stable identity: two DIFFERENT handles for the same
 # window carry the SAME address
 ok '(let ((w2 (hl-window-from "class:^api-main$")))
-     (and (not (= (hl-window-id w) (hl-window-id w2)))
+     (and (not (eq? w w2))          ; two handles for one window are two objects
+       (hl-window=? w w2)          ; ... that compare equal
        (equal? (hl-window-address w) (hl-window-address w2))))'
 ok '(hl-window-mapped? w)'
 ok '(hl-window-visible? w)'
@@ -179,6 +190,10 @@ ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
        (and (= 1 (hl-group-size g))
          (hl-group-add! g w2)          ; re-add after remove
          (hl-group-add! g w2))))       ; ...and again: no-op, not an error'
+# the group record itself: id (opaque), liveness, and cycling its members
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (and (hl-group? g) (hl-group-alive? g)))'
+ok '(boolean? (hl-group-cycle! w))'
 # dissolve: remove w, ungroup w2 -> the group dies; old records read stale (#f)
 ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
      (begin (hl-group-remove! g w2)          ; group is now {w} alone
@@ -248,6 +263,8 @@ ok '(integer? (hl-workspace-group-count aw))'
 ok '(string? (hl-workspace-tiled-layout aw))'
 ok '(boolean? (hl-workspace-alive? aw))'
 ok '(hl-workspace=? aw aw)'
+# the handle predicate: records of the right family answer #t, anything else #f
+ok '(and (hl-workspace? aw) (not (hl-workspace? 5)) (not (hl-workspace? w)))'
 
 # ---- monitors ---------------------------------------------------------------
 ok '(let ((l (hl-monitors))) (and (list? l) (pair? l)))'
@@ -258,6 +275,7 @@ noerr '(hl-monitor-at-cursor)'
 ok '(string? (hl-monitor-name am))'
 ok '(string? (hl-monitor-description am))'
 ok '(integer? (hl-monitor-number am))'
+ok '(hl-monitor? am)'
 ok '(boolean? (hl-monitor-enabled? am))'
 ok '(boolean? (hl-monitor-focused? am))'
 ok '(integer? (hl-monitor-x am))'
@@ -294,11 +312,11 @@ ok '(hl-device-add! "api-input" #:enabled #t)'
 ok '(hl-device-add! "api-input" #:natural_scroll #t #:sensitivity 0.6)'
 ok '(hl-device-add! "api-input" #:region_position (quote (10 20)))'
 ok '(hl-device-add! "api-input" #:repeat_rate 25)'
-bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" #:bogus_field #t))))')
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-device-add! "api" #:bogus_field #t))))')
 [[ "$bad_device" == *"bogus_field"* ]] || { echo "FAIL: unknown device field not rejected => [$bad_device]"; FAILED=1; }
-bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" #:natural_scroll "yes"))))')
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-device-add! "api" #:natural_scroll "yes"))))')
 [[ "$bad_device" == *"#t or #f"* ]] || { echo "FAIL: bad device type not rejected => [$bad_device]"; FAILED=1; }
-bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-device-add! "api" #:sensitivity 5))))')
+bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-device-add! "api" #:sensitivity 5))))')
 [[ "$bad_device" == *"range"* ]] || { echo "FAIL: out-of-range device value not rejected => [$bad_device]"; FAILED=1; }
 
 # ---- cursor -----------------------------------------------------------------
@@ -316,7 +334,7 @@ idok '(hl-exec! "foot -a exec-rule" #:float #t)'
 WAIT_FOR 10 '(let ((w (hl-window-from "class:^exec-rule$"))) (if w #t #f))' >/dev/null || { echo "exec-rule fixture never appeared"; FAILED=1; }
 $SCHEME '(define exec-rule-w (hl-window-from "class:^exec-rule$"))' >/dev/null
 ok '(begin (hl-window-focus! exec-rule-w) (hl-window-floating? exec-rule-w))'
-bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-exec! "true" #:bogus_effect #t))))')
+bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-exec! "true" #:bogus_effect #t))))')
 [[ "$bad_exec" == *"bogus_effect"* ]] || { echo "FAIL: unknown exec effect not rejected => [$bad_exec]"; FAILED=1; }
 
 # ---- live notifications (upstream hl.notification object parity) ------------
@@ -333,6 +351,19 @@ ok '(let ((n (hl-notification-add! #:text "api-rw" #:timeout 9000)))
        (begin (hl-notification-timeout-set! n 7000) (= (hl-notification-timeout n) 7000))
        (begin (hl-notification-font-size-set! n 18) (= (hl-notification-font-size n) 18))
        (begin (hl-notification-icon-set! n "warn") (= (hl-notification-icon n) 0))))'
+# color setter: the handle id is opaque-int, the setter takes the 0xAARRGGBB
+# hex form and the reader gives the raw int back (exact round-trip or a
+# changed value — either proves the write reached the notification)
+ok '(let* ((n (hl-notification-add! #:text "api-id" #:timeout 9000))
+        (before (hl-notification-color n)))
+     (and (hl-notification? n)
+       (eq? #t (hl-notification-color-set! n "0x80FF0000"))
+       (integer? (hl-notification-color n))
+       (or (equal? (hl-notification-color n) (string->number "80FF0000" 16))
+         (not (equal? before (hl-notification-color n))))))'
+# the handle predicate: records of the right family answer #t, anything else #f
+ok '(let ((n (hl-notification-add! #:text "api-pred" #:timeout 9000)))
+     (and (hl-notification? n) (not (hl-notification? 5)) (not (hl-notification? (list 1)))))'
 ok '(let ((n (hl-notification-add! #:text "api-pause" #:timeout 60000)))
      (and (hl-notification-paused-set! n #:on? #t) (hl-notification-paused? n)
        (hl-notification-paused-set! n) (not (hl-notification-paused? n))
@@ -347,19 +378,19 @@ ok '(begin (hl-notification-dismiss! (car (filter (lambda (n) (equal? (hl-notifi
 WAIT_FOR 8 '(not (exists (lambda (n) (equal? (hl-notification-text n) "api-dup")) (map hl-notification-text (hl-notifications))))' >/dev/null 2>&1 || true
 ok '(let ((n (car (filter (lambda (n) (equal? (hl-notification-text n) "api-notif")) (hl-notifications)))))
      (and n (hl-notification-alive? n)))'
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:timeout 100))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-notification-add! #:timeout 100))))')
 [[ "$bad_notif" == *"'text is required"* ]] || { echo "FAIL: missing text not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:text "x"))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-notification-add! #:text "x"))))')
 [[ "$bad_notif" == *"'timeout is required"* ]] || { echo "FAIL: missing timeout not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:text "x" #:timeout 100 #:icon "bogus"))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-notification-add! #:text "x" #:timeout 100 #:icon "bogus"))))')
 [[ "$bad_notif" == *"bad 'icon"* ]] || { echo "FAIL: bad icon not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:text "x" #:timeout 100 #:font-size 0))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-notification-add! #:text "x" #:timeout 100 #:font-size 0))))')
 [[ "$bad_notif" == *"font-size"* ]] || { echo "FAIL: bad font-size not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-notification-add! #:text "x" #:timeout 100 #:bogus_field 1))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-notification-add! #:text "x" #:timeout 100 #:bogus_field 1))))')
 # Guile's define* raises keyword-argument-error without naming the keyword
 # (no irritants in the exception) — assert the rejection, not the name
 [[ "$bad_notif" == *"nrecognized keyword"* ]] || { echo "FAIL: unknown notification field not rejected => [$bad_notif]"; FAILED=1; }
-bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (let ((n (hl-notification-add! #:text "x" #:timeout 100))) (hl-notification-timeout-set! n -5)))))')
+bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (let ((n (hl-notification-add! #:text "x" #:timeout 100))) (hl-notification-timeout-set! n -5)))))')
 [[ "$bad_notif" == *">= 0"* ]] || { echo "FAIL: negative timeout not rejected => [$bad_notif]"; FAILED=1; }
 
 # ---- notifications / misc ---------------------------------------------------
@@ -373,9 +404,9 @@ ok '(boolean? (hl-window-pass-shortcut! w))'
 ok '(boolean? (hl-window-send-shortcut! (hl-key "SUPER") "F10" w))'
 ok '(boolean? (hl-window-send-key-state! (hl-key "SUPER") "F10" 1 w))'
 ok '(boolean? (hl-window-send-shortcut! (quote ()) "F10" w))'
-bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-window-send-shortcut! "SUPER" "F10" w))))')
+bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-send-shortcut! "SUPER" "F10" w))))')
 [[ "$bad_ss" == *"list of modifier tokens"* ]] || { echo "FAIL: string mods not rejected by send-shortcut => [$bad_ss]"; FAILED=1; }
-bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-window-send-shortcut! 64 "F10" w))))')
+bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-send-shortcut! 64 "F10" w))))')
 [[ "$bad_ss" == *"list of modifier tokens"* ]] || { echo "FAIL: mask-int mods not rejected by send-shortcut => [$bad_ss]"; FAILED=1; }
 ok '(boolean? (hl-event! "apicoverage"))'
 ok '(boolean? (hl-force-idle! 0))'
@@ -389,6 +420,8 @@ noerr '(hl-urgent-window)'
 noerr '(hl-last-window)'
 noerr '(hl-window-from "class:^api-main$")'
 ok '(let ((l (hl-windows))) (and (list? l) (pair? l)))'
+ok '(let ((l (hl-windows-from "class:^api-main$")))
+     (and (list? l) (pair? l) (exists (lambda (x) (hl-window=? x w)) l)))'
 noerr '(hl-active-title)'
 noerr '(hl-active-window)'
 ok '(boolean? (hl-mouse-action! "drag"))'
@@ -429,13 +462,13 @@ val '(hl--bind-flags #:devices (quote ("k1")) #:device-inclusive #f)' '0'
 val '(hl--bind-flags #:device-inclusive #t)' '8192'
 val '(hl--bind-flags)' '0'
 # exclusivity rules (upstream's three checks at the binding layer)
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags #:click #t #:drag #t))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:click #t #:drag #t))))')
 [[ "$bad_bf" == *"click and drag are exclusive"* ]] || { echo "FAIL: click+drag not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags #:release #t #:repeat #t))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:release #t #:repeat #t))))')
 [[ "$bad_bf" == *"incompatible with repeat"* ]] || { echo "FAIL: release+repeat not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags #:long-press #t #:repeat #t))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:long-press #t #:repeat #t))))')
 [[ "$bad_bf" == *"incompatible with repeat"* ]] || { echo "FAIL: long-press+repeat not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl--bind-flags #:mouse #t #:repeat #t))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:mouse #t #:repeat #t))))')
 [[ "$bad_bf" == *"mouse is exclusive"* ]] || { echo "FAIL: mouse+repeat not rejected => [$bad_bf]"; FAILED=1; }
 ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F13>") (lambda () #f)))'
 ok '(hl-bind? (hl-bind-add! (hl-kbd "C-M-<F15>") (lambda () #f)))'
@@ -481,6 +514,10 @@ ok '(let ((t (hl-repeat 5000 (lambda () #f))))
           (boolean? (hl-timer-set-timeout t 6000))
           (boolean? (hl-timer-enabled-set! t #:on? #t))
           (boolean? (hl-timer-enabled-set! t))))'
+# cancel! tears the timer down now (a repeating timer would otherwise run until
+# the reload): the index entry erases itself, so it reads not-enabled after
+ok '(let ((t (hl-repeat 5000 (lambda () #f))))
+     (and (eq? #t (hl-timer-cancel! t)) (not (hl-timer-enabled? t))))'
 
 # ---- events: registration returns a listener id -----------------------------
 ok '(hl-event? (hl-window-open-notification-add! (lambda (w) #f)))'
@@ -574,34 +611,34 @@ ok '(let ((g (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-res
 # removal frees the spec — the overshadowed direction registers afterwards
 ok '(let ((g (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-resize-gesture)))) (and (hl-gesture-remove! g) (hl-gesture? (hl-gesture-add! #:fingers 9 #:direction "vertical" #:action (hl-make-resize-gesture)))))'
 # errors
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:bogus_field 1))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:bogus_field 1))))')
 # Guile's define* raises keyword-argument-error without naming the keyword
 [[ "$bad_gest" == *"nrecognized keyword"* ]] || { echo "FAIL: unknown gesture field not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up"))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 4 #:direction "up"))))')
 [[ "$bad_gest" == *"action is required"* ]] || { echo "FAIL: missing gesture action not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:action "workspace"))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:action "workspace"))))')
 [[ "$bad_gest" == *"hl-gesture-action"* ]] || { echo "FAIL: string action not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-float-gesture (quote bogus)))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-make-float-gesture (quote bogus)))))')
 [[ "$bad_gest" == *"toggle float tile"* ]] || { echo "FAIL: bad float mode not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-custom-gesture))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-make-custom-gesture))))')
 [[ "$bad_gest" == *"at least one"* ]] || { echo "FAIL: empty custom gesture not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-make-custom-gesture #:start "not a thunk"))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-make-custom-gesture #:start "not a thunk"))))')
 [[ "$bad_gest" == *"needs a procedure"* ]] || { echo "FAIL: non-procedure custom field not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:action (hl-make-move-gesture) #:scale 0.05))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:action (hl-make-move-gesture) #:scale 0.05))))')
 [[ "$bad_gest" == *"scale"* ]] || { echo "FAIL: degenerate scale not rejected => [$bad_gest]"; FAILED=1; }
 # 'mods is a token list — a string or an unknown token is rejected
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:mods "SUPER" #:action (hl-make-move-gesture)))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:mods "SUPER" #:action (hl-make-move-gesture)))))')
 [[ "$bad_gest" == *"list of modifier tokens"* ]] || { echo "FAIL: string mods not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:mods (list "SUPR") #:action (hl-make-move-gesture)))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:mods (list "SUPR") #:action (hl-make-move-gesture)))))')
 [[ "$bad_gest" == *"unknown modifier token"* ]] || { echo "FAIL: unknown mod token not rejected => [$bad_gest]"; FAILED=1; }
 # the manager's overshadow rule now surfaces as an error (was silently dropped)
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-move-gesture)))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-move-gesture)))))')
 [[ "$bad_gest" == *"overshadowed"* ]] || { echo "FAIL: overshadowed gesture not rejected => [$bad_gest]"; FAILED=1; }
 
 # ---- session lock escape hatch + scheduled prop refresh ----------------------
 # the harness session is never locked: the lock-screen hatch must refuse,
 # and the prop refresh runs trivially
-bad_lock=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (display-condition e p))) (hl-clear-crashed-lockscreen!))))')
+bad_lock=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-clear-crashed-lockscreen!))))')
 [[ "$bad_lock" == *"session is not locked"* ]] || { echo "FAIL: clear-crashed-lockscreen did not refuse when unlocked => [$bad_lock]"; FAILED=1; }
 ok '(boolean? (hl-exec-scheduled-prop-refresh-immediately))'
 ok '(hl-event? (hl-screenshare-state-notification-add! (lambda (a t n) #f)))'
@@ -630,6 +667,17 @@ ok '(let ((ls (hl-layers)))
      (or (null? ls)
        (let ((s (car ls)))
          (and (hl-notification-remove! s) (not (hl-notification-active? s))))))'
+# the surface's own handle: opaque id, identity, owning pid. Shape-guarded like
+# the rest of this section — the nested session has no bar, so `hl-layers` may
+# legitimately be empty (the layer count is echoed for the record).
+ok '(let ((ls (hl-layers)))
+     (or (null? ls)
+       (let* ((s (car ls)) (again (car (hl-layers))) (p (hl-layer-pid s)))
+         ;; two separate calls mint two handles for the same surface: =? is
+         ;; identity, not record equality
+         (and (hl-layer=? s again)
+           (or (integer? p) (not p))))))'
+echo "layers in this session: $($SCHEME '(length (hl-layers))')"
 
 # ---- cancel: unlisten parity (upstream subscription:remove / is_active) ------
 ok '(hl-notification-active? (hl-window-title-notification-add! (lambda (w) #f)))'
@@ -644,6 +692,12 @@ $SCHEME '(hl-exec! "foot -a ev-cancelled")' >/dev/null
 WAIT_FOR 8 '(let ((w (hl-window-from "class:^ev-cancelled$"))) (if w #t #f))' >/dev/null || { echo "FAIL: ev-cancelled fixture never appeared"; FAILED=1; }
 sleep 0.5
 val '(hl-state-ref (quote ev-cancelled))' '0'
+
+# ---- swallow toggle (deliberately LAST of the window tests) ------------------
+# swallowing hides the window it swallows, which stalls the destroy-based
+# checks earlier in this file — so it is exercised here, after the last window
+# is spawned, toggled on and straight back off to leave no state behind
+ok '(begin (hl-window-swallow-toggle!) (hl-window-swallow-toggle!))'
 
 # ---- reload (LAST: the animation checks above must precede it) ---------------
 # config-unload fires BEFORE the reload; the flag survives via hl--state

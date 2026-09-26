@@ -17,6 +17,30 @@ BIN=${BIN:-$HOME/.local/bin/hyprland-scheme}
 # like PLUGIN=scheme-plugin-guile.so fails to load.
 PLUGIN=${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin-guile.so}
 case $PLUGIN in /*) ;; *) PLUGIN=$PWD/$PLUGIN ;; esac
+
+# freshness warning: the .scm machinery is read from the SOURCE TREE at runtime
+# (SOURCE_DIR is compiled in, and the loader prefers it) while the plugin is
+# whatever $PLUGIN names — so either half can be stale. Two ways to get it
+# wrong, both of which report as code bugs:
+#   - a stale installed plugin tested against current sources (compared below)
+#   - a .scm edited after the last `make`: the plugin registers entry points the
+#     .scm no longer calls, and every C-calling API says "Unbound variable"
+# A warning, not a failure: testing an installed plugin is legitimate.
+newest_scm=$(ls -t "$PWD"/src/config/scheme/*.scm 2>/dev/null | head -1)
+if [[ -n ${newest_scm:-} && "$newest_scm" -nt "$PLUGIN" ]]; then
+  echo "warn: $(basename "$newest_scm") is newer than the plugin under test"
+  echo "warn:   (expected for a Scheme-only edit; if the change touched C++ too, run make)"
+fi
+for cand in scheme-plugin-guile.so scheme-plugin.so; do
+  if [[ -f $PWD/$cand ]]; then
+    if ! cmp -s "$PWD/$cand" "$PLUGIN"; then
+      echo "warn: loading $PLUGIN, which differs from the tree build $PWD/$cand"
+      echo "warn:   (stale plugin against current .scm?) — for the tree build:"
+      echo "warn:   PLUGIN=$PWD/$cand $0"
+    fi
+    break
+  fi
+done
 FILTER=${1:-}
 WORK=$(mktemp -d /tmp/hyprscheme-test.XXXXXX)
 export WORK
@@ -105,6 +129,14 @@ run_one() {
   fi
 }
 
+# The rules run in FILENAME ORDER, and that order is load-bearing:
+#   - t-api/t-config/... register binds, rules and layouts, so the wiki
+#     doc-example test runs late in the alphabet
+#   - t-zzzz-exit.sh QUITS the compositor, so it must sort strictly last.
+#     (It used to be t-zz-exit.sh — which sorts BEFORE t-zzz-docs.sh, so the
+#     120-block doc test ran against a dead compositor and every block
+#     "passed" because hyprctl's connection failure does not start with
+#     "error:". That is why the doc test also carries a liveness guard.)
 for f in tests/t-*.sh; do
   [[ -n $FILTER && ! $f =~ $FILTER ]] && continue
   run_one "$f"

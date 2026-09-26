@@ -50,7 +50,7 @@
       (cond ((= count 0) '())
             ((= count 1) (list (list 0 0 W H)))
             (else
-             (let* ((mw (exact (floor (* W (vector-ref mfact 0)))))
+             (let* ((mw (inexact->exact (floor (* W (vector-ref mfact 0)))))
                     (slaves (- count 1)))
                (cons (list 0 0 mw H)
                      (let loop ((i 0) (y 0) (boxes '()))

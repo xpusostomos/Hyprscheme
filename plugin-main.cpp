@@ -1,5 +1,4 @@
 #include <src/plugins/PluginAPI.hpp>
-#include "SchemeHost.hpp"
 #include <src/debug/crash/CrashReporter.hpp>
 #include <csignal>
 #include <cstring>
@@ -10,10 +9,10 @@ namespace Config::Scheme {
     void shutdown();
 }
 
-// Chez displaces Hyprland's crash reporter when its kernel initializes; a
-// plugin cannot edit Compositor.cpp to restore it, so reimplement the
-// handler via the exported CrashReporter::createAndSaveCrash. Installed
-// from SchemeManager's init (after Sbuild_heap).
+// The interpreter installs its own signal handlers, displacing Hyprland's
+// crash reporter; a plugin cannot edit Compositor.cpp to restore it, so
+// reimplement the handler via the exported CrashReporter::createAndSaveCrash.
+// Installed from Host's init.
 static void schemeCrashHandler(int sig) {
     signal(SIGABRT, SIG_DFL);
     signal(SIGSEGV, SIG_DFL);
@@ -36,7 +35,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // both artifacts register the name "scheme" (Hyprland keys plugins by
 // handle, the name is hyprctl display metadata); the description tells the
 // backends apart
-    return {"scheme", std::string("Scheme scripting for Hyprland [") + SchemeHost::backendName() + "]", "Chris", "1.0"};
+    return {"scheme", "Guile Scheme scripting for Hyprland", "Chris", "1.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

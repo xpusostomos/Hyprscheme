@@ -16,7 +16,8 @@ namespace Config::Scheme::Layouts {
 
         called with the usable work area; it returns one box per target.
         No state, no context object, no per-target identity — see the design
-        note in SchemeManager.cpp. Selected via `layout = scheme:NAME`.
+        note in the layout entry points (SchemeLayout.cpp). Selected via
+        `layout = scheme:NAME`.
         On any error the layout is replaced by a default grid for the rest of
         the generation (sticky didError, mirroring the Lua provider).
 

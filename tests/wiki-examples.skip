@@ -4,7 +4,6 @@
 # not rot. Keep this list short — a skip here is an example that never
 # gets executed.
 THUNK                    # bind-flags.md/binds.md: placeholder, not a real thunk
-thunk 'submap-universal  # submaps.md: placeholder, not a real thunk
 (MOD ... KEY)            # binds.md: syntax description, not a call
 recalculate-fn           # custom-layouts.md: schematic callback names
 hl-permission-add!      # permissions.md: config-load-only (startup rules); the
