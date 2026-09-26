@@ -2,23 +2,24 @@
 # referenced by at least one test in this suite. Internal hl-- helpers are
 # exempt. Adding a public API without a test fails here by design.
 #
-# The API list comes from the bootstrap itself — it has lived in its own .scm
-# file since the machinery was extracted out of SchemeManager.cpp, and this
-# test spent that whole time reading the old in-C++ copy, matching nothing and
-# passing on an empty list. Three things keep it honest now:
-#   - it reads src/config/scheme/hyprscheme-bootstrap.scm
-#   - the pattern is POSIX-safe and matches define AND define*, with '-' LAST in
-#     the bracket expression and LC_ALL=C, so it means the same thing under
-#     every grep and locale (this machine's grep is ugrep, which rejects
-#     [a-z0-9-?] outright as "Invalid range end"; it also misses '=' and '!',
-#     so hl-exec! and the hl-*-=? predicates would never be listed)
+# The API list comes from `(hyprscheme)` — the public module's #:re-export list,
+# which is now the single source of truth for "what is public". It used to be
+# scraped out of the bootstrap with a define pattern, which failed silently for
+# this test's whole life (it read an in-C++ copy that no longer existed and
+# passed on an empty list). Reading an explicit list is the point of the module
+# work: nothing is inferred from a naming convention any more.
+# Two things keep it honest:
 #   - a vacuity floor: a list below 200 names means the extraction broke, not
 #     that the API shrank
+#   - the umbrellas's list is checked to be non-empty AND to have no hl-- names,
+#     since an internal leaking into the public list is the failure mode a
+#     curated list is meant to prevent
 # Coverage is a substring search for the name, so it proves "referenced by a
 # test", not "asserted at runtime" — good enough to force a test to exist.
-apis=$(LC_ALL=C grep -ohE '^\(define\*? \(hl-[a-z0-9=?!*-]+' \
-         src/config/scheme/hyprscheme-bootstrap.scm \
-       | sed -E 's/^\(define\*? \(//' \
+apis=$(LC_ALL=C sed -n '/#:re-export (/,/))/p' src/config/scheme/hyprscheme.scm \
+       | sed -e 's/#:re-export (//' -e 's/))//g' -e 's/(//g' \
+       | tr -s '[:space:]' '\n' \
+       | LC_ALL=C grep -v '^$' \
        | LC_ALL=C grep -v '^hl--' \
        | sort -u)
 

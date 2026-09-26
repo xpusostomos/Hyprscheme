@@ -107,31 +107,54 @@ using namespace Hyprutils::OS;
 using Hyprutils::OS::CFileDescriptor;
 
 /*
-    Bootstrap: the Scheme machinery (prelude + bootstrap) lives in real .scm
-    files installed NEXT TO THE PLUGIN, located through the plugin's own load
-    path (dladdr on a known symbol). Loaded in two phases:
+    The Scheme machinery lives in real .scm files installed NEXT TO THE PLUGIN,
+    located through the plugin's own load path (dladdr on a known symbol). It is
+    a set of MODULES, and the file paths are the module names:
 
-      1. hyprscheme-prelude.scm — the error plumbing, the callback watchdog,
-         the fire trampolines and the custom-layout entry points, loaded
-         through the host's contained loader.
-      2. hyprscheme-bootstrap.scm, through the prelude's guarded hl--load: the
-         API itself. Any error prints and leaves hl--ready #f; the C side then
-         disables scheme instead of continuing half-initialized.
+      hyprscheme.scm          (hyprscheme)          the PUBLIC API — a curated
+                                                    #:re-export list, and the
+                                                    single source of truth for
+                                                    what is public
+      hyprscheme/kernel.scm   (hyprscheme kernel)   the machinery the host
+                                                    reaches: the watchdog, the
+                                                    fire trampolines, the layout
+                                                    entry points, the record
+                                                    types those read
+      hyprscheme/api.scm      (hyprscheme api)      the API itself, public and
+                                                    internal
 
-    All phases evaluate into the PERSISTENT environment (the interpreter's
-    interaction environment), which holds the API and the cross-reload
-    state forever. Each config generation is then evaluated in its own
-    FRESH environment — a copy made by hl--reset — so definitions from
-    previous generations cannot leak into new ones (mirroring upstream's
-    per-generation lua_State). Machinery variables the config may set!
-    (hl--watchdog-ms) are read through the generation copy so overrides
-    reach them; hl--state is the one deliberate cross-generation bridge.
+    THE WHOLE SCHEME SIDE IS REBUILT ON EVERY CONFIG RELOAD (buildGeneration):
+    each module is created, its bindings are defined into it, its file is read,
+    and a fresh generation module is given the API and the kernel to import. So
+    a definition, a set!, or a handler from a previous generation is unreachable
+    afterwards, with no per-variable teardown to keep in step — the same
+    clean-slate semantics as upstream's per-generation lua_State, reached by
+    rebuilding rather than by copying.
+
+    Note the ORDER, which is load-bearing in two ways: the kernel is read before
+    the API (the API imports it), and a module's bindings must exist BEFORE its
+    file is read, because the file's #:export names bindings the host defined
+    (hl--c-generation, hl--c-run-finalizers).
+
+    Exactly three things deliberately live outside the wipe, each for a
+    concrete reason:
+
+      - the stderr port (Guile.cpp): a port owns the fd it wraps, so a
+        re-created one closes fd 2 when its predecessor is collected — the
+        error log dies silently, and enough of them take the process with it;
+      - the after-gc hook (installGcHook): registered once, or it stacks;
+      - the survive list (g_schemeState): hl-state-set! and friends are
+        documented to outlive reloads.
+
+    Machinery variables a config may set! (hl--watchdog-ms) need no special
+    handling: the reload rebuilds them from source, so the override resets on
+    its own.
 */
 
 
 
 namespace Config::Scheme::Internals {
-    bool        g_up = false;         // interpreter + bootstrap ready
+    bool        g_up = false;         // interpreter + machinery ready
     std::string g_configError;        // last config error, read via c-hl-config-last-error
 
     // Handles live in Handles.hpp: a compositor object crosses to Scheme as a
@@ -155,12 +178,9 @@ namespace Config::Scheme {
     // (generation boundary = handler lifetime), plugin teardown.
     std::unordered_map<uintptr_t, Hyprutils::Signal::CHyprSignalListener> g_eventConnections;
 
-    // lifecycle: the start event is dispatched by an init-time listener
-    // (covers the plugin-auto-loaded-at-startup path, where the config load
-    // precedes the first render frame).
-    static bool                                        g_startSeen      = false;
-    static std::vector<SThunkRef>                      g_pendingStart;
-    static std::vector<Hyprutils::Signal::CHyprSignalListener> g_lifecycleListeners;
+
+    // (the start-dispatch lifecycle state — g_startSeen, g_pendingStart,
+    // g_lifecycleListeners — lives with the event family; see Event.cpp)
 
 
     // ---- the callback watchdog --------------------------------------------------
@@ -304,6 +324,8 @@ namespace Config::Scheme {
     // (record-cell model); every getter returns #f when the surface is gone
     using PHLLSGROUPREF = Hyprutils::Memory::CWeakPointer<Desktop::View::CLayerSurface>;
 
+    static bool buildGeneration(); // defined with the interpreter plumbing
+
     static void reloadScheme() {
         if (!g_up || g_configPath.empty())
             return;
@@ -336,10 +358,18 @@ namespace Config::Scheme {
         // this reload may have changed what they should see.
         CConfigValueBase::flushCaches();
 
-        hl::call0(hl::globalRef("hl--reset"));
+        // handlers subscribed to "start" from the outgoing generation: clearing
+        // this is what the comment above promises — a start dispatch belongs to
+        // the generation that registered it
+        forgetPendingStart();
 
-        const SCM r = hl::call1(hl::globalRef("hl--load"), scm_from_locale_string(g_configPath.c_str()));
-        if (r == SCM_BOOL_F)
+        // wipe the Scheme side and rebuild it from source, then run the new
+        // config in it. A failure anywhere leaves the PREVIOUS generation in
+        // place rather than a half-built one.
+        if (!buildGeneration())
+            return;
+
+        if (!hl::evalFile(g_configPath.c_str()))
             LOG(Log::ERR, "[scheme] failed to load {}", g_configPath);
         else
             LOG(Log::INFO, "[scheme] loaded {}", g_configPath);
@@ -505,11 +535,72 @@ namespace Config::Scheme {
         g_up = false;
     }
 
+    /*
+        The current generation: the module the prelude, the API and the config
+        are evaluated into, and the module C++'s Scheme-side entry points are
+        resolved from. Rebuilt from source on every reload — see reloadScheme.
+    */
+    static SCM g_generation = SCM_BOOL_F;
+
+    static SCM hlSchemeGeneration() {
+        return g_generation;
+    }
+
+
+    /*
+        The survive list: the one deliberate cross-generation bridge
+        (hl-state-set! and friends). The VALUE lives here, in the host, because
+        it has to outlive every generation — each reload rebuilds the Scheme
+        side, so a list kept there would go with it. The list manipulation
+        stays in Scheme; this only owns the value.
+    */
+    static SCM g_schemeState = SCM_EOL;
+
+    static SCM hlSchemeStateGet() {
+        return g_schemeState;
+    }
+
+    static int hlSchemeStateSet(SCM v) {
+        hl::unlock(g_schemeState);
+        g_schemeState = v;
+        hl::lock(v);
+        return 0;
+    }
+
+    /*
+        The after-gc hook pumps the collector's finalizer queue (Handles.hpp:
+        finalizers delete weak refs, which is compositor state, so they must run
+        on this thread). Registered with the finalizer gsubr itself, which is
+        already 0-arity — no Scheme wrapper, and nothing to allocate inside the
+        hook. Once per process: attachInterp runs again on a soft plugin reload,
+        and a second registration would stack.
+    */
+    static void installGcHook() {
+        static bool installed = false;
+        if (installed)
+            return;
+        installed = true;
+        SCM runner = hl::globalRefOrFalse("hl--c-run-finalizers");
+        if (scm_is_false(runner)) {
+            LOG(Log::ERR, "[scheme] hl--c-run-finalizers is unbound; the finalizers will not be pumped");
+            return;
+        }
+        hl::lock(runner); // the hook holds it; pin it explicitly too
+        hl::call2(hl::globalRefOrFalse("add-hook!"), hl::globalRefOrFalse("after-gc-hook"), runner);
+    }
+
     // attachInterp: register foreign symbols and load the prelude + API
     // bootstrap. Called on first init and on every soft reload (so a
     // re-loaded plugin picks up its new scheme API against the live
     // interpreter). Returns false when the bootstrap failed.
-    static bool attachInterp() {
+    /*
+        Every gsubr, defined into the CURRENT module — which is the generation
+        while one is being built, so each reload gets its own bindings along
+        with its own API. Registration is cheap (a hash insert each) and it is
+        what makes the generation self-contained: nothing is imported from a
+        module the plugin happens to have started in.
+    */
+    static void registerAllBindings() {
         // handle types: the predicates are structural (a foreign object of the
         // family's own type), and the machinery pumps the finalizers
         hl::bind<hl::isWindow>("hl--c-window?");
@@ -518,9 +609,18 @@ namespace Config::Scheme {
         hl::bind<hl::isGroup>("hl--c-group?");
         hl::bind<hl::isLayer>("hl--c-layer?");
         hl::bind<hl::isNotification>("hl--c-notification?");
+
+        // the finalizer pump: the after-gc hook is installed with this gsubr as
+        // its thunk (installGcHook), so it must be registered or the collector's
+        // queue is never drained
         hl::bind<hl::runFinalizers>("hl--c-run-finalizers");
 
-        // window read-side fields (LuaWindow parity)
+        // the generation pointer and the survive list's storage (the host owns
+        // both values; see above)
+        hl::bind<hlSchemeGeneration>("hl--c-generation");
+        hl::bind<hlSchemeStateGet>("hl--c-state-get");
+        hl::bind<hlSchemeStateSet>("hl--c-state-set");
+
         // each family file registers its own Scheme-visible surface
         registerLayer();
         registerNotification();
@@ -538,57 +638,166 @@ namespace Config::Scheme {
         registerEvent();
         // (tools/split-family.py inserts the next family above this line)
         Layouts::registerSymbols();
+    }
 
-        // the .scm machinery lives next to the plugin; the dev tree is the
-        // first candidate so a dev build loads its own sources before any
-        // installed copies (mirroring the boot-file fallback order)
+    // where the .scm machinery lives. The dev tree is the first candidate so a
+    // dev build loads its own sources before any installed copies (mirroring
+    // the boot-file fallback order).
 #ifndef SOURCE_DIR
 #define SOURCE_DIR "" // hand compiles: only the plugin dir is consulted
 #endif
-        static const std::vector<std::string> scmDirs = [] {
-            std::vector<std::string> dirs;
+    static std::string schemePath(const char* name);
+
+    // the machinery directory the host resolved, for %load-path
+    static std::string schemeDir() {
+        return std::filesystem::path(schemePath("hyprscheme.scm")).parent_path().string();
+    }
+
+    static std::string schemePath(const char* name) {
+        static const std::vector<std::string> dirs = [] {
+            std::vector<std::string> d;
             const char*              src = getenv("HYPRSCHEME_SCM_DIR"); // dev/test override
             if (src && *src)
-                dirs.push_back(src);
+                d.push_back(src);
             if (const auto dev = std::filesystem::path(SOURCE_DIR) / "src" / "config" / "scheme"; std::filesystem::exists(dev))
-                dirs.push_back(dev.string());
-            dirs.push_back(pluginDir());
-            dirs.push_back("/usr/lib/hyprscheme");
-            return dirs;
+                d.push_back(dev.string());
+            d.push_back(pluginDir());
+            d.push_back("/usr/lib/hyprscheme");
+            return d;
         }();
-        const auto tryScm = [](const char* name) {
-            for (const auto& dir : scmDirs) {
-                if (dir.empty())
-                    continue;
-                const auto p = dir + "/" + name;
-                if (std::filesystem::exists(p))
-                    return p;
-            }
-            LOG(Log::ERR, "[scheme] {} not found (looked in HYPRSCHEME_SCM_DIR, the source tree, the plugin dir)", name);
-            return std::string(name);
+        for (const auto& dir : dirs) {
+            if (dir.empty())
+                continue;
+            const auto p = dir + "/" + name;
+            if (std::filesystem::exists(p))
+                return p;
+        }
+        LOG(Log::ERR, "[scheme] {} not found (looked in HYPRSCHEME_SCM_DIR, the source tree, the plugin dir)", name);
+        return std::string(name);
+    }
+
+    /*
+        Build a fresh generation and evaluate the machinery into it. This is the
+        wipe: the prelude, the API and (by reloadScheme) the config all go into
+        a brand-new module, so nothing a previous generation defined — or set!
+        — can be reached afterwards, with no per-variable teardown to keep in
+        step.
+
+        Built into a temporary module and swapped in only once every step has
+        succeeded: a broken config or a bad edit to the machinery leaves the
+        previous generation live rather than a half-built one.
+    */
+    static bool buildGeneration() {
+        const SCM prevGen    = g_generation;
+        const SCM prevModule = scm_current_module();
+
+        // the machinery directory goes on %load-path: the modules resolve each
+        // other BY NAME from here ((hyprscheme kernel) is hyprscheme/kernel.scm),
+        // and a config's own (use-modules ...) resolves from it too.
+        // (`add-to-load-path` is a syntax transformer, not a procedure, so it
+        // cannot be called from C++ — the runtime does the variable directly.)
+        if (!hl::addLoadPath(schemeDir().c_str()))
+            LOG(Log::ERR, "[scheme] could not put the machinery on %load-path");
+
+        // 1. the KERNEL: created first, given its one gsubr, then loaded. Its
+        //    export list is explicit (module-export-all! is not enough — see
+        //    the note there), so the binding must exist before the file is read.
+        const SCM kernel = hl::makeModule("hyprscheme kernel");
+        if (scm_is_false(kernel)) {
+            LOG(Log::ERR, "[scheme] could not create the kernel module");
+            return false;
+        }
+        // THE WHOLE C++ SURFACE GOES INTO THE KERNEL. Every module wraps gsubrs,
+        // and the kernel is the one module they all import, so this is where the
+        // boundary belongs — and its export list names them, hence the order.
+        scm_set_current_module(kernel);
+        registerAllBindings();
+        if (!hl::loadModule(schemePath("hyprscheme/kernel.scm").c_str())) {
+            LOG(Log::ERR, "[scheme] the kernel failed to load");
+            scm_set_current_module(prevModule);
+            return false;
+        }
+
+        // 2. the modules that hold the API: (hyprscheme core) is the shared
+        //    plumbing, one module per family is the raw API, and extras holds
+        //    the few conveniences that compose several calls. Each imports the
+        //    kernel (and core); none imports another family except extras.
+        static const char* kApiModules[] = {
+            "hyprscheme/core.scm", "hyprscheme/bind.scm", "hyprscheme/config.scm",
+            "hyprscheme/event.scm", "hyprscheme/exec.scm", "hyprscheme/gesture.scm",
+            "hyprscheme/group.scm", "hyprscheme/layer.scm", "hyprscheme/monitor.scm",
+            "hyprscheme/notification.scm", "hyprscheme/query.scm", "hyprscheme/rule.scm",
+            "hyprscheme/timer.scm", "hyprscheme/window.scm", "hyprscheme/workspace.scm",
+            "hyprscheme/extras.scm",
         };
-
-        // phase 1: the prelude (verified plumbing; errors contained at the
-        // host). The entry points above are registered before this, so the
-        // machinery's calls resolve as soon as a config makes one.
-        if (!hl::evalFile(tryScm("hyprscheme-prelude.scm").c_str())) {
-            LOG(Log::ERR, "[scheme] prelude failed to load, scheme scripting disabled");
-            return false;
-        }
-        // the guarded loader must exist before anything else loads — if the
-        // prelude is missing, stop here instead of letting an unbound
-        // globalRef unwind into C++
-        if (!hl::isBound("hl--load")) {
-            LOG(Log::ERR, "[scheme] interpreter machinery incomplete, scheme scripting disabled");
-            return false;
+        for (const char* rel : kApiModules) {
+            if (!hl::loadModule(schemePath(rel).c_str())) {
+                LOG(Log::ERR, "[scheme] {} failed to load", rel);
+                scm_set_current_module(prevModule);
+                return false;
+            }
         }
 
-        hl::call1(hl::globalRef("hl--load"), scm_from_locale_string(tryScm("hyprscheme-bootstrap.scm").c_str()));
-
-        if (hl::globalRef("hl--ready") == SCM_BOOL_F) {
-            LOG(Log::ERR, "[scheme] bootstrap failed, scheme scripting disabled");
+        // 3. the curated public umbrella over them
+        if (!hl::loadModule(schemePath("hyprscheme.scm").c_str())) {
+            LOG(Log::ERR, "[scheme] the public API umbrella failed to load");
+            scm_set_current_module(prevModule);
             return false;
         }
+
+        // 4. the generation a config runs in: imports the API and the kernel
+        //    DIRECTLY (not the umbrella), so the hl-- helpers stay reachable —
+        //    exactly the surface a config had when everything was one module
+        const SCM gen = hl::makeFreshModule();
+        // the standard library the machinery itself imports, so a config has
+        // the environment it has always had (a config may use call-with-string-
+        // output-port, exists/for-all, filter, keyword arguments …)
+        if (scm_is_false(gen) ||
+            !hl::useModule(gen, "rnrs io ports") || !hl::useModule(gen, "rnrs lists") ||
+            !hl::useModule(gen, "srfi srfi-1") || !hl::useModule(gen, "ice-9 optargs") ||
+            !hl::useModule(gen, "ice-9 exceptions") || !hl::useModule(gen, "hyprscheme kernel") ||
+            !hl::useModule(gen, "hyprscheme core") || !hl::useModule(gen, "hyprscheme bind") ||
+            !hl::useModule(gen, "hyprscheme config") || !hl::useModule(gen, "hyprscheme event") ||
+            !hl::useModule(gen, "hyprscheme exec") || !hl::useModule(gen, "hyprscheme gesture") ||
+            !hl::useModule(gen, "hyprscheme group") || !hl::useModule(gen, "hyprscheme layer") ||
+            !hl::useModule(gen, "hyprscheme monitor") || !hl::useModule(gen, "hyprscheme notification") ||
+            !hl::useModule(gen, "hyprscheme query") || !hl::useModule(gen, "hyprscheme rule") ||
+            !hl::useModule(gen, "hyprscheme timer") || !hl::useModule(gen, "hyprscheme window") ||
+            !hl::useModule(gen, "hyprscheme workspace") || !hl::useModule(gen, "hyprscheme extras")) {
+            LOG(Log::ERR, "[scheme] could not assemble the generation");
+            scm_set_current_module(prevModule);
+            return false;
+        }
+        scm_set_current_module(gen);
+
+        // the machinery is in; say so. The flag lives in the kernel (so the
+        // generation can read it through its import) and the host sets it,
+        // because the host is what knows every module loaded.
+        if (!hl::setModuleVariable(kernel, "hl--ready", SCM_BOOL_T))
+            LOG(Log::ERR, "[scheme] could not set hl--ready");
+        if (scm_is_false(hl::globalRef("hl--ready"))) {
+            LOG(Log::ERR, "[scheme] the API did not finish loading; keeping the previous generation");
+            scm_set_current_module(prevModule);
+            return false;
+        }
+
+        g_generation = gen;
+        hl::lock(gen);
+        if (!scm_is_false(prevGen))
+            hl::unlock(prevGen);
+        return true;
+    }
+
+    static bool attachInterp() {
+        // wipe and rebuild: the prelude and the API go into a fresh generation,
+        // with the gsubrs registered into it first
+        if (!buildGeneration()) {
+            LOG(Log::ERR, "[scheme] scheme scripting disabled");
+            return false;
+        }
+        // the hook's thunk is the finalizer gsubr, so it must exist first (and
+        // it is registered into the generation that buildGeneration just made)
+        installGcHook();
         g_up = true;
         startWatchdog();
         return true;

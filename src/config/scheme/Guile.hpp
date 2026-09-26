@@ -25,9 +25,31 @@ namespace hl {
     // load a file of Scheme forms, contained: false when it failed
     bool evalFile(const char* path);
 
-    // top-level binding lookup
-    SCM  globalRef(const char* name);
-    bool isBound(const char* name);
+    // top-level binding lookup (in the CURRENT module, which is the generation
+    // while one is being built — see Host.cpp's buildGeneration)
+    SCM globalRef(const char* name);
+    // the same lookup, contained: #f when the name is unbound
+    SCM globalRefOrFalse(const char* name);
+
+    // a blank module to hold a generation, or #f if it could not be created
+    SCM makeFreshModule();
+
+    // load a file that DEFINES A MODULE, restoring the current module after it
+    // (a `define-module` file switches it as a side effect)
+    bool loadModule(const char* path);
+    // resolve a module by name, or #f
+    SCM  resolveModule(const char* name);
+    // create a module if it does not exist, so bindings can go into it before
+    // its file is read; #f on failure
+    SCM  makeModule(const char* name);
+    // prepend DIR to %load-path (the modules resolve each other by name)
+    bool addLoadPath(const char* dir);
+    // set a variable in a named module, contained
+    bool setModuleVariable(SCM module, const char* name, SCM value);
+    // export every local binding of a module (the kernel, after registration)
+    bool exportAll(SCM module);
+    // make GEN import another module's public interface
+    bool useModule(SCM gen, const char* name);
 
     // contained calls: the result, or #f when the call raised
     SCM call0(SCM fn);

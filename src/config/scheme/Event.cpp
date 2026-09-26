@@ -365,6 +365,14 @@ namespace Config::Scheme {
         g_eventConnections.clear();
     }
 
+    // the reload boundary for the start dispatch: a handler subscribed before
+    // the session's first render frame is pinned here until that frame, and a
+    // reload in between would otherwise replay a discarded generation's handler
+    // into the new one
+    void forgetPendingStart() {
+        g_pendingStart.clear();
+    }
+
     // this family's Scheme-visible surface
     void registerEvent() {
         hl::bind<hlSchemeWindowEventListen>("hl--c-window-event-listen");

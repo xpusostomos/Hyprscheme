@@ -58,19 +58,70 @@ Lua feature has a `hl-*` equivalent.
 
 ## How the plugin loads Scheme
 
-Two real `.scm` files (no embedded blobs — they were extracted out of
-the C++ in Sep 2026), installed next to the `.so`, found
+The machinery is **three modules** (no embedded blobs — the `.scm` were
+extracted out of the C++ in Sep 2026), installed next to the `.so`, found
 via `dladdr` on a known symbol, with fallbacks to the source tree
-(`SOURCE_DIR` compile define) and `HYPRSCHEME_SCM_DIR` env var:
+(`SOURCE_DIR` compile define) and `HYPRSCHEME_SCM_DIR` env var. **The file
+paths are the module names** — `(hyprscheme kernel)` must be resolvable as
+`hyprscheme/kernel.scm` — so the machinery directory goes on `%load-path`
+at build time:
 
-1. `hyprscheme-prelude.scm` — error plumbing, the callback watchdog,
-   the fire trampolines and the custom-layout entry points, in plain
-   Guile (standard-library imports only, no dialect shims). Loaded
-   through the guarded `hl--load`. An error here disables scheme, which
-   is why it must stay "verified, static".
-2. `hyprscheme-bootstrap.scm` — the API itself, guarded; ends with
-   `(set! hl--ready #t)`. If anything fails, `hl--ready` stays `#f`
-   and the C++ side disables scheme loudly.
+1. `hyprscheme/kernel.scm` → `(hyprscheme kernel)` — the machinery AND the
+   **whole C++ boundary**: error plumbing, the watchdog, the fire trampolines,
+   the custom-layout entry points, the record types those read, and every
+   `hl--c-*` gsubr (its export list is generated from the C++ `hl::bind<>()`
+   registrations). Everything else imports it to reach C++.
+2. `hyprscheme/core.scm` → `(hyprscheme core)` — shared plumbing: argument
+   coercion, the plist convention, key-spec parsing (`hl-kbd`/`hl-key`), the
+   handle predicates, the cross-reload state accessors, the listen helpers.
+3. **One module per object family** — `window.scm`, `monitor.scm`,
+   `workspace.scm`, `group.scm`, `layer.scm`, `bind.scm`, `event.scm`,
+   `timer.scm`, `rule.scm`, `config.scm`, `notification.scm`, `gesture.scm`,
+   `exec.scm`, `query.scm`. Each holds the **raw API**: thin wrappers over
+   what the compositor can actually do.
+4. `hyprscheme/extras.scm` → `(hyprscheme extras)` — the few conveniences
+   that need several calls to compose (e.g. setting a special workspace
+   *on/off* when the compositor only offers a *toggle*).
+5. `hyprscheme.scm` → `(hyprscheme)` — the **public API**: a curated
+   `#:re-export` list over all of them. **This list is the single source of
+   truth for "what is public"** (`t-coverage` reads it). The generation a
+   config runs in does NOT import it — it imports the families, core and the
+   kernel directly, so internals stay reachable.
+
+**The structural rule, checked by `tools/module-audit.py`:** a family imports
+`(hyprscheme kernel)` and `(hyprscheme core)` and **nothing else of ours** —
+it never calls another family. Only extras may compose families. That is what
+makes the split worth having rather than a directory of mutual dependencies,
+so the tool enforces it and the suite would catch a violation at runtime.
+`hl--ready` is the kernel's flag and the **host** sets it once every module
+has loaded; a `set!` of an imported binding is a syntax error in a declarative
+module, which is why no `.scm` does it.
+
+Things that bit us and are worth not rediscovering:
+
+- **`#:export` must be explicit.** `module-export-all!` makes bindings
+  visible to `module-variable` but does NOT reach a module that later
+  `use-modules`/`#:re-export`s the module.
+- **`#:re-export` re-exports what the module has already imported** — the
+  umbrella needs `#:use-module (hyprscheme api)` (and the kernel) first.
+- **A module's bindings must exist before its file is read**, because its
+  `#:export` names them. The host defines the kernel's two gsubrs
+  (`hl--c-generation`, `hl--c-run-finalizers`) before reading `kernel.scm`.
+- **Guile hoists top-level defines**, so `(define hl--base-load load)` in a
+  module file captures that file's own `load` shadow — use `(@ (guile) load)`.
+- A module that shadows `load`/`eval` needs **`#:declarative? #f`**.
+- **Imports are not transitive**: the API needs its own
+  `(use-modules (srfi srfi-1) …)`, and the generation gets the same list so a
+  config keeps the environment it always had.
+- The **kernel must not depend on a family** (families import the kernel).
+  The record types and their accessors therefore live in the kernel.
+- **`loadModule` loads from a base module**, not from whatever is current:
+  `define-module` is expanded in the current module, and one of the
+  machinery's own modules need not carry its expander.
+- `add-to-load-path` is a **syntax transformer**, not a procedure — the host
+  sets `%load-path` as a variable.
+- An **exception escaping into C++ corrupts the compositor heap**
+  (`corrupted size vs. prev_size`). Every C++→Scheme call must be contained.
 
 (The deprecated Chez tree loaded prelude → defun → bootstrap; that
 machinery — including the defun/describe-function file — is frozen in
@@ -84,12 +135,32 @@ side (interpreter startup, contained file loads, contained calls, GC
 pinning) is `Guile.hpp`/`Guile.cpp`. The bootstrap's wrappers call those
 gsubrs under internal `hl--c-*` names.
 
-Everything evaluates into the **persistent** environment. Each config
-reload calls `hl--reset`, which copies the interaction environment into
-a fresh generation (user definitions can't leak across reloads, like
-upstream's per-generation lua_State). `load`/`eval` are shadowed to
-target the current generation. `hl--state` is the one deliberate
-cross-generation bridge.
+### The wipe: the Scheme side is rebuilt on every reload
+
+There is no persistent environment holding the API. `buildGeneration`
+(Host.cpp) creates each module per reload, defines its bindings into it,
+reads its file, and gives a **fresh generation module** the API and the
+kernel to import — then the config is read into that generation — so a definition, a `set!`, or a handler from the
+previous config is unreachable afterwards with no per-variable teardown
+list to keep in step. Same clean-slate semantics as upstream's
+per-generation lua_State, reached by rebuilding rather than by copying.
+It is built aside and swapped in only if every step succeeded, so a
+broken config leaves the previous generation live.
+
+**Exactly three things live outside the wipe**, each for a concrete
+reason — do not move them back into the machinery:
+
+- the **stderr port** (`Guile.cpp`): a port owns the fd it wraps, so a
+  re-created one closes fd 2 when its predecessor is collected. The error
+  log dies silently, and enough of them take the process with it.
+- the **after-gc hook** (`installGcHook`): registered once, or it stacks
+  a fresh closure per reload.
+- the **survive list** (`g_schemeState`, behind `hl-state-set!` and
+  friends): documented to outlive reloads.
+
+`hl--watchdog-ms` needs no such treatment: the reload rebuilds it from
+source, so a config's override resets on its own. `load`/`eval` are
+shadowed to target the current generation (`hl--c-generation`).
 
 ## The C++ layout: one translation unit per object family
 

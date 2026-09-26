@@ -6,6 +6,7 @@ ok()    { out=$($SCHEME "$1" 2>&1); [[ "$out" == "#t" ]] || { echo "FAIL: $1 => 
 noerr() { out=$($SCHEME "$1" 2>&1); [[ "$out" != "error:"* ]] || { echo "FAIL: $1 => [$out]"; FAILED=1; }; }
 val()   { out=$($SCHEME "$1" 2>&1); [[ "$out" == "$2" ]] || { echo "FAIL: $1 => [$out] want [$2]"; FAILED=1; }; }
 idok()  { out=$($SCHEME "$1" 2>&1); [[ "$out" =~ ^[0-9]+$ ]] || { echo "FAIL: $1 => [$out] want id"; FAILED=1; }; }
+unbound() { out=$($SCHEME "$1" 2>&1); [[ "$out" == *"Unbound variable"* ]] || { echo "FAIL (expected unbound): $1 => [$out]"; FAILED=1; }; }
 
 # ---- fixtures: one window under test, one sacrificial ----------------------
 $SCHEME '(hl-exec! "foot -a api-main")' >/dev/null
@@ -240,6 +241,11 @@ ok '(hl-workspace-special? (hl-monitor-active-special-workspace (hl-active-monit
 ok '(begin (hl-monitor-workspace-special-set! (hl-active-monitor) #f) (not (hl-monitor-active-special-workspace (hl-active-monitor))))'
 ok '(begin (hl-workspace-special-set! "api-special" #:on? #t) (hl-workspace-special? (hl-monitor-active-special-workspace (hl-active-monitor))))'
 ok '(begin (hl-workspace-special-set! "api-special" #:on? #f) (not (hl-monitor-active-special-workspace (hl-active-monitor))))'
+
+# the RAW operation the set! above is built on: a plain toggle (the compositor
+# has no "set", which is why the convenience lives in (hyprscheme extras))
+ok '(boolean? (hl-workspace-special-toggle! "api-special"))'
+ok '(begin (hl-workspace-special-toggle! "api-special") (not (hl-monitor-active-special-workspace (hl-active-monitor))))'
 ok '(boolean? (hl-monitor-swap! (hl-active-monitor) (hl-active-monitor)))'
 ok '(let ((l (hl-workspace-windows (hl-active-workspace)))) (list? l))'
 
@@ -707,5 +713,17 @@ ok '(begin (hl-state-set! (quote api-unload) #f)
 ok '(hl-config-reload!)'
 ok '(hl-state-ref (quote api-unload))'
 val '(+ 40 2)' '42'
+
+# ---- the wipe: nothing else survives a reload --------------------------------
+# The deliberate bridge (hl-state) survives, above. Everything else does not:
+# a definition, and a set! of a machinery variable, belong to the generation
+# that made them. This is the property the clean-slate reload exists for — it
+# is what makes "reloading gives you a clean slate" true rather than
+# aspirational, and it is why no per-variable teardown list is needed.
+ok '(begin (define api-gen-scoped 1) (set! hl--watchdog-ms 999999) #t)'
+val 'hl--watchdog-ms' '999999'
+ok '(hl-config-reload!)'
+unbound '(api-gen-scoped)'
+val 'hl--watchdog-ms' '5000'
 
 [[ $FAILED -eq 0 ]]

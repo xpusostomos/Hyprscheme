@@ -32,8 +32,11 @@ LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 # prelude (error plumbing, watchdog, fire trampolines, layout entry
 # points) and the bootstrap (the API). The Chez-only defun machinery is
 # frozen in chez/.
-SCM_FILES = src/config/scheme/hyprscheme-prelude.scm \
-            src/config/scheme/hyprscheme-bootstrap.scm
+# the machinery as MODULES (the file paths are the module names: (hyprscheme)
+# resolves to hyprscheme.scm, (hyprscheme kernel) to hyprscheme/kernel.scm)
+SCM_FILES = src/config/scheme/hyprscheme.scm \
+            src/config/scheme/hyprscheme/kernel.scm \
+            src/config/scheme/hyprscheme/api.scm
 
 # guile-3.0 cflags/libs: Guile.cpp, Handles.* and Bindings.hpp include
 # libguile headers
@@ -90,9 +93,10 @@ src/plugin-main.o: plugin-main.cpp
 # ---- install ---------------------------------------------------------------
 
 install: $(TARGET)
-	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme
+	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-	install -m 644 $(SCM_FILES) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 src/config/scheme/hyprscheme.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 src/config/scheme/hyprscheme/*.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
 	@echo ""
 	@echo "Plugin installed: $(DESTDIR)$(PREFIX)/lib/hyprscheme/$(TARGET)"
 	@echo "Load into a compositor built from $(HYPRLAND_SRC):"

@@ -74,6 +74,7 @@ namespace Config::Scheme {
     // the host's side of the event plumbing (Event.cpp)
     void registerStartDispatch(); // the once-only "start" dispatch
     void dropEventHandlers();     // the reload boundary
+    void forgetPendingStart();    // the reload boundary, for pre-first-frame handlers
     void shutdownEvents();        // plugin teardown
 
     // the callback watchdog (defined with the host): every entry point that can
