@@ -50,11 +50,25 @@ Lua feature has a `hl-*` equivalent.
   Hyprland + the Guile plugin (installs via the Makefile's DESTDIR
   rule) and ships the matched compositor as `hyprland-scheme`. The
   frozen Chez variant lives at `chez/packaging/PKGBUILD`.
-- `tools/syntax-check.scm` — after ANY scripted edit to a machinery
-  `.scm` file, run `guile -s tools/syntax-check.scm <files>`: it runs
-  Guile's own reader over the files and reports read errors with the
-  reader's file:line:col (exit 1 on failure). Catches the
-  paren/quote/docstring-corruption class of bug at the edit site.
+- **`make` runs the lints** (`all: $(TARGET) check`), so they are not
+  optional:
+  - `tools/syntax-check.scm` — Guile's own reader over every machinery
+    `.scm`, reporting read errors with the reader's `file:line:col`. The
+    paren/quote/docstring-corruption class, at the edit site rather than as
+    a "prelude failed to load" at startup.
+  - `tools/module-audit.py` — the module rule: a family imports only the
+    kernel and core and calls nothing another family owns; only extras
+    composes. Its whole point is that this rule decays silently.
+  - `tools/load-check.scm` — stubs the C entry points and loads the
+    machinery in a plain `guile`: a load-time error with no compositor.
+  - `tools/bind-audit.py` — every `hl--c-*` the machinery calls is
+    registered, none twice, none dead — and nothing is left undefined in
+    the built `.so` (how a family object missing from `COMMON_OBJS` shows
+    up: it links fine and fails only when the compositor loads it).
+  Each has been **verified to fail**: a deliberate cross-family call trips
+  module-audit, an undefined call at load trips load-check. A check that
+  cannot fail is worse than no check — `t-coverage` passed vacuously for
+  its whole life.
 
 ## How the plugin loads Scheme
 

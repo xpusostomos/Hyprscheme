@@ -58,7 +58,7 @@ OBJ         = $(COMMON_OBJS) $(HOST_GUILE)
 
 TARGET       = scheme-plugin-guile.so
 
-all: $(TARGET)
+all: $(TARGET) check
 
 # ---- Hyprland (in place) ---------------------------------------------------
 
@@ -119,6 +119,30 @@ install-compositor: $(TARGET) $(HYPRLAND_SRC)/build/Hyprland
 	fi
 	@echo ""
 	@echo "hyprland-scheme installed at: $(DESTDIR)$(PREFIX)/bin/hyprland-scheme"
+
+# ---- the lints -------------------------------------------------------------
+#
+# Part of `make`, not an optional extra: every one of these catches a class of
+# fault that reached a running compositor during development.
+#   syntax-check  Guile's own reader — the paren/quote/docstring class, at the
+#                 edit site, instead of a "prelude failed to load" at startup
+#   module-audit  the module rule: a family imports only the kernel and core and
+#                 never calls another family
+#   load-check    stubs the C entry points and loads the machinery in a plain
+#                 guile: catches a load-time error with no compositor
+#   bind-audit    every hl--c-* the machinery calls is registered, none twice,
+#                 none dead — and nothing is left UNDEFINED IN THE BUILT .so,
+#                 which is how a family object missing from COMMON_OBJS shows up
+#                 (it links fine and fails only when the compositor loads it)
+SCM_SRC = $(wildcard src/config/scheme/*.scm src/config/scheme/hyprscheme/*.scm)
+
+.PHONY: check
+check: $(TARGET)
+	@echo "== syntax-check"; guile -s tools/syntax-check.scm $(SCM_SRC)
+	@echo "== module-audit"; python3 tools/module-audit.py
+	@echo "== load-check";   guile --no-auto-compile -L src/config/scheme -s tools/load-check.scm >/dev/null 2>&1 \
+	  && echo "ok: the machinery loads" || { echo "load-check FAILED"; exit 1; }
+	@echo "== bind-audit";   python3 tools/bind-audit.py
 
 clean:
 	rm -f $(OBJ) $(TARGET)

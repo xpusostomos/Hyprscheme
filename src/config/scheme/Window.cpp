@@ -120,11 +120,6 @@ namespace Config::Scheme {
     static SCM hlSchemeWindowClass(SCM id) {
         if (!g_up)
             return SCM_BOOL_F;
-        {
-            std::ofstream pr("/tmp/hs-sel-debug", std::ios::app);
-            auto w = hl::windowOf(id);
-            pr << "class(" << id << ") -> " << (w ? w->metadata().appID() : "NULL") << "\n";
-        }
 
         const auto window = hl::windowOf(id);
         if (!window)
@@ -352,17 +347,6 @@ namespace Config::Scheme {
             return -1;
 
         return Config::Actions::focus(*window) ? 0 : -2;
-    }
-
-    static int hlSchemeWindowFloat(SCM id) {
-        if (!g_up)
-            return -1;
-
-        const auto window = actionWindow(id);
-        if (!window)
-            return -1;
-
-        return Config::Actions::floatWindow(Config::Actions::TOGGLE_ACTION_TOGGLE, *window) ? 0 : -2;
     }
 
     static int hlSchemeWindowMoveToWorkspace(SCM id, const char* name) {
@@ -896,7 +880,6 @@ namespace Config::Scheme {
         hl::bind<hlSchemeWindowXdgDescription>("hl--c-window-xdg-description");
         hl::bind<hlSchemeWindowLayout>("hl--c-window-layout");
         hl::bind<hlSchemeWindowFocus>("hl--c-window-focus");
-        hl::bind<hlSchemeWindowFloat>("hl--c-window-float");
         hl::bind<hlSchemeWindowMoveToWorkspace>("hl--c-window-move-to-workspace");
         hl::bind<hlSchemeWindowFullscreenSet>("hl--c-window-fullscreen-set");
         hl::bind<hlSchemeWindowFullscreenToggle>("hl--c-window-fullscreen-toggle");

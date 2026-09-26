@@ -306,7 +306,7 @@ noerr '(hl-monitor-mirror-of am)'
 noerr '(hl-monitor-active-workspace am)'
 noerr '(hl-monitor-active-special-workspace am)'
 ok '(boolean? (hl-monitor-alive? am))'
-ok '(hl-monitor-rule-add!=? am am)'
+ok '(hl-monitor=? am am)'
 ok '(hl-monitor-rule-add! (hl-monitor-name am) #:reserved (quote (top 0)))'
 
 # ---- config -----------------------------------------------------------------

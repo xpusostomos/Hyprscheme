@@ -198,10 +198,9 @@ namespace Config::Scheme {
     }
 
     void watchdogEnter(const char* what) {
-        {
-            std::ofstream pr("/tmp/hs-wd-probe", std::ios::app);
-            pr << "enter " << what << "\n";
-        }
+        // NO I/O here: this runs on every scheme callback. A debug write to
+        // /tmp once lived here and grew to a megabyte in a single session,
+        // in the hot path of the whole API.
         g_callbackWhat = what;
         g_callbackStartMs = watchdogNowMs();
     }

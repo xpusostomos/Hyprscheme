@@ -71,12 +71,6 @@ namespace Config::Scheme {
         return actionResult("group-lock", Config::Actions::lockGroups(sc<Config::Actions::eTogglableAction>(act)));
     }
 
-    static int hlSchemeGroupLockActive(int act) {
-        if (!g_up)
-            return -1;
-        return actionResult("group-lock-active", Config::Actions::lockActiveGroup(sc<Config::Actions::eTogglableAction>(act)));
-    }
-
     static int hlSchemeGroupAlive(SCM id) {
         if (!g_up)
             return -1;
@@ -204,7 +198,6 @@ namespace Config::Scheme {
         hl::bind<hlSchemeGroupIndex>("hl--c-group-index");
         hl::bind<hlSchemeGroupMoveWindow>("hl--c-group-move-window");
         hl::bind<hlSchemeGroupLock>("hl--c-group-lock");
-        hl::bind<hlSchemeGroupLockActive>("hl--c-group-lock-active");
         hl::bind<hlSchemeGroupAlive>("hl--c-group-alive");
         hl::bind<hlSchemeGroupSame>("hl--c-group-same");
         hl::bind<hlSchemeGroupMembers>("hl--c-group-members");
