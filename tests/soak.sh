@@ -34,8 +34,9 @@ BATCH_EVALS=8      # hyprctl scheme evals per iteration batch
 MAX_WINDOWS=6      # concurrent churn windows
 
 BIN="${BIN:-$HOME/.local/bin/hyprland-scheme}"
-# the plugin to load: scheme-plugin.so (Chez) or scheme-plugin-guile.so
-PLUGIN="${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin.so}"
+# the plugin to load; the maintained Guile backend is the default (the Chez
+# one is deprecated and this tree does not build it — override PLUGIN= for it)
+PLUGIN="${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin-guile.so}"
 [[ -x $BIN ]] || BIN=hyprland-scheme
 command -v "$BIN" >/dev/null 2>&1 || { echo "FAIL: no hyprland-scheme binary (make install-compositor?)"; exit 1; }
 [[ -f $PLUGIN ]] || { echo "FAIL: plugin not installed"; exit 1; }
@@ -150,18 +151,24 @@ eval_scheme fixture "(begin (define soak-rule (hl-window-rule-add! \"soak-rule\"
 # is part of what we are exercising)
 eval_scheme fixture "(let ((mfact (vector 0.5)) (opens (vector 0)) (closes (vector 0)))
   (hl-layout-add! \"soak-layout\"
-    'recalculate (lambda (count W H windows)
-                   (cond ((= count 0) '())
-                         ((= count 1) (list (list 0 0 W H)))
-                         (else
-                          (let* ((mw (exact (floor (* W (vector-ref mfact 0)))))
-                                 (sl (- count 1))
-                                 (sh (quotient H sl)))
-                            (let build ((i 1) (acc (list (list 0 0 mw H))))
-                              (if (> i sl) (reverse acc)
-                                  (build (+ i 1)
-                                         (cons (list (+ mw 0) (* (- i 1) sh) (- W mw) sh) acc))))))))
-    'resize (lambda (count W H windows dx dy corner)
+    'recalculate (lambda (area placements)
+                   (let ((x (hl-box-x area)) (y (hl-box-y area))
+                         (w (hl-box-w area)) (h (hl-box-h area)))
+                     (cond ((null? placements) '())
+                           ((null? (cdr placements)) (list (cons (car (car placements)) area)))
+                           (else
+                            (let* ((mw (inexact->exact (floor (* w (vector-ref mfact 0)))))
+                                   (sl (- (length placements) 1))
+                                   (sh (quotient h sl)))
+                              (cons (cons (car (car placements)) (hl-box x y mw h))
+                                    (let build ((i 1) (rs (cdr placements)) (acc '()))
+                                      (if (null? rs) (reverse acc)
+                                          (build (+ i 1) (cdr rs)
+                                                 (cons (cons (car (car rs))
+                                                             (hl-box (+ x mw) (+ y (* (- i 1) sh))
+                                                                     (- w mw) sh))
+                                                       acc))))))))))
+    'resize (lambda (area placements dx dy corner)
               (vector-set! mfact 0 (max 0.2 (min 0.8 (+ (vector-ref mfact 0) (* dx 0.0005)))))
               #f)
     'window-open (lambda (w) (vector-set! opens 0 (+ 1 (vector-ref opens 0))) #f)
@@ -222,7 +229,7 @@ while (( SECONDS < END )); do
     eval_scheme gestures "(hl-gesture-remove! (hl-gesture-add! #:fingers 8 #:direction \"up\" #:action (hl-make-move-gesture)))"
 
     # rules: toggle the pool
-    eval_scheme rules "(begin (hl-rule-enabled-set! soak-rule (not (hl-rule-enabled? soak-rule))) #t)"
+    eval_scheme rules "(begin (hl-rule-enabled-set! soak-rule) (hl-rule-enabled? soak-rule) #t)"  # absent #:on? toggles
 
     # notifications: object create + cancel
     eval_scheme notifs "(begin (hl-notification-dismiss! (hl-notification-add! #:text \"soak\" #:timeout 10)) #t)"

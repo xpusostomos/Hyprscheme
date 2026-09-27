@@ -10,25 +10,35 @@
 namespace Config::Scheme::Layouts {
 
     /*
-        Pure-function layouts. A scheme layout is ONE function:
+        Layouts as callbacks. A scheme layout's recalculate callback is:
 
-            (count W H) -> ((x y w h) ...)
+            (area placements) -> ((window . box) ...)
 
-        called with the usable work area; it returns one box per target.
-        No state, no context object, no per-target identity — see the design
-        note in the layout entry points (SchemeLayout.cpp). Selected via
-        `layout = scheme:NAME`.
-        On any error the layout is replaced by a default grid for the rest of
-        the generation (sticky didError, mirroring the Lua provider).
+        It is handed the work AREA (an hl-box in global coordinates) and the
+        current PLACEMENTS — one (window . box) pair per window to place, each
+        box being where that window is NOW — and returns the same shape: the
+        windows to move, and where. A window left out keeps its geometry, so a
+        partial return is legal, and the result is matched BY WINDOW rather than
+        by position, so a reordered return is either applied correctly or
+        rejected — never silently mis-placed. A target with no window is
+        skipped. `resize` is the same with (dx dy corner) appended, and may
+        return #f to ask for a plain recalculate instead.
 
-        CAVEAT: unlike the Lua provider there is NO watchdog timeout. An
-        infinite loop in a layout function freezes the compositor.
+        A "box" is the CELL: the compositor insets the window inside it by the
+        border and gaps_in, exactly as it does for the built-in layouts. See the
+        design note in the layout entry points (SchemeLayout.cpp).
+
+        Selected via `layout = scheme:NAME`. A failed pass — an error, or a
+        watchdog abort — falls back to a default grid for THAT pass only: the
+        next recalculate tries the layout again, so a transient failure recovers.
+        didError is not "gave up", it is "the error has been shown once", which
+        keeps a broken layout from posting a notification on every pass.
     */
 
     struct SSchemeLayoutProvider {
         std::string name;  // "scheme:NAME"
         bool        active = true;
-        bool        didError = false;
+        bool        didError = false; // the error notification has been shown
         // the callback spec plist, LOCKED (SThunkRef.hpp): the provider is
         // destroyed at Layouts::clear(), which
         // unlocks it; the callbacks travel with the provider, no registry

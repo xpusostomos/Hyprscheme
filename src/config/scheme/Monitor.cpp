@@ -35,12 +35,12 @@ namespace Config::Scheme {
         return nullptr;
     }
 
-    static int hlSchemeFocusMonitor(const char* name) {
+    static int hlSchemeFocusMonitor(SCM arg) {
         if (!g_up)
             return -1;
-        const auto mon = monitorFromName(name);
+        const auto mon = monitorArg(arg);
         if (!mon) {
-            LOG(Log::ERR, "[scheme] focus-monitor: no monitor named {}", name ? name : "");
+            LOG(Log::ERR, "[scheme] focus-monitor: no monitor for that argument");
             return -1;
         }
         return actionResult("focus-monitor", Config::Actions::focusMonitor(mon));

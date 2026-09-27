@@ -207,29 +207,34 @@ namespace hl {
     // one small applier for the module plumbing below: (proc arg) / (proc a b),
     // where proc is resolved from (guile) at call time
     struct CallArgs {
-        SCM fn, a1, a2, a3;
+        SCM fn, a1, a2, a3, a4;
     };
 
     static SCM callThunk0(void* d) { return scm_call_0(((CallArgs*)d)->fn); }
     static SCM callThunk1(void* d) { return scm_call_1(((CallArgs*)d)->fn, ((CallArgs*)d)->a1); }
     static SCM callThunk2(void* d) { return scm_call_2(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2); }
     static SCM callThunk3(void* d) { return scm_call_3(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2, ((CallArgs*)d)->a3); }
+    static SCM callThunk4(void* d) { return scm_call_4(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2, ((CallArgs*)d)->a3, ((CallArgs*)d)->a4); }
 
     SCM call0(SCM fn) {
-        CallArgs a{fn, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED};
+        CallArgs a{fn, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED};
         return scm_c_catch(SCM_BOOL_T, callThunk0, &a, callHandler, NULL, NULL, NULL);
     }
     SCM call1(SCM fn, SCM a1) {
-        CallArgs a{fn, a1, SCM_UNDEFINED, SCM_UNDEFINED};
+        CallArgs a{fn, a1, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED};
         return scm_c_catch(SCM_BOOL_T, callThunk1, &a, callHandler, NULL, NULL, NULL);
     }
     SCM call2(SCM fn, SCM a1, SCM a2) {
-        CallArgs a{fn, a1, a2, SCM_UNDEFINED};
+        CallArgs a{fn, a1, a2, SCM_UNDEFINED, SCM_UNDEFINED};
         return scm_c_catch(SCM_BOOL_T, callThunk2, &a, callHandler, NULL, NULL, NULL);
     }
     SCM call3(SCM fn, SCM a1, SCM a2, SCM a3) {
-        CallArgs a{fn, a1, a2, a3};
+        CallArgs a{fn, a1, a2, a3, SCM_UNDEFINED};
         return scm_c_catch(SCM_BOOL_T, callThunk3, &a, callHandler, NULL, NULL, NULL);
+    }
+    SCM call4(SCM fn, SCM a1, SCM a2, SCM a3, SCM a4) {
+        CallArgs a{fn, a1, a2, a3, a4};
+        return scm_c_catch(SCM_BOOL_T, callThunk4, &a, callHandler, NULL, NULL, NULL);
     }
 
     struct ModuleCall {

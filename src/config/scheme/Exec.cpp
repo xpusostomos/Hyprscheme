@@ -76,14 +76,14 @@ namespace Config::Scheme {
         return actionResult("force-renderer-reload", Config::Actions::forceRendererReload());
     }
 
-    static int hlSchemeDpms(int act, const char* monName) {
+    static int hlSchemeDpms(int act, SCM monArg) {
         if (!g_up)
             return -1;
-        std::optional<PHLMONITOR> mon;
-        if (monName && *monName) {
-            mon = monitorFromName(monName);
+        std::optional<PHLMONITOR> mon; // absent = every monitor
+        if (!scm_is_false(monArg) && !(scm_is_string(monArg) && scm_to_utf8_string(monArg) && !*scm_to_utf8_string(monArg))) {
+            mon = monitorArg(monArg);
             if (!mon) {
-                LOG(Log::ERR, "[scheme] dpms: no monitor named {}", monName);
+                LOG(Log::ERR, "[scheme] dpms: no monitor for that argument");
                 return -1;
             }
         }

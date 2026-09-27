@@ -2,13 +2,26 @@
 
 > **Status of this document's findings:** the work is tracked in
 > `FABLE-DONE.md`, whose headings use THIS document's references — `§2.x`
-> for the defects below, `§4.x Step N` for the purge — so the two line up
-> directly. As of 2026-09-26: **done** — §2.1, §2.13, §2.17, §2.18, §2.19,
-> and the purge's §4.1 Step A and §4.2 Step B; **partly** — §2.6 (the two
-> doc blocks that failed are fixed; the other stale names remain) and §2.14
-> (install refreshed and guarded; the Chez-era leftovers are still there);
-> **not started** — §2.2–§2.5, §2.7–§2.12, §2.15, §2.16; **deferred by
-> Chris** — §4.7 Step G; **open** — §12.
+> for the defects below, `§4.x Step N` for the purge, `§10` for the file
+> reorganisation — so the two line up directly. As of 2026-09-27:
+>
+> - **done** — §2.1, §2.2, §2.3, §2.4, §2.5, §2.6, §2.7, §2.8, §2.9, §2.13,
+>   §2.14, §2.15, §2.17, §2.18, §2.19; the purge's §4.1 Step A, §4.2 Step B,
+>   §4.3 Step C, §4.4 Step D (the wipe and the modules) and §4.7 Step G; §10
+>   (the API split into per-family modules); and §5's headline item, the
+>   selector gap.
+> - **not started** — §2.12, §2.16; §4.5 Step E; the rest of §5
+>   (two small Lua shapes); and §6, §7, §8 and §11, which have no entries in
+>   the ledger at all.
+> - **answered** — §12.2, the layout model: the minimal "boxes in, boxes out"
+>   callback is kept, keyed by window rather than by position (the same pass as
+>   §2.5/§2.15; see the ledger).
+> - **attempted, blocked** — §4.6 Step F (the compile lint); the ledger records
+>   exactly where it stops.
+> - **resolved by other work** — §2.10 (the Chez-isms leak died with the compat
+>   layer in Step A) and §2.11 (the argument-convention sweep is partly done —
+>   the `#:key` migration; the rest is one of §12's decisions).
+> - **open** — §9, §12.
 
 Written 2026-09-26 by Claude Fable 5 at Chris's request: "review the
 whole thing … find flaws, style problems, parity gaps, reorganisation

@@ -199,7 +199,7 @@ ok '(boolean? (hl-group-cycle! w))'
 ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
      (begin (hl-group-remove! g w2)          ; group is now {w} alone
             (hl-window-group-set! w #:on? #f)      ; ungroup the last member
-            (not (hl-group-size g))))'       ; -> dissolved, stale record reads #f
+            (not (hl-group-size g))))'       # -> dissolved, stale record reads #f
 
 # sacrificial window: kill, then close
 $SCHEME '(hl-exec! "foot -a api-kill")' >/dev/null
@@ -435,6 +435,18 @@ ok '(boolean? (hl-mouse-action! "drag"))'
 # ---- navigation -------------------------------------------------------------
 ok '(hl-workspace-focus! (hl-active-workspace))'
 ok '(hl-monitor-focus! (hl-active-monitor))'
+
+# a workspace/monitor argument is a HANDLE or a SELECTOR. The selector grammar
+# is the compositor's own (+1, e+1, r+1, previous, empty, special:x, name:x, a
+# bare number/name) — the C++ resolves it; we no longer stringify a handle and
+# look the text up as a name, which could not express the grammar at all.
+ok '(hl-monitor-focus! (hl-monitor-from "+1"))'
+ok '(hl-monitor-focus! "+1")'                     ;# the selector straight through
+ok '(boolean? (hl-monitor-swap! (hl-active-monitor) "+1"))'
+ok '(integer? (hl-workspace-number (hl-workspace-from (hl-workspace-name aw))))'
+ok '(or (not (hl-workspace-from "no-such-workspace-xyz")) #t)'
+noerr '(hl-workspace-name-set! (hl-workspace-from (hl-workspace-name aw)) "api-named-set")'
+noerr '(hl-monitor-power-set! (hl-active-monitor) #:on? #t)' 
 ok '(hl-focus-direction-set! "r")'
 ok '(hl-focus-last!)'
 ok '(hl-focus-urgent!)'
@@ -449,9 +461,97 @@ ok '(hl-rule? api-layer-rule)'
 ok '(boolean? (hl-rule-enabled? api-layer-rule))'
 ok '(hl-rule-enabled-set! api-layer-rule #:on? #f)'
 
+# ---- boxes ------------------------------------------------------------------
+# A box is a rectangle in GLOBAL coordinates: an hl-box record read through its
+# accessors, not a list — so a wrong-shaped value is an error naming the
+# function rather than a silent read of the wrong slot.
+val '(hl-box-x (hl-box 10 20 30 40))' '10'
+val '(hl-box-y (hl-box 10 20 30 40))' '20'
+val '(hl-box-w (hl-box 10 20 30 40))' '30'
+val '(hl-box-h (hl-box 10 20 30 40))' '40'
+# a layout DIVIDES the work area, so it produces rationals and inexacts as a
+# matter of course; a box takes any real (and rounds to a whole pixel)
+noerr '(hl-box 1/3 2.5 3/2 4.5)'
+
+# ---- hl-window-group: the group a window is in, or #f when it has none ------
+# Handles are opaque and built per call, so identity is hl-group=? (as with
+# every family: hl-window=?, hl-workspace=? ...), never eq?.
+val '(hl-window-group w)' '#f'
+ok '(begin (hl-window-group-set! w #:on? #t) (hl-group? (hl-window-group w)))'
+ok '(hl-group=? (hl-window-group w) (hl-window-group w))'
+# and it is really W'S group — that group lists W among its members
+ok '(let ((g (hl-window-group w)))
+       (and g (any (lambda (m) (hl-window=? m w)) (hl-group-members g))))'
+val '(begin (hl-window-group-set! w #:on? #f) (hl-window-group w))' '#f'
+
 # ---- layouts ----------------------------------------------------------------
-ok '(string? (hl-layout-add! "api-layout" (quote recalculate) (lambda (count W H wins) (quote ()))))'
+# Registering a layout is only half of it: a layout is a CALLBACK the compositor
+# drives, so this drives one for real. The workspace rule puts it on workspace
+# 10 and the window opened below becomes its target, which makes the
+# (area placements) contract an actual round trip.
+noerr '(hl-layout-add! "api-layout" (quote recalculate)
+         (lambda (area placements)
+           (let ((snap (lambda (ps)
+                         (map (lambda (p)
+                                (cons (car p)     ; the window handle, keyed by window
+                                      (let ((b (cdr p)))
+                                        (list (hl-box-x b) (hl-box-y b)
+                                              (hl-box-w b) (hl-box-h b)))))
+                              ps))))
+             (hl-state-set! (quote api-layout-calls)
+                            (1+ (or (hl-state-ref (quote api-layout-calls)) 0)))
+             (hl-state-set! (quote api-layout-area)
+                            (list (hl-box-x area) (hl-box-y area) (hl-box-w area) (hl-box-h area)))
+             (hl-state-set! (quote api-layout-in) (snap placements))
+             ;; the OUT half: every target across the left half of the work
+             ;; area. (quotient, not /: a box is whole pixels, so the area
+             ;; divides exactly and the width we hand back is the width to expect.)
+             (let ((out (map (lambda (p)
+                               (cons (car p) (hl-box (hl-box-x area) (hl-box-y area)
+                                                     (quotient (hl-box-w area) 2)
+                                                     (hl-box-h area))))
+                             placements)))
+               (hl-state-set! (quote api-layout-out) (snap out))
+               out)))
+       (quote layout-msg)
+       (lambda (msg) #t))'
 noerr '(hl-layout-msg "noop")'
+noerr '(hl-workspace-rule-add! "10" #:layout "scheme:api-layout")'
+noerr '(begin (hl-workspace-focus! "10") (hl-exec! "foot -a api-layout-win") #t)'
+WAIT_FOR 10 '(let ((n (hl-state-ref (quote api-layout-calls)))) (and n (> n 0) #t))' >/dev/null \
+  || { echo "FAIL: the compositor never drove the layout callback"; FAILED=1; }
+# IN: the payload is (area placements) — area an hl-box, placements (window . box)
+ok '(> (hl-state-ref (quote api-layout-calls)) 0)'
+ok '(every number? (hl-state-ref (quote api-layout-area)))'
+# ...keyed by WINDOW — every placement's car is a live window handle
+ok '(and (pair? (hl-state-ref (quote api-layout-in)))
+         (every (lambda (p) (hl-window? (car p))) (hl-state-ref (quote api-layout-in))))'
+# OUT, and the whole point of keying by window: what the layout returns for a
+# window comes back as THAT window's box on the next call, so the snapshot of
+# what it was handed and the snapshot of what it handed back are identical.
+# Broken keys, a dropped box, or a result that never got applied all show up
+# here as a layout that never settles. (WAIT_FOR, because it takes a call or
+# two to converge — and the boxes are applied before the client resizes.)
+# The recalculate is DRIVEN, not waited for: layout-msg is a request to the
+# compositor to re-run the layout, so each attempt here pokes it rather than
+# hoping a scheduled refresh arrives.
+WAIT_FOR 10 '(begin (hl-layout-msg "noop")
+                    (let ((i (hl-state-ref (quote api-layout-in)))
+                          (o (hl-state-ref (quote api-layout-out))))
+                      (and i o (pair? i) (equal? i o) #t)))' >/dev/null \
+  || { echo "FAIL: the layout never converged — returned boxes are not applied"; FAILED=1; }
+ok '(equal? (hl-state-ref (quote api-layout-in)) (hl-state-ref (quote api-layout-out)))'
+# and the window really did end up narrower than the whole work area, so the
+# half-width it asked for reached the compositor and not just the callback
+ok '(let* ((area (hl-state-ref (quote api-layout-area)))
+           (win  (hl-window-from "class:^api-layout-win$"))
+           (sz   (and win (hl-window-size win))))
+       (and sz (< (car sz) (list-ref area 2))))'
+# a partial return is legal: a layout may place only the windows it cares about
+noerr '(hl-layout-add! "api-layout-partial" (quote recalculate)
+         (lambda (area placements) (quote ())))'
+# and a target it leaves out simply keeps its geometry — back to workspace 1
+noerr '(begin (hl-workspace-focus! "1") #t)'
 
 # ---- submaps ----------------------------------------------------------------
 ok '(hl-bind? (hl-submap "api-sub" (lambda () (hl-bind-add! (hl-kbd "g") (lambda () #f)))))'

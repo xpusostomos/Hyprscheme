@@ -29,23 +29,6 @@ namespace Config::Scheme::Layouts {
     static std::vector<SP<SSchemeLayoutProvider>> g_layouts;
     static std::vector<Hyprutils::Signal::CHyprSignalListener> g_layoutEventListeners;
 
-    // build a real Scheme list of the payload's fixnums (the cons cells are
-    // kept alive by the head, which lives in a C++ local; see the value notes
-    // in Host.cpp).
-    template <typename T>
-    static SCM schemeIntList(const std::vector<T>& vals) {
-        if (vals.empty())
-            return SCM_EOL;
-        SCM l = SCM_EOL;
-        for (auto it = vals.rbegin(); it != vals.rend(); ++it) {
-            l = scm_cons(scm_from_int64(*it), l);
-            hl::lock(l);
-        }
-        for (SCM p = l; scm_is_pair(p); p = scm_cdr(p))
-            hl::unlock(p);
-        return l;
-    }
-
     static SCM dispatchRecalculate(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
                                    const std::vector<SP<Layout::ITarget>>& targets);
     static SCM dispatchResize(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
@@ -230,63 +213,124 @@ namespace Config::Scheme::Layouts {
         return result;
     }
 
-    // reads a proper list of `count` proper lists of 4 exact integers.
-    // all accesses are non-allocating, so no GC can move anything mid-read.
-    static bool readBoxList(SCM list, size_t count, std::vector<CBox>& out) {
-        for (size_t i = 0; i < count; ++i) {
-            if (!scm_is_pair(list))
-                return false;
+    /*
+        BOXES. A box is a rectangle in GLOBAL coordinates — four numbers, the
+        same thing the compositor's CBox is. The Scheme side has a record for
+        it (hl-box, in (hyprscheme core)) so that a layout reads and writes
+        `(hl-box-x b)` rather than list positions, and a wrong-shaped value is
+        an error naming the function instead of a silent misread.
 
-            SCM box = scm_car(list);
-            list    = scm_cdr(list);
-
-            int v[4];
-            for (int j = 0; j < 4; ++j) {
-                if (!scm_is_pair(box))
-                    return false;
-                const SCM val = scm_car(box);
-                box           = scm_cdr(box);
-                if (!scm_is_integer(val))
-                    return false;
-                v[j] = (int)scm_to_int64(val);
-            }
-            if (box != SCM_EOL)
-                return false;
-
-            out.emplace_back(v[0], v[1], v[2], v[3]);
-        }
-
-        return list == SCM_EOL;
+        C++ reads the record directly — one lookup of the record type, then
+        slot reads, which are non-allocating so no GC can move anything
+        mid-read. Writing goes through the public constructor.
+    */
+    static bool boxRtd(SCM& out) {
+        // the record type, defined by (hyprscheme core); looked up, not cached:
+        // a reload rebuilds the module, and with it the record type
+        out = hl::globalRefOrFalse("hl-box-rtd");
+        return !scm_is_false(out);
     }
 
-    // one dispatcher per callback kind, each calling its own Scheme symbol
-    // directly; the payload is one real Scheme list, handles included. Returns
-    // the callback's value, or SCM_BOOL_F when it is absent or failed.
+    // SCM_STRUCTP, NOT scm_struct_vtable_p: the latter answers "is this a
+    // vtable", which a box instance is not — it is a struct whose vtable is
+    // the record type. (Getting this backwards made every returned box fail
+    // the shape check, so layouts silently fell back to the default grid.)
+    static bool isBox(SCM v, SCM rtd) {
+        return SCM_STRUCTP(v) && scm_is_eq(SCM_STRUCT_VTABLE(v), rtd);
+    }
+
+    // A layout divides the work area, so it produces rationals (Scheme's /).
+    // Refusing those — and falling back to a default grid — was a trap: the
+    // natural way to write a layout failed silently. Any real is accepted now,
+    // and rounded to a whole pixel.
+    static bool boxNumber(SCM v, double& out) {
+        if (!scm_is_number(v))
+            return false;
+        out = scm_to_double(v);
+        return true;
+    }
+
+    // WHOLE PIXELS, as EXACT integers. A box is a pixel rectangle, and we round
+    // what a layout returns — so rounding what we hand it keeps the two ends
+    // symmetric. Handing back an inexact 331.5 instead is a trap: dividing the
+    // work area is the first thing a layout does, and `quotient` (the exact
+    // integer division such code reaches for) refuses an inexact argument.
+    static SCM boxToScheme(const CBox& b) {
+        SCM ctor = hl::globalRefOrFalse("hl-box");
+        if (scm_is_false(ctor))
+            return SCM_BOOL_F;
+        return hl::call4(ctor, scm_from_long(std::lround(b.x)), scm_from_long(std::lround(b.y)),
+                         scm_from_long(std::lround(b.w)), scm_from_long(std::lround(b.h)));
+    }
+
+    // a placement: (window . box). #f when the value is not one.
+    static bool readPlacement(SCM pair, SCM rtd, SCM& window, CBox& box) {
+        if (!scm_is_pair(pair)) {
+            return false;
+        }
+        window = scm_car(pair);
+        const SCM b = scm_cdr(pair);
+        if (!isBox(b, rtd))
+            return false;
+
+        double v[4];
+        for (size_t i = 0; i < 4; ++i) {
+            if (!boxNumber(scm_struct_ref(b, scm_from_size_t(i)), v[i]))
+                return false;
+        }
+        box = CBox(std::lround(v[0]), std::lround(v[1]), std::lround(v[2]), std::lround(v[3])).noNegativeSize();
+        return true;
+    }
+
+    /*
+        The two geometry callbacks. Both take (area placements) and both return
+        the same shape; resize adds the gesture at the end.
+
+          area       — an hl-box: the work area, in GLOBAL coordinates
+          placements — ((window . box) ...), each box being where that window
+                       is NOW
+
+        A target with no window is SKIPPED: there is nothing to place in it, and
+        it exists only for the moment between a window dying and the layout
+        dropping the slot. That is also what retires the dead-handle convention
+        the old positional payload needed.
+    */
+    static SCM placementList(const std::vector<SP<Layout::ITarget>>& targets, SCM rtd, std::vector<SCM>& roots) {
+        std::vector<SCM> vals;
+        const auto       push = [&](SCM v) {
+            hl::pin(v, roots);
+            vals.push_back(v);
+        };
+        for (const auto& t : targets) {
+            const auto window = t->window();
+            if (!window)
+                continue; // nothing to place
+            const SCM box = boxToScheme(t->position());
+            if (scm_is_false(box))
+                continue;
+            push(scm_cons(hl::windowHandle(window), box));
+        }
+        return hl::listOf(vals);
+    }
+
     static SCM dispatchRecalculate(const WP<Layout::CAlgorithm>& parent, SP<SSchemeLayoutProvider> provider,
                                    const std::vector<SP<Layout::ITarget>>& targets) {
         auto space = parent.lock() ? parent.lock()->space() : nullptr;
         if (!space)
             return SCM_BOOL_F;
 
-        const auto AREA = space->workArea();
+        SCM rtd;
+        if (!boxRtd(rtd))
+            return SCM_BOOL_F;
 
-        // payload = (count W H window ...) — the Scheme entry's fixed shape.
-        // A box with no window gets a dead handle (one whose every query reads
-        // #f), which is exactly what the layout docs promise for that slot.
-        std::vector<SCM> roots, vals;
-        const auto       push = [&](SCM v) {
-            hl::pin(v, roots);
-            vals.push_back(v);
-        };
-        push(scm_from_int64((long long)targets.size()));
-        push(scm_from_int64((long long)AREA.w));
-        push(scm_from_int64((long long)AREA.h));
-        for (const auto& t : targets) {
-            const auto window = t->window();
-            push(window ? hl::windowHandle(window) : hl::windowHandle(PHLWINDOWREF{}));
-        }
-        const auto payload = hl::listOf(vals);
-        hl::unpin(roots);   // the list holds them all
+        std::vector<SCM> roots;
+        const SCM        area = boxToScheme(space->workArea());
+        if (scm_is_false(area))
+            return SCM_BOOL_F;
+
+        const SCM placements = placementList(targets, rtd, roots);
+        const SCM payload    = hl::listOf({area, placements});
+        hl::unpin(roots);
 
         return callScheme1("hl--layout-recalculate", schemeSpec(provider), payload);
     }
@@ -297,38 +341,64 @@ namespace Config::Scheme::Layouts {
         if (!space)
             return SCM_BOOL_F;
 
-        const auto AREA = space->workArea();
+        SCM rtd;
+        if (!boxRtd(rtd))
+            return SCM_BOOL_F;
 
-        // payload = (count W H dx dy corner window ...) — same shape as above,
-        // with the resize delta in front of the windows
-        std::vector<SCM> roots, vals;
-        const auto       push = [&](SCM v) {
-            hl::pin(v, roots);
-            vals.push_back(v);
-        };
-        push(scm_from_int64((long long)targets.size()));
-        push(scm_from_int64((long long)AREA.w));
-        push(scm_from_int64((long long)AREA.h));
-        push(scm_from_int64((long long)(int)delta.x));
-        push(scm_from_int64((long long)(int)delta.y));
-        push(scm_from_int64((long long)corner));
-        for (const auto& t : targets) {
-            const auto window = t->window();
-            push(window ? hl::windowHandle(window) : hl::windowHandle(PHLWINDOWREF{}));
-        }
-        const auto payload = hl::listOf(vals);
+        std::vector<SCM> roots;
+        const SCM        area = boxToScheme(space->workArea());
+        if (scm_is_false(area))
+            return SCM_BOOL_F;
+
+        const SCM placements = placementList(targets, rtd, roots);
+        const SCM dx         = scm_from_long(std::lround(delta.x));
+        const SCM dy         = scm_from_long(std::lround(delta.y));
+        const SCM payload    = hl::listOf({area, placements, dx, dy, scm_from_int(corner)});
         hl::unpin(roots);
 
         return callScheme1("hl--layout-resize", schemeSpec(provider), payload);
     }
 
-    static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, SCM result) {
-        std::vector<CBox> boxes;
-        if (result == SCM_BOOL_F || !readBoxList(result, targets.size(), boxes))
-            return false;
+    /*
+        Apply a returned placement list. Each pair names a WINDOW — the handle
+        the callback was given — and the box is where to put it; the target is
+        found by matching that window against the layout's own targets, so a
+        callback that reorders the list, or returns only part of it, is either
+        correct or reported. That replaces the old positional contract, where
+        box i was assumed to belong to target i and a reordering placed every
+        window silently wrong.
 
-        for (size_t i = 0; i < targets.size(); ++i)
-            targets[i]->setPositionGlobal(boxes[i].noNegativeSize());
+        A window that is not in this layout is REJECTED, not mis-placed.
+    */
+    static bool applyBoxes(const std::vector<SP<Layout::ITarget>>& targets, SCM result) {
+        if (result == SCM_BOOL_F || !scm_is_pair(result))
+            return result == SCM_EOL; // an empty list is a valid "change nothing"
+
+        SCM rtd;
+        if (!boxRtd(rtd)) {
+            return false;
+        }
+
+        for (SCM l = result; scm_is_pair(l); l = scm_cdr(l)) {
+            SCM  handle = SCM_BOOL_F;
+            CBox box;
+            if (!readPlacement(scm_car(l), rtd, handle, box))
+                return false;
+
+            const auto window = hl::isWindow(handle) ? hl::windowOf(handle) : PHLWINDOW{};
+            if (!window) {
+                return false; // not a window, or a handle whose window has gone
+            }
+
+
+            const auto it = std::ranges::find_if(targets, [&window](const auto& t) { return t->window() == window; });
+            if (it == targets.end()) {
+                LOG(Log::ERR, "[scheme] a layout placed a window that is not in it; ignoring the result");
+                return false;
+            }
+
+            (*it)->setPositionGlobal(box);
+        }
 
         return true;
     }

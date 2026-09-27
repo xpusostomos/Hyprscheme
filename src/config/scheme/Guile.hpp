@@ -56,6 +56,7 @@ namespace hl {
     SCM call1(SCM fn, SCM a1);
     SCM call2(SCM fn, SCM a1, SCM a2);
     SCM call3(SCM fn, SCM a1, SCM a2, SCM a3);
+    SCM call4(SCM fn, SCM a1, SCM a2, SCM a3, SCM a4);
 
     // GC pinning (SThunkRef rides on this): construction pins, destruction
     // unpins. Immediates need nothing.

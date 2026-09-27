@@ -41,24 +41,35 @@
 (hl-config-add! "input:kb_options" "ctrl:nocaps")   ; Caps Lock → Ctrl
 
 ;; ---- a custom layout ------------------------------------------------------
-;; state lives in the closure; keys are quoted identifiers, values are the
+;; State lives in the closure; keys are quoted identifiers, values are the
 ;; procedure expressions — an ordinary call, no backquote.
+;;
+;; The callback is handed the work AREA as an hl-box and the PLACEMENTS: one
+;; (window . box) pair per window it must place, each box being where that
+;; window is now. It returns the same shape — the windows it wants moved, and
+;; where. Windows it leaves out keep their geometry, so a layout may return
+;; only the ones it cares about. Everything is in GLOBAL coordinates.
 (let ((mfact (vector 0.55)))
   (hl-layout-add! "master-stack"
     'recalculate
-    (lambda (count W H windows)
-      (cond ((= count 0) '())
-            ((= count 1) (list (list 0 0 W H)))
-            (else
-             (let* ((mw (inexact->exact (floor (* W (vector-ref mfact 0)))))
-                    (slaves (- count 1)))
-               (cons (list 0 0 mw H)
-                     (let loop ((i 0) (y 0) (boxes '()))
-                       (if (= i slaves)
-                           (reverse boxes)
-                           (let ((h (quotient (- H y) (- slaves i))))
-                             (loop (+ i 1) (+ y h)
-                                   (cons (list mw y (- W mw) h) boxes))))))))))
+    (lambda (area placements)
+      (let ((x (hl-box-x area)) (y (hl-box-y area))
+            (w (hl-box-w area)) (h (hl-box-h area)))
+        (cond
+         ((null? placements) '())
+         ((null? (cdr placements)) (list (cons (car (car placements)) area)))
+         (else
+          (let* ((mw (inexact->exact (floor (* w (vector-ref mfact 0)))))
+                 (slaves (- (length placements) 1)))
+            (cons (cons (car (car placements)) (hl-box x y mw h))
+                  (let loop ((i 0) (ry 0) (rs (cdr placements)) (boxes '()))
+                    (if (null? rs)
+                        (reverse boxes)
+                        (let ((rh (quotient (- h ry) (- slaves i))))
+                          (loop (+ i 1) (+ ry rh) (cdr rs)
+                                (cons (cons (car (car rs))
+                                            (hl-box (+ x mw) (+ y ry) (- w mw) rh))
+                                      boxes)))))))))))
     'layout-msg
     (lambda (msg)
       (cond ((equal? msg "wider")

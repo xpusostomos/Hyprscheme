@@ -1,11 +1,11 @@
 ;; hyprscheme-prelude.scm — the kernel module: the error plumbing, the callback
 ;; watchdog, the fire trampolines and the custom-layout entry points.
 ;;
-;; `(hyprscheme kernel)` is loaded before the API module, and is the layer the
-;; host itself must be able to reach (every name C++ looks up by hand lives
-;; here). It uses no export list of its own: the host exports the module whole
-;; after registering the gsubrs into it, so the kernel exposes the gsubr surface
-;; and its own machinery together, which is the whole of the internal layer.
+;; `(hyprscheme kernel)` is loaded before the API modules, and is the layer the
+;; host itself must be able to reach: every name C++ looks up by hand lives
+;; here. It exports its own machinery together with every hl--c-* gsubr the host
+;; registers into it, which is the whole of the internal layer — the families
+;; import it, the public umbrella never re-exports it.
 ;;
 ;; Plain Guile throughout — no dialect shims. Anything the machinery needs
 ;; that is not in Guile's default environment comes from a standard library
@@ -17,15 +17,12 @@
   ;; generation, not wherever the interpreter started), and a declarative module
   ;; refuses to shadow an imported binding
   #:declarative? #f
-  ;; an explicit export list, not module-export-all!: names added to a module
+  ;; An explicit export list, not module-export-all!: names added to a module
   ;; after it is defined do NOT reach a module that imports it later, and the
-  ;; API module depends on importing this one properly. hl--c-generation is the
-  ;; single gsubr the kernel needs — the host defines it here before this file
-  ;; is read, so it can be named in the list.
-    ;; its own machinery, PLUS every hl--c-* the host registers into it — the
-  ;; kernel is the C++ boundary, and every other module imports it to reach
-  ;; those. Both lists are generated: the second comes from the C++ side's
-  ;; hl::bind<>() registrations.
+  ;; families depend on importing this one properly. So it is GENERATED —
+  ;; this file's own machinery, plus every hl--c-* from the C++ side's
+  ;; hl::bind<>() registrations. Regenerate it after adding a gsubr
+  ;; (tools/ lists them; see the module-audit lint).
   #:export (
            eval hl--base-eval hl--base-load hl--bind-fire-rec
            hl--bind-result hl--c-active-monitor
@@ -54,11 +51,11 @@
            hl--c-get-submap-ctx hl--c-global hl--c-group-add
            hl--c-group-alive hl--c-group-current hl--c-group-current-idx
            hl--c-group-cycle hl--c-group-denied hl--c-group-index
-           hl--c-group-lock hl--c-group-lock-active hl--c-group-locked
-           hl--c-group-members hl--c-group-move-window hl--c-group-remove
-           hl--c-group-same hl--c-group-set hl--c-group-size
-           hl--c-group-toggle hl--c-group? hl--c-groups-locked
-           hl--c-is-key-down hl--c-keyboard-key-listen hl--c-last-window
+           hl--c-group-lock hl--c-group-locked hl--c-group-members
+           hl--c-group-move-window hl--c-group-remove hl--c-group-same
+           hl--c-group-set hl--c-group-size hl--c-group-toggle
+           hl--c-group? hl--c-groups-locked hl--c-is-key-down
+           hl--c-keyboard-key-listen hl--c-last-window
            hl--c-last-workspace hl--c-layer-above-fs hl--c-layer-address
            hl--c-layer-alive hl--c-layer-kb-interactivity
            hl--c-layer-level hl--c-layer-listen hl--c-layer-mapped
@@ -100,7 +97,7 @@
            hl--c-notify hl--c-pass hl--c-permission-add
            hl--c-release-input-capture hl--c-reload-config
            hl--c-rule-enabled hl--c-rule-match hl--c-rule-set-enabled
-           hl--c-scheduled-prop-refresh-immediately
+           hl--c-run-finalizers hl--c-scheduled-prop-refresh-immediately
            hl--c-screenshare-listen hl--c-send-key-state
            hl--c-send-shortcut hl--c-set-submap-ctx hl--c-state-get
            hl--c-state-set hl--c-submap-listen hl--c-timer
@@ -113,12 +110,12 @@
            hl--c-window-close hl--c-window-content-type
            hl--c-window-cycle hl--c-window-deny-from-group
            hl--c-window-destroy-listen hl--c-window-event-listen
-           hl--c-window-float hl--c-window-float-act
-           hl--c-window-floating hl--c-window-focus
-           hl--c-window-focus-history-id hl--c-window-from
-           hl--c-window-fullscreen-handler hl--c-window-fullscreen-mode
-           hl--c-window-fullscreen-set hl--c-window-fullscreen-state
-           hl--c-window-fullscreen-toggle hl--c-window-group-denied
+           hl--c-window-float-act hl--c-window-floating
+           hl--c-window-focus hl--c-window-focus-history-id
+           hl--c-window-from hl--c-window-fullscreen-handler
+           hl--c-window-fullscreen-mode hl--c-window-fullscreen-set
+           hl--c-window-fullscreen-state hl--c-window-fullscreen-toggle
+           hl--c-window-group hl--c-window-group-denied
            hl--c-window-group-lock hl--c-window-group-locked
            hl--c-window-hidden hl--c-window-ids hl--c-window-in-group
            hl--c-window-inhibiting-idle hl--c-window-initial-class
@@ -146,7 +143,7 @@
            hl--c-workspace-active-listen hl--c-workspace-addressable-name
            hl--c-workspace-alive hl--c-workspace-change-id
            hl--c-workspace-empty hl--c-workspace-event-listen
-           hl--c-workspace-fullscreen-mode
+           hl--c-workspace-from hl--c-workspace-fullscreen-mode
            hl--c-workspace-fullscreen-window hl--c-workspace-group-count
            hl--c-workspace-groups hl--c-workspace-has-fullscreen
            hl--c-workspace-has-urgent hl--c-workspace-last-window
@@ -534,23 +531,31 @@
           (format #f "~s" result)))))
 
 ;; ---- custom layouts -----------------------------------------------------------
-;; layout callbacks: spec = a single recalculate fn, or a plist of callbacks
-;; (recalculate . fn) (resize . fn) (window-open . fn) (window-close . fn)
-;; (layout-msg . fn). recalculate/resize receive (count W H windows) where
-;; windows[i] is the handle for box i (a handle whose id 0 means "not a
-;; window" — every query on it returns #f), plus (dx dy corner) for resize.
-;; fn returns a list of (x y w h) boxes, or #f on error.
-
 ;; layout event dispatch. spec is a flat PLIST of callbacks: 'recalculate
-;; 'resize 'window-open 'window-close 'layout-msg. recalculate/resize fn:
-;; (count W H windows [dx dy corner]) -> ((x y w h) ...); window callbacks:
-;; (window) -> ignored; layout-msg fn: (message) -> response string. #f when
-;; absent or on error. Five direct entry points (one per callback kind) — no
-;; event strings, no dispatching cond.
+;; 'resize 'window-open 'window-close 'layout-msg.
+;;
+;;   recalculate fn: (area placements)              -> ((window . box) ...)
+;;   resize fn:      (area placements dx dy corner) -> the same
+;;   window callbacks: (window)                     -> ignored
+;;   layout-msg fn:  (message)                      -> response string
+;;
+;; area is an hl-box; placements is ((window . box) ...), the box being where
+;; that window is now. #f when the callback is absent or fails. Five direct
+;; entry points (one per callback kind) — no event strings, no dispatching cond.
+;;
+;; LAYOUT CALLBACKS RUN UNDER THE WATCHDOG, like every other callback the
+;; compositor can drive: a runaway recalculate is abandoned and reported rather
+;; than freezing the compositor with only the C++ detector as a backstop. An
+;; abort and an error both read as #f here, and the C++ side rejects #f — so a
+;; wedged layout falls back to the default grid instead of leaving the
+;; workspace unlaid-out.
 (define (hl--layout-call spec tag . args)
   (let ((cb (hl--plist-get spec tag #f)))
-    (and cb (guard (e (#t (hl--report e)))
-              (apply cb args)))))
+    (and cb
+         (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                         (hl--guarded-run "layout callback"
+                           (lambda () (apply cb args))))))
+           (and (not (eq? result hl--wd-aborted)) result)))))
 
 (define (hl--layout-window-open spec id)
   (hl--layout-call spec 'window-open id))
@@ -564,22 +569,22 @@
           ((string? r) r)
           (else ""))))
 
-;; recalculate: payload = (count W H id ...)
+;; recalculate: payload = (area placements) — see hl-layout-add! for the
+;; contract. The host builds it; this only hands it to the callback.
 (define (hl--layout-recalculate spec payload)
-  (hl--layout-call spec 'recalculate (car payload) (cadr payload) (caddr payload)
-                   (cdddr payload)))
+  (hl--layout-call spec 'recalculate (car payload) (cadr payload)))
 
-;; resize: payload = (count W H dx dy corner id ...); a spec without a
+;; resize: payload = (area placements dx dy corner); a spec without a
 ;; 'resize callback falls back to 'recalculate (documented behavior)
 (define (hl--layout-resize spec payload)
-  (let* ((count (list-ref payload 0))
-         (W     (list-ref payload 1))
-         (H     (list-ref payload 2))
-         (dx    (list-ref payload 3))
-         (dy    (list-ref payload 4))
-         (corner (list-ref payload 5))
-         (ids   (list-tail payload 6))
-         (cb    (or (hl--plist-get spec 'resize #f) (hl--plist-get spec 'recalculate #f))))
+  (let* ((area       (list-ref payload 0))
+         (placements (list-ref payload 1))
+         (dx         (list-ref payload 2))
+         (dy         (list-ref payload 3))
+         (corner     (list-ref payload 4))
+         (cb         (or (hl--plist-get spec 'resize #f) (hl--plist-get spec 'recalculate #f))))
     (and cb
-         (guard (e (#t (hl--report e)))
-           (cb count W H ids dx dy corner)))))
+         (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                         (hl--guarded-run "layout resize callback"
+                           (lambda () (cb area placements dx dy corner))))))
+           (and (not (eq? result hl--wd-aborted)) result)))))

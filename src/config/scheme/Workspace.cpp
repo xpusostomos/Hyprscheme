@@ -61,27 +61,55 @@ namespace Config::Scheme {
         return actionResult("focus-workspace", Config::Actions::changeWorkspace(std::string(ws ? ws : "")));
     }
 
-    static int hlSchemeWorkspaceRename(const char* oldName, const char* newName) {
+    /*
+        A workspace/monitor argument from Scheme: a HANDLE is used directly —
+        the C++ below wants the object, and re-deriving it from text is both
+        wasteful and lossy. A STRING is resolved with the compositor's own
+        selector grammar, which is what the compositor's string APIs accept.
+        nullptr when a string names nothing.
+    */
+    PHLWORKSPACE workspaceArg(SCM v) {
+        if (hl::isWorkspace(v))
+            return hl::workspaceOf(v);
+        // a NUMBER is a workspace number, which is also valid selector syntax
+        if (scm_is_integer(v))
+            return workspaceFromSelector(std::to_string(scm_to_int64(v)));
+        if (scm_is_string(v) || scm_is_symbol(v))
+            return workspaceFromSelector(schemeDatumToStr(v));
+        return nullptr;
+    }
+
+    PHLMONITOR monitorArg(SCM v) {
+        if (hl::isMonitor(v))
+            return hl::monitorOf(v);
+        if (scm_is_integer(v))
+            return State::monitorState()->query().configString(std::to_string(scm_to_int64(v))).run();
+        if (scm_is_string(v) || scm_is_symbol(v))
+            return State::monitorState()->query().configString(schemeDatumToStr(v)).run();
+        return nullptr;
+    }
+
+    static int hlSchemeWorkspaceRename(SCM old, const char* newName) {
         if (!g_up)
             return -1;
-        const auto ws = workspaceFromName(oldName);
+        const auto ws = workspaceArg(old);
         if (!ws) {
-            LOG(Log::ERR, "[scheme] workspace-rename: no workspace named {}", oldName ? oldName : "");
+            LOG(Log::ERR, "[scheme] workspace-rename: no workspace for that argument");
             return -1;
         }
         return actionResult("workspace-rename", Config::Actions::renameWorkspace(ws, std::string(newName ? newName : "")));
     }
 
-    static int hlSchemeWorkspaceMoveMonitor(const char* wsName, const char* monName) {
+    static int hlSchemeWorkspaceMoveMonitor(SCM wsArg, SCM mon) {
         if (!g_up)
             return -1;
-        const auto ws  = workspaceFromName(wsName);
-        const auto mon = monitorFromName(monName);
-        if (!ws || !mon) {
-            LOG(Log::ERR, "[scheme] workspace-move-to-monitor: no workspace named {} or monitor named {}", wsName ? wsName : "", monName ? monName : "");
+        const auto ws  = workspaceArg(wsArg);
+        const auto mon2 = monitorArg(mon);
+        if (!ws || !mon2) {
+            LOG(Log::ERR, "[scheme] workspace-move-to-monitor: no workspace or monitor for those arguments");
             return -1;
         }
-        return actionResult("workspace-move-to-monitor", Config::Actions::moveToMonitor(ws, mon));
+        return actionResult("workspace-move-to-monitor", Config::Actions::moveToMonitor(ws, mon2));
     }
 
     static int hlSchemeWorkspaceToggleSpecial(const char* wsName) {
@@ -98,13 +126,13 @@ namespace Config::Scheme {
         return actionResult("workspace-toggle-special", Config::Actions::toggleSpecial(ws));
     }
 
-    static int hlSchemeWorkspaceSwapMonitors(const char* mon1, const char* mon2) {
+    static int hlSchemeWorkspaceSwapMonitors(SCM mon1, SCM mon2) {
         if (!g_up)
             return -1;
-        const auto a = monitorFromName(mon1);
-        const auto b = monitorFromName(mon2);
+        const auto a = monitorArg(mon1);
+        const auto b = monitorArg(mon2);
         if (!a || !b) {
-            LOG(Log::ERR, "[scheme] workspace-swap-monitors: no monitor named {} or {}", mon1 ? mon1 : "", mon2 ? mon2 : "");
+            LOG(Log::ERR, "[scheme] workspace-swap-monitors: no monitor for those arguments");
             return -1;
         }
         return actionResult("workspace-swap-monitors", Config::Actions::swapActiveWorkspaces(a, b));
@@ -149,12 +177,12 @@ namespace Config::Scheme {
         return out;
     }
 
-    static int hlWorkspaceChangeId(const char* wsName, double newId) {
+    static int hlWorkspaceChangeId(SCM wsArg, double newId) {
         if (!g_up)
             return -1;
-        const auto ws = workspaceFromName(wsName);
+        const auto ws = workspaceArg(wsArg);
         if (!ws) {
-            g_configError = "no workspace named " + std::string(wsName ? wsName : "");
+            g_configError = "no workspace for that argument";
             return -1;
         }
         return Config::Actions::changeWorkspaceID(ws, sc<int64_t>(newId)) ? 0 : -2;
@@ -275,6 +303,19 @@ namespace Config::Scheme {
         return State::Workspace::state()->find(target);
     }
 
+    /*
+        The workspace a SELECTOR names, as a handle, or #f. SELECTOR uses the
+        compositor's own grammar (+1, e+1, r+1, previous, empty, special:x,
+        name:x, or a bare number/name) — the same grammar hl-monitor-from
+        takes. Finds only: it does not create, which is why the ACTIONS take a
+        selector string directly rather than being composed from this.
+    */
+    static SCM hlWorkspaceFrom(const char* sel) {
+        if (!g_up)
+            return SCM_BOOL_F;
+        return workspaceHandleResult(workspaceFromSelector(sel ? sel : ""));
+    }
+
     // windows on a workspace: newline-joined handle ids (like hl-windows)
     static SCM hlWorkspaceWindows(const char* sel) {
         if (!g_up)
@@ -308,6 +349,7 @@ namespace Config::Scheme {
     // this family's Scheme-visible surface
     void registerWorkspace() {
         hl::bind<hlSchemeWorkspaceNames>("hl--c-workspace-names");
+        hl::bind<hlWorkspaceFrom>("hl--c-workspace-from");
         hl::bind<hlSchemeFocusWorkspace>("hl--c-focus-workspace");
         hl::bind<hlSchemeWorkspaceRename>("hl--c-workspace-rename");
         hl::bind<hlSchemeWorkspaceMoveMonitor>("hl--c-workspace-move-monitor");

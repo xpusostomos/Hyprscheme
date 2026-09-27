@@ -8,21 +8,30 @@ event reactions, queries — in Scheme.
 ;; ~/.config/hypr/hyprland.scm
 (hl-bind-add! (hl-key "SUPER+U") (lambda () (hl-exec! "foot")))
 
+;; a master layout: the first window takes 60% of the width, the rest stack
+;; down the right. It is handed the work AREA and the PLACEMENTS — one
+;; (window . box) pair per window, each box being where that window is now —
+;; and returns the same shape: only the windows to move, and where.
 (hl-layout-add! "master"
-  (let ((ratio (vector 0.5)))
-    'recalculate (lambda (count W H windows)
-                   (let ((mw (exact (floor (* W (vector-ref ratio 0))))))
-                     (if (<= count 1)
-                         (list (list 0 0 W H))
-                         (let* ((n (- count 1))
-                                (sw (- W mw))
-                                (sh (quotient H (max 1 n))))
-                           (let loop ((i 1) (acc (list (list 0 0 mw H))))
-                             (if (= i count)
-                                 (reverse acc)
-                                 (loop (+ i 1)
-                                       (cons (list mw (* (- i 1) sh) sw sh)
-                                             acc))))))))))
+  'recalculate
+  (lambda (area placements)
+    (let ((x (hl-box-x area)) (y (hl-box-y area))
+          (w (hl-box-w area)) (h (hl-box-h area)))
+      (cond
+        ((null? placements) '())
+        ((null? (cdr placements)) (list (cons (car (car placements)) area)))
+        (else
+          (let* ((mw     (inexact->exact (floor (* w 0.6))))
+                 (slaves (- (length placements) 1)))
+            (cons (cons (car (car placements)) (hl-box x y mw h))
+                  (let loop ((i 0) (ry 0) (rs (cdr placements)) (out '()))
+                    (if (null? rs)
+                        (reverse out)
+                        (let ((rh (quotient (- h ry) (- slaves i))))
+                          (loop (+ i 1) (+ ry rh) (cdr rs)
+                                (cons (cons (car (car rs))
+                                            (hl-box (+ x mw) (+ y ry) (- w mw) rh))
+                                      out))))))))))))
 ```
 
 A full API — binds, timers, window queries and actions, events, custom

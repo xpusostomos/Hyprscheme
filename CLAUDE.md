@@ -244,6 +244,19 @@ the custom-layout entry points. `Handles.*` is the object model,
 
 - Public API: `hl-*`; internal: `hl--*`. Emacs-ism machinery (defun,
   describe-function, later defcustom) is deliberately un-prefixed.
+- **A workspace or monitor argument is a handle, a number, or a selector
+  string** — one shape, accepted by every function that takes one
+  (`workspaceArg`/`monitorArg` in the C++). A **handle is used directly**;
+  only a string is resolved, with the compositor's own grammar
+  (`getWorkspaceTargetFromString` / `monitorState()->query().configString`).
+  Two rules that follow, and that were got wrong once:
+  - **never stringify a handle** to re-derive the object — it is waste, and it
+    destroys the grammar (a handle becomes a name, and a name lookup cannot
+    express `"+1"` or `"previous"`);
+  - **`hl-workspace-focus!` passes its string straight through** to
+    `Config::Actions::changeWorkspace(const std::string&)`, which resolves *and
+    creates* and honours `previous` / `workspace_back_and_forth`. Resolving it
+    first would be a regression, not a tidy-up.
 - **Mods are token lists everywhere.** `hl-kbd`/`hl-key` (Emacs- and
   Hyprland-style key spec parsers) generate them; no API splits strings
   and no raw modifier mask ints. The terminal slot is always the KEY;
@@ -265,6 +278,23 @@ the custom-layout entry points. `Handles.*` is the object model,
   (`hl--layout-window-open/close/msg/recalculate/resize`), fixed-shape
   payload lists destructured positionally — no event strings, no
   dispatching cond.
+  The geometry callback is `(area placements)` → `((window . box) …)`:
+  `area` is an `hl-box` (the work area), `placements` one
+  `(window . box)` pair per window to place, each box being where that
+  window is NOW; `resize` appends `(dx dy corner)`. **Boxes are whole
+  pixels** — exact integers in, rounded on return. **Keyed by window,
+  matched by window**: a partial or reordered return is either applied
+  correctly or rejected, never silently mis-placed; a window not in the
+  layout is refused and logged. A target with no window is skipped.
+  Coordinates are GLOBAL (a second monitor's x is not 0). The returned
+  box is the **cell** — the compositor insets the window inside it by
+  the border and `gaps_in`, as for the built-in layouts. The callbacks
+  run under the watchdog, and a failed or aborted pass falls back to a
+  default grid for that pass only. `hl-box`/`hl-box-x/y/w/h` build and
+  read boxes; `hl-window-group` turns a window into its group handle.
+  (The old positional `(count W H windows)` → `((x y w h) …)` shape is
+  gone from the main tree; `chez/` and FABLE.md still describe it,
+  which is history.)
 - Binds validate exclusivity (long-press/release vs repeat conflicts)
   at the Scheme level; hyprland does not.
 - Documentation: every public function is a plain `define` whose body

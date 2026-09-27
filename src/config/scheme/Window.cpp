@@ -454,6 +454,20 @@ namespace Config::Scheme {
         return (window && window->grouping().group()) ? 1 : 0;
     }
 
+    // the group a window is in, as a handle, or #f when it is in none. The
+    // missing direction of a relationship the API otherwise models both ways
+    // (hl-workspace-groups -> the groups on a workspace; hl-group-members ->
+    // the windows in a group).
+    static SCM hlSchemeWindowGroup(SCM id) {
+        if (!g_up)
+            return SCM_BOOL_F;
+        const auto window = windowOrFocused(id);
+        if (!window)
+            return SCM_BOOL_F;
+        const auto group = window->grouping().group();
+        return group ? hl::groupHandle(group) : SCM_BOOL_F;
+    }
+
     static int hlSchemeWindowGroupDenied(SCM id) {
         if (!g_up)
             return 0;
@@ -889,6 +903,7 @@ namespace Config::Scheme {
         hl::bind<hlSchemeWindowPseudoQuery>("hl--c-window-pseudo-query");
         hl::bind<hlSchemeWindowMaximizedQuery>("hl--c-window-maximized-query");
         hl::bind<hlSchemeWindowInGroup>("hl--c-window-in-group");
+        hl::bind<hlSchemeWindowGroup>("hl--c-window-group");
         hl::bind<hlSchemeWindowGroupDenied>("hl--c-window-group-denied");
         hl::bind<hlSchemeWindowGroupLocked>("hl--c-window-group-locked");
         hl::bind<hlSchemeWindowGroupLock>("hl--c-window-group-lock");

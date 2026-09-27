@@ -157,6 +157,14 @@ namespace Config::Scheme {
     std::optional<PHLWINDOW> actionWindow(SCM id);
     PHLWINDOW                windowOrFocused(SCM v);
 
+    // A workspace/monitor argument: a handle used directly, or a selector
+    // string resolved with the compositor's own grammar. The C++ these feed
+    // wants the OBJECT, so a handle is never re-derived from text — that was
+    // both wasteful and lossy (it could not express the grammar at all).
+    // (defined in Workspace.cpp)
+    PHLWORKSPACE workspaceArg(SCM v);
+    PHLMONITOR   monitorArg(SCM v);
+
     // selectors and name lookups, shared between the families that resolve them
     bool                   windowMatchesSelector(const PHLWINDOW& w, const std::string& sel);
     PHLMONITOR             monitorFromName(const char* name);
