@@ -319,9 +319,16 @@ the custom-layout entry points. `Handles.*` is the object model,
 
 ## Testing
 
-- `tests/run.sh` — the 12-file suite against a nested compositor
-  (`~/.local/bin/hyprland-scheme`), 12/12 green is the bar.
+- `tests/run.sh` — the 13-file suite against a nested compositor
+  (`~/.local/bin/hyprland-scheme`), 13/13 green is the bar.
   `t-coverage` fails if a public API lacks a test.
+  `t-zzz-monitors.sh` is the one test that changes the *monitor topology*:
+  it creates a headless output and moves the primary off the origin, because
+  every other test runs on a single output at (0,0) where a layout's
+  coordinates and the work area's origin are indistinguishable (FABLE §2.5).
+  It sorts late — after the doc test — and restores the topology itself,
+  asserting that it did. A test that needs a second output anywhere else
+  should join it rather than create one earlier.
 - `tests/soak.sh [SECONDS]` — sustained-load soak (live window pool,
   custom layout under load, event/timer/bind churn), logs to
   `/tmp/hyprscheme-soak-last/`, `SOAK_TRACE=1` for per-eval tracing.
@@ -366,7 +373,8 @@ in the wiki's building-the-plugin page.
   smuggling, the marshalling and `hyprscheme-compat-guile.scm` no longer
   exist. The Chez artifact is not built by this tree at all (frozen in
   `chez/`).
-  STEP 3 DONE: SUITE 12/12 ON GUILE (chez 12/12 unchanged). The
+  STEP 3 DONE: SUITE 12/12 ON GUILE (chez 12/12 unchanged — 12 files then;
+  the suite is 13 now, see Testing). The
   gotcha list lives in GUILE-CONVERSION.txt step 3 — headline items:
   boot-9's error template-wraps messages ("~A" + irritants — display
   code must render them); srfi-9 constructor/accessors are syntax

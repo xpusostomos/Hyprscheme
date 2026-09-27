@@ -19,12 +19,17 @@ Status vocabulary: **DONE** (changed and verified) · **NOT STARTED** ·
 **NEEDS A DECISION** (deliberately untouched — design call, per
 CLAUDE.md).
 
-Verification for everything below: `tests/run.sh` **12/12** — run with
+Verification for everything below: `tests/run.sh` green — run with
 `PLUGIN=$PWD/scheme-plugin-guile.so`, and again (the final run, after
 `make install`) through the default installed path, which is what the
 harness does with no override. There is no freshness warning in that
-final run, i.e. plugin and `.scm` are from the same build. "12/12" now
+final run, i.e. plugin and `.scm` are from the same build. The count now
 means something — see §2.13.
+
+The suite was **12 files** until the layout-callback pass added
+`t-zzz-monitors.sh` (§2.5), so it is **13** from there on. Earlier entries
+below record the count of their own time — "12/12" in a section written before
+that pass was true when it was written, and has not been rewritten to match.
 
 ---------------------------------------------------------------------
 
@@ -128,6 +133,28 @@ removed. (`Event.cpp`'s, which is live, stays.)
 Fixing the origin meant settling what a callback is handed and what it returns,
 which is §12.2's question: see **§12.2** below for the contract this pass
 landed.
+
+**Tested in its own scenario, not just reasoned.** §2.5 was rated HIGH for
+multi-monitor, and the first fix pass could only *reason* that it was right:
+the harness has one nested output at the origin, which is the blind spot the
+finding itself names. `tests/t-zzz-monitors.sh` closes that — it creates a
+second output (headless, the one step with no API), moves the primary to
+x=1920, and drives a layout that places every window at the work area's own
+corner. Measured: the layout is handed `area x=1940` (the monitor's 1920 plus
+gaps_out), and its windows come out at global x=1941 — on the monitor at 1920.
+Under the old payload the layout received only the size, so the same layout
+would have returned origin-relative boxes and put the windows at x≈0, on the
+other output.
+
+Three things that test cost, all now known rather than guessed: the headless
+backend is **mandatory** in this build, so `output create headless` works even
+in the nested wayland session; a config write (`hl-monitor-rule-add!`) rebuilds
+the Scheme generation, so monitors are positioned *before* any layout is
+registered; and the compositor opens new windows on the monitor **under the
+cursor**, so the fixture window is moved onto the target workspace rather than
+opened there. It sorts after the doc test — nothing but the exit test follows —
+and it asserts its own teardown (one monitor, primary back at x=0), because a
+test that changes the monitor topology does not get to assume it put it back.
 
 ### §2.6 — the two failing wiki blocks: DONE
 
@@ -1122,7 +1149,9 @@ around the layout paths, the stale comment), `hyprscheme/window.scm`,
 
 Tests: `t-api.sh` (boxes, `hl-window-group`, and a driven custom-layout round
 trip that asserts the layout settles — `in` equals `out` — plus a partial
-return), `t-watchdog.sh` (the runaway-layout case, §2.15), `soak.sh` (Chez
+return), `t-watchdog.sh` (the runaway-layout case, §2.15), **new**
+`t-zzz-monitors.sh` (§2.5's own scenario: a second output, the primary off the
+origin, a layout placing windows at the work area corner), `soak.sh` (Chez
 default, layout shape, `exact`, the positional rule setter).
 
 Docs: `custom-layouts.md`, `README.md`, `examples/hyprland.scm`, `CLAUDE.md`
@@ -1137,5 +1166,6 @@ the kernel is the gsubr boundary and the generation imports it directly, which
 is how a config's `(load …)` reaches the shadow — the first run of the new
 check flagged `load`/`eval` and was right to, until that was understood.)
 
-**Suite: 12/12**, with `make check` green on all four lints, and a 25s
-`soak.sh` at `VERDICT: PASS`.
+**Suite: 13/13** — the 13th file is `t-zzz-monitors.sh`, added by this pass for
+§2.5 — with `make check` green on all four lints, and a 25s `soak.sh` at
+`VERDICT: PASS`. Run twice, no flakes.
