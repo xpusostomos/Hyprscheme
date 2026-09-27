@@ -81,7 +81,9 @@ namespace hl {
     }
 
     static SCM loadFileThunk(void* path) {
-        scm_primitive_load(scm_from_locale_string((const char*)path));
+        // UTF-8, not locale: this is a PATH, and under LC_ALL=C a locale
+        // conversion mangles anything non-ASCII in it
+        scm_primitive_load(scm_from_utf8_string((const char*)path));
         return SCM_BOOL_T;
     }
 

@@ -447,8 +447,12 @@
     (and (not (eq? result hl--wd-aborted)) result)))
 
 (define (hl--fire-list-rec b lst)
-  (guard (e (#t (begin (hl--report e) #f)))
-    (hl--guarded-run "handler" (lambda () (apply (hl--event-thunk b) lst)))))
+  ;; same shape as its siblings: #t when the handler ran, #f when it errored or
+  ;; was aborted. It used to return the handler's value on success and #f on
+  ;; error, which reads as "failed" for a handler that legitimately returns #f.
+  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () (apply (hl--event-thunk b) lst))))))
+    (not (eq? result hl--wd-aborted))))
 
 (define (hl--fire-str-rec b arg)
   (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))

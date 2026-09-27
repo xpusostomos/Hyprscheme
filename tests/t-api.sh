@@ -826,4 +826,25 @@ ok '(hl-config-reload!)'
 unbound '(api-gen-scoped)'
 val 'hl--watchdog-ms' '5000'
 
+# ---- the swap flag's VALUE, pinned -----------------------------------------
+# (hl-window-swap-next! w) and (… w 'prev) are the documented forms, and #t is
+# the third: the dispatcher it mirrors takes a boolean FLAG — the compositor's
+# own lua is swap({prev = <truthy>}) — so the VALUE is what selects the
+# direction and #t must behave as 'prev. An earlier pass read the docstring
+# literally, made 'prev the only backwards spelling, and broke #t; this pins all
+# three so that cannot happen again.
+#
+# It runs last, on its own window, because a swap is not a no-op: it reorders
+# the layout, and a BACKWARDS swap also leaves the window FLOATING. That last
+# part is the compositor's behaviour, not ours — its lua swap({prev = true})
+# does the same — but either way it is a side effect, and the checks above are a
+# long chain that a stray flip or reorder disturbs.
+$SCHEME '(hl-exec! "foot -a api-swap")' >/dev/null
+WAIT_FOR 10 '(let ((s (hl-window-from "class:^api-swap$"))) (if s #t #f))' >/dev/null \
+  || { echo "api-swap fixture never appeared"; FAILED=1; }
+ok '(hl-window-swap-next! (hl-window-from "class:^api-swap$"))'
+ok '(hl-window-swap-next! (hl-window-from "class:^api-swap$") (quote prev))'
+ok '(hl-window-swap-next! (hl-window-from "class:^api-swap$") #t)'
+ok '(hl-window-float-set! (hl-window-from "class:^api-swap$") #:on? #f)   ; leave it tiled'
+
 [[ $FAILED -eq 0 ]]

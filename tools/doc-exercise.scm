@@ -60,6 +60,24 @@
 (define (machinery-dir) (string-append (repo-dir) "/src/config/scheme"))
 (define (wiki-dir) (string-append (repo-dir) "/../Hyprscheme.wiki"))
 
+(define (own-config-dir!)
+  "Point the config environment at a scratch directory of our own.
+Both variables, for the one rule: NOTHING here may resolve against the real
+config. The docs reference files under $XDG_CONFIG_HOME — core.md's
+split-config example loads keybinds.scm — so without this a block resolves
+against the user's own config, and the lint would read, and had the file
+existed LOAD AND RUN, whatever is there. tests/run.sh and tests/soak.sh set
+these for the same reason."
+  (let ((dir (string-append "/tmp/hyprscheme-doc-exercise-"
+                            (number->string (getpid)))))
+    (mkdir dir)
+    (mkdir (string-append dir "/hypr"))
+    ;; the files the docs expect to exist, as the test harness makes them
+    (close-port (open-output-file (string-append dir "/hypr/keybinds.scm")))
+    (close-port (open-output-file (string-append dir "/hypr/hyprland.scm")))
+    (setenv "XDG_CONFIG_HOME" dir)
+    (setenv "HYPRSCHEME_CONFIG" (string-append dir "/hypr/hyprland.scm"))))
+
 (define failures 0)
 (define notes 0)
 (define invoked 0)
@@ -289,6 +307,7 @@
 (define (main)
   (if (not (file-exists? (wiki-dir)))
       (begin (format #t "doc-exercise: ~a not found — skipped\n" (wiki-dir)) (exit 0)))
+  (own-config-dir!)
   (boot!)
   (set! harness (make-harness))
   (shadow-registrars! harness)

@@ -53,7 +53,14 @@ export HYPRSCHEME_CONFIG=$XDG_CONFIG_HOME/hypr/hyprland.scm
 export GUILE_AUTO_COMPILE=0
 mkdir -p "$XDG_CONFIG_HOME/hypr" "$XDG_STATE_HOME"
 cp tests/config/hyprland.lua "$XDG_CONFIG_HOME/hypr/"
-cp tests/config/hyprland.scm "$XDG_CONFIG_HOME/hypr/"
+# The scheme config is a SYMLINK to a file the suite owns, so every run
+# exercises the arrangement a dotfiles-managed config has: the inotify watch
+# has to resolve it (Host.cpp setupWatch), and t-config edits the TARGET to
+# prove a reload follows. soak.sh uses a plain copy, so between the two runs
+# both arrangements are covered.
+mkdir -p "$WORK/config-real"
+cp tests/config/hyprland.scm "$WORK/config-real/hyprland.scm"
+ln -sf "$WORK/config-real/hyprland.scm" "$XDG_CONFIG_HOME/hypr/hyprland.scm"
 PASS=0 FAIL=0
 
 cleanup() {
@@ -63,6 +70,12 @@ cleanup() {
     echo "KEEP=1: workdir preserved at $WORK"
     return
   fi
+  # ONLY the instance this script launched: $HYPRLAND_INSTANCE_SIGNATURE was
+  # captured after the compositor came up, and nested-instance discovery above
+  # accepts only directories that did NOT exist before launch. Never a glob, and
+  # never anything else under $XDG_RUNTIME_DIR/hypr — that directory holds the
+  # user's LIVE session IPC, and deleting it broke the real session's hyprctl
+  # until it restarted.
   [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && rm -rf "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE" 2>/dev/null
   rm -rf "$WORK"
 }

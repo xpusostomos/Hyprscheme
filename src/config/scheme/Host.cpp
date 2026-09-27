@@ -167,6 +167,10 @@ namespace Config::Scheme {
     using namespace Internals;
 
     static std::string                g_configPath;
+    // the config as the filesystem sees it: symlinks resolved, so the watch and
+    // the event match both land in the directory the file really lives in
+    static std::string                g_configReal;
+    static std::string                g_watchDir;             // the directory actually watched
     static int                        g_watchFd       = -1;    // inotify fd; dup'd into event loop waiters
     // scheme timers: C++ owns the CEventLoopTimer, Scheme owns the closure
     // (the handler closures travel inside the connections, locked)
@@ -384,9 +388,21 @@ namespace Config::Scheme {
                 break;
 
             for (ssize_t off = 0; off + (ssize_t)sizeof(struct inotify_event) <= n;) {
-                const auto* ev = reinterpret_cast<const struct inotify_event*>(&buf[off]);
+                const auto*       ev = reinterpret_cast<const struct inotify_event*>(&buf[off]);
+                const std::string named{ev->name, strnlen(ev->name, ev->len)};
+
+                // The config itself (resolved, so a symlinked config counts)…
+                const bool isConfig = !g_watchDir.empty() &&
+                                      (std::filesystem::path(g_watchDir) / named).string() == g_configReal;
+                // …or ANY .scm beside it. A config's `(load "keybinds.scm")`
+                // pulls in a file in its own directory, and an edit to that has
+                // to reload too — that is the arrangement the docs recommend.
+                // (A load from OUTSIDE the config's directory is still not
+                // seen; following the paths a load touched is a bigger change.)
+                const bool isScmSibling = std::filesystem::path(named).extension() == ".scm";
+
                 if ((ev->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE)) && ev->len > 0 &&
-                    g_configPath.ends_with(ev->name))
+                    (isConfig || isScmSibling))
                     dirty = true;
                 off += (ssize_t)sizeof(struct inotify_event) + ev->len;
             }
@@ -408,13 +424,22 @@ namespace Config::Scheme {
     }
 
     static void setupWatch() {
-        const auto dir = std::filesystem::path(g_configPath).parent_path().string();
+        // RESOLVE SYMLINKS FIRST. Editing the target of a symlinked config (how
+        // a dotfiles manager lays one out) fires events in the TARGET's
+        // directory; watching the directory the symlink sits in never sees
+        // them, so the config appeared to reload only if you touched the
+        // symlink itself.
+        std::error_code ec;
+        const auto      real = std::filesystem::weakly_canonical(g_configPath, ec);
+        g_configReal = ec ? g_configPath : real.string();
+
+        g_watchDir = std::filesystem::path(g_configReal).parent_path().string();
 
         g_watchFd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
         if (g_watchFd < 0)
             return;
 
-        if (inotify_add_watch(g_watchFd, dir.c_str(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) < 0) {
+        if (inotify_add_watch(g_watchFd, g_watchDir.c_str(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) < 0) {
             close(g_watchFd);
             g_watchFd = -1;
             return;
@@ -488,7 +513,15 @@ namespace Config::Scheme {
             .name    = "scheme",
             .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
             .handler = [](const IPC::Socket1::SRequest& req) {
-                auto code = req.command.substr(req.command.find_first_of(' ') + 1);
+                // `hyprctl scheme` with NO argument used to fall through as
+                // substr(npos + 1) = substr(0), which is the whole word
+                // "scheme" — evaluated as a symbol, so the reply was
+                // "Unbound variable: scheme". Say what is missing instead.
+                const auto space = req.command.find_first_of(' ');
+                if (space == std::string::npos ||
+                    req.command.find_first_not_of(" \t", space) == std::string::npos)
+                    return IPC::Socket1::SResponse("usage: hyprctl scheme <expression>");
+                auto code = req.command.substr(space + 1);
                 watchdogEnter("eval");
                 const SCM r = hl::call1(hl::globalRef("hl--eval"), scm_from_utf8_stringn(code.c_str(), code.size()));
                 watchdogExit();

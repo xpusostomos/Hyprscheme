@@ -1323,3 +1323,122 @@ error the log had.
 **Suite: 14/14**, six lints green, and the compositor log now carries only the
 three errors the tests ask for (two deliberate watchdog runaways, and `t-api`'s
 `boom` error-handling case).
+
+### The other tier-3 findings: four doc bugs, and the check that sees them
+
+Triage of the exercise notes (§ above) turned up a small set that were **not**
+harness noise — the same class as `events.md`:
+
+| site | was | now |
+|---|---|---|
+| `bind-gestures.md` ×2 | `(hl-notify! "…" 5000 'icon "ok")` | `#:icon "ok"` — `'icon` is a bare symbol, and the docstring above it shows the right form |
+| `submaps.md` | `(hl-window-group-set! #:on? #f)` | the window is a required positional; the entry is described as a *toggle*, so the bare form |
+| `dwindle-layout.md` | `(hl-window-pseudo-set! #:on? #f)` | likewise — and the table above it says "toggles" |
+
+Verified the same way the bugs were found: the eight `keyword-argument-error`
+notes in the exercise run went to **zero**. (The remaining 121-ish notes are the
+harness's own noise — stubs answering `#f` — and the two `odd plist` ones are a
+2-arg helper invoked with a fabricated `#f`.)
+
+**And then the hole itself, closed.** Every tier is blind to this class —
+the names exist, the block registers, the exercise tier can only hand a
+callback a fabricated `#f` (which makes a type error ambiguous by
+construction), and the live tier only covers the snippets it was told to drive.
+The only signal is the **compositor log**, so `t-zzzz-exit.sh` — which has to
+sort last anyway — now asserts that the log carries no `[scheme] error:` line
+except the ones the tests ask for. The allowlist is three entries, **measured
+against a green run** rather than guessed: the two deliberate watchdog runaways
+and `t-api`'s `boom` case.
+
+Both bugs found today would have been caught by it, and it was verified to bite:
+a window-open callback injected into a wiki page that closes its window with a
+stray argument passed t-zzz-docs (it registers), doc-audit (the names exist),
+doc-exercise (a note, not a failure) and the live tier (not driven) — and then
+the log check named it the moment a window actually opened
+(`Wrong number of arguments to hl-window-close!`).
+
+*(One thing the log also carries, in this session and in every preserved log
+before it: an `ASSERTION FAILED … could not connect to wayland server` from the
+nested compositor's own wayland teardown. Pre-existing, unrelated to scheme, and
+outside this check's scope — noted rather than chased.)*
+
+## §2.12 and §2.16 — the smaller items: DONE (bar one)
+
+Most of §2.12 and **all** of §2.16 were Chez-era or died with the migration; what
+was left was four real bugs and one inconsistency. Checked item by item rather
+than assumed, because "the migration probably fixed it" is how a ledger starts
+lying.
+
+**§2.12, live and fixed:**
+
+- **`hl-window-swap-next!` — the DOCSTRING was wrong, not the code, and a first
+  pass "fixed" the wrong half.** FABLE flagged that the docstring says "'prev or
+  #t swaps backwards" while the code maps anything truthy to backwards. Reading
+  that as a bug, the first pass made `'prev` the only backwards spelling — which
+  **removed the documented `#t`**. The dispatcher it mirrors takes a boolean
+  FLAG (the compositor's own lua is `swap({prev = <truthy>})`), so the value is
+  what selects the direction and any true value IS `'prev`, deliberately.
+  Restored, with the contract stated properly in the docstring, and **all three
+  forms are now pinned by tests** so the same misreading cannot land again.
+  Chris caught this ("you fucked hl-window-swap-next!"), and the lesson is the
+  one this repo keeps teaching: a doc/code mismatch is not evidence about which
+  side is wrong.
+
+  Also established while pinning them: **a backwards swap leaves the window
+  floating**, and that is the *compositor's* behaviour, not ours — its own lua
+  `swap({prev = true})` does the same, verified side by side. So the test drives
+  the three forms last, on a window of its own, because a swap reorders the
+  layout and the backwards one floats: real side effects, and the checks above
+  are a long chain that a stray flip disturbs. (That is what made the first
+  attempt at this test fail a *later* pin check, which reaches floating with a
+  toggle.)
+- **`hyprctl scheme` with no argument** fell through as
+  `substr(find_first_of(' ') + 1)` = `substr(0)` = the whole word `"scheme"`,
+  evaluated as a symbol: `Unbound variable: scheme`. It now replies with a
+  usage line.
+- **A symlinked config never reloaded.** The watch was on the *symlink's*
+  directory, and editing the target fires events in the *target's* directory —
+  so a dotfiles-managed config only reloaded if you touched the symlink itself.
+  `setupWatch` now resolves the realpath, and the event match accepts any
+  `.scm` in that directory, which covers a config's `(load "keybinds.scm")`
+  sibling (the arrangement the docs recommend). A load from outside that
+  directory is still not seen — following the paths a load touched is a bigger
+  change, and this is noted rather than half-done.
+- **A path went through the locale variant** (`scm_primitive_load(
+  scm_from_locale_string(path))`) — under `LC_ALL=C` a non-ASCII config path
+  mangles. Now UTF-8, as the title paths already were.
+- **`hl--fire-list-rec` was the odd one out**: every sibling returns "did the
+  handler run" (`#t`/`#f`), while this one returned the handler's *value* on
+  success and `#f` on error — which reads as "failed" for a handler that
+  legitimately returns `#f`. Now matches its siblings (C++ ignores the value).
+
+**§2.12, resolved by the migration** (verified absent, not assumed): the
+`hyprscheme-compat-guile.scm` after-gc comment (the file is gone), and the
+handle-addresses-as-`double` landmine (handles are foreign objects now).
+
+**§2.12, still open:** `windowMatchesSelector` compiles a `std::regex` **per
+window per call**, so `hl-windows-from` over N windows compiles N of them, and
+its hand-rolled selector vocabulary can drift from the compositor's (FABLE §5
+covers which spellings are missing). A perf/parity item in its own right.
+
+**§2.16, all four:** the double resolution in `hlSchemeWindowClass` is gone (one
+`hl::windowOf`), `fireSchemeBind(int)` is the live `fireSchemeBindRec` calling
+`hl--bind-fire-rec` (which exists), and the hardcoded `/home/chris/GITE/chez-pic`
+with `registerBootFile`/`buildHeap` appears nowhere. The fourth was "worth a
+comment": `run.sh`'s cleanup now says why it removes only the instance *it*
+launched, given how loudly the never-delete rule is stated.
+
+### The reload test, and a harness change to carry it
+
+A symlink is only resolvable at plugin-load time, so testing this means the
+harness has to *launch* with a symlinked config. `tests/run.sh` now writes the
+real file into `$WORK/config-real/` and symlinks `$HYPRSCHEME_CONFIG` to it, and
+`t-config.sh` edits the **target** and waits for the reload (a marker the config
+writes, in `hl-state`, which outlives a reload). Verified to discriminate: with
+the realpath resolution defeated the test fails with "editing the symlink TARGET
+did not reload the config (marker=0)".
+
+`soak.sh` still uses a plain copy, so between the two runs both arrangements are
+covered on every pass.
+
+**Suite: 14/14**, six lints green, soak `VERDICT: PASS`.

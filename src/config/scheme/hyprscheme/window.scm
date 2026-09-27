@@ -128,8 +128,14 @@
   (= 0 (hl--c-window-swap-direction w (hl--dir dir))))
 
 (define (hl-window-swap-next! w . opt)
-  "Swap WINDOW with the next window in its group; 'prev or #t swaps
-   backwards."
+  "Swap WINDOW with the next window in its group; 'prev — or any true
+   value — swaps backwards instead. Pass nothing for the next window.
+   The dispatcher it mirrors takes a boolean FLAG, so the value is what
+   counts: (hl-window-swap-next! w #t) is the same as 'prev."
+  ;; any true value is 'prev, deliberately: the Lua dispatcher is
+  ;; swap({prev = <truthy>}), so the VALUE is the flag. (An earlier pass
+  ;; 'fixed' this to accept only 'prev and thereby broke #t, which is the
+  ;; documented spelling — tests/t-api.sh now pins all three forms.)
   (= 0 (hl--c-window-swap-next w (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 (if (car opt) 1 0))))))
 
 (define (hl-window-swap-with! w other)

@@ -24,3 +24,32 @@ out=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--prin
 # unknown key raises
 out=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-config-add! "nonsense:key" 1))))')
 [[ "$out" == *"unknown config key"* ]] || { echo "bad-key gave: $out"; exit 1; }
+
+# ---- the config reload follows a SYMLINKED config ---------------------------
+# run.sh makes $HYPRSCHEME_CONFIG a symlink to a file it owns. Editing the
+# TARGET is how a dotfiles manager's config actually changes, and the events
+# fire in the target's directory — so a watch on the symlink's own directory
+# never saw them and the config appeared never to reload. (The fix resolves the
+# realpath; this asserts the behaviour rather than the implementation.)
+REAL=$(readlink -f "$HYPRSCHEME_CONFIG")
+[[ -f $REAL ]] || { echo "the harness config is not a symlink to a real file"; exit 1; }
+
+# a marker written by the config itself; hl-state outlives a reload, so the
+# marker appearing means the config was RUN again
+before=$($SCHEME '(hl-state-ref (quote cfg-reload-marker) 0)')
+okv "$before" '0' 'reload marker starts unset'
+
+printf '\n(hl-state-set! (quote cfg-reload-marker) 1)\n' >> "$REAL"
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(hl-state-ref (quote cfg-reload-marker) 0)')
+  [[ "$out" == "1" ]] && break
+  sleep 0.5
+done
+[[ "$out" == "1" ]] || { echo "editing the symlink TARGET did not reload the config (marker=$out)"; exit 1; }
+
+# put the file back: the appended line would otherwise reload again in every
+# later test, and this suite runs one compositor for all of them
+sed -i '$ d' "$REAL"
+sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' "$REAL"
+[[ "$($SCHEME '(hl-state-ref (quote cfg-reload-marker) 0)')" == "1" ]] || { echo "restore reloaded oddly"; }

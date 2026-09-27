@@ -346,6 +346,14 @@ the custom-layout entry points. `Handles.*` is the object model,
 
 ## Testing
 
+- **Every harness and tool points the config environment at a directory it
+  OWNS** — `XDG_CONFIG_HOME` *and* `HYPRSCHEME_CONFIG`, at a temp path, before
+  anything runs. `run.sh` and `soak.sh` do it for the suite; the `doc-*` tools
+  do it for themselves, because the docs reference files under
+  `$XDG_CONFIG_HOME` (core.md's split-config example loads `keybinds.scm`) and
+  a lint must never resolve — let alone read or run — the real config. This is
+  the same rule as never touching `~/.config/`, one level down: a tool that
+  inherits the ambient environment is a tool that pokes the user's config.
 - `tests/run.sh` — the 14-file suite against a nested compositor
   (`~/.local/bin/hyprland-scheme`), 14/14 green is the bar.
   `t-coverage` fails if a public API lacks a test.
@@ -354,7 +362,14 @@ the custom-layout entry points. `Handles.*` is the object model,
   snippet whose composition is wrong fails here rather than in a reader's
   config. The doc tiers are cumulative — `t-zzz-docs` evaluates every block,
   `doc-audit` checks every name exists, `doc-exercise` calls every registered
-  callback, and this one checks what a callback DOES.
+  callback, and this one checks what a callback DOES. Beyond them all,
+  `t-zzzz-exit.sh` (which must sort last anyway) asserts that the **compositor
+  log carries no `[scheme] error:` line except the ones the tests ask for** —
+  three, measured against a green run. That is the only check that sees a bug
+  whose names all exist and which only fails when it is actually CALLED with
+  real data; two were found that way in one pass. Verified to fail by injecting
+  a window-open callback that closes its window with a stray argument: every
+  other tier passed it, and the log check named the error.
   `t-zzz-monitors.sh` is the one test that changes the *monitor topology*:
   it creates a headless output and moves the primary off the origin, because
   every other test runs on a single output at (0,0) where a layout's
