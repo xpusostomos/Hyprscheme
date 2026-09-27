@@ -62,6 +62,13 @@ def imports_of(text):
            set(re.findall(r'#:use-module \(hyprscheme ([\w-]+)\)', text))
 
 
+def calls_of(code):
+    """Names in call position. A quoted list is data, not a call, so anything
+    behind a quote character is dropped — `'(hl-kbd hl-key)` names them, it does
+    not call them."""
+    return set(re.findall(r"(?<!['`,])\(([\w!?*<>=+-]+)", code))
+
+
 def defines_of(text):
     return set(re.findall(r'^\(define\*? \(?([\w!?*<>=+-]+)', text, re.M))
 
@@ -84,6 +91,23 @@ def main():
         for d in defines_of(read(path)):
             owner[d] = name
 
+    all_names = set(owner) | {n for path in fams.values()
+                              for n in exports_of(read(path))}
+
+    def visible_to(name):
+        """What a module may call: its own bindings (defines and its #:export,
+        since the host defines some of the kernel's), plus what its imports
+        offer. The kernel imports nothing of ours — that is what makes the rule
+        a rule."""
+        own = defines_of(read(fams[name])) | exports_of(read(fams[name]))
+        if name == KERNEL:
+            return own
+        if name == CORE:
+            return own | exports_of(read(fams[KERNEL]))
+        if name == EXTRAS:
+            return own | {n for p in fams.values() for n in exports_of(read(p))}
+        return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[CORE]))
+
     bad = 0
     for name, path in sorted(fams.items()):
         text = read(path)
@@ -95,7 +119,7 @@ def main():
                 bad = 1
         # and does it CALL another family's function?
         code = strip_prose(text)
-        for callee in set(re.findall(r'\(([\w!?*<>=+-]+)', code)):
+        for callee in sorted(calls_of(code)):
             src = owner.get(callee)
             if src and src not in (name, KERNEL, CORE) and name != EXTRAS:
                 print('CALL:    (hyprscheme %s) calls %s, which belongs to '
@@ -107,6 +131,15 @@ def main():
                 print('EXPORT:  (hyprscheme %s) defines %s but does not export it'
                       % (name, d))
                 bad = 1
+        # can it SEE everything it calls? A call to a name the module cannot
+        # reach is unbound at runtime, and it is silent until that path runs —
+        # `hl--plist-has?` lived in core while the KERNEL called it, so every
+        # bind whose callback returned a plist raised, was caught by the guard,
+        # and was read as DECLINED (the key was passed through, not consumed).
+        for c in sorted(calls_of(code) & set(all_names) - visible_to(name)):
+            print('CALL:    (hyprscheme %s) calls %s, which it cannot see'
+                  % (name, c))
+            bad = 1
 
     # The public surface: everything the families and core export that is API
     # must be re-exported by the umbrella, or the API simply cannot be called.

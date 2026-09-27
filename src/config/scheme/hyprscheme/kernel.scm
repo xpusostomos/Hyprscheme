@@ -166,7 +166,7 @@
            hl--guarded-run hl--layout-call hl--layout-msg
            hl--layout-recalculate hl--layout-resize
            hl--layout-window-close hl--layout-window-open hl--load
-           hl--now-ms hl--plist-cdr hl--plist-get hl--print-exception
+           hl--now-ms hl--plist-cdr hl--plist-get hl--plist-has? hl--print-exception
            hl--ready hl--record-field hl--report hl--target-env
            hl--timer-fire hl--timer-interval hl--timer-thunk
            hl--watchdog-ms hl--wd-aborted hl--wd-alarm hl--wd-enter
@@ -381,6 +381,19 @@
     (if (null? tail)
         (hl--error 'hl--plist "odd plist: ~s" l)
         tail)))
+
+;; hl--plist-has? lives HERE, not in core, because the kernel's own
+;; hl--bind-result asks it — and the kernel cannot import core (core imports the
+;; kernel). It sat in core while its sibling hl--plist-cdr was already here, so
+;; every bind whose callback returned a plist raised `Unbound variable:
+;; hl--plist-has?`, was caught by the guard, and was read as DECLINED: the key
+;; was passed through instead of consumed.
+(define (hl--plist-has? pl key)
+  (let loop ((l pl))
+    (if (null? l)
+        #f
+        (let ((tail (hl--plist-cdr l)))
+          (if (eq? (car l) key) #t (loop (cdr tail)))))))
 
 (define (hl--plist-get pl key default)
   (let loop ((l pl))

@@ -58,17 +58,44 @@ Lua feature has a `hl-*` equivalent.
     a "prelude failed to load" at startup.
   - `tools/module-audit.py` — the module rule: a family imports only the
     kernel and core and calls nothing another family owns; only extras
-    composes. Its whole point is that this rule decays silently.
+    composes. Its whole point is that this rule decays silently. It also
+    checks that a module can SEE everything it calls: a call to a name it
+    cannot reach is unbound at runtime and silent until that path runs.
+    (`hl--plist-has?` sat in core while the **kernel** called it — the
+    kernel imports nothing of ours — so every bind whose callback returned
+    a plist raised, was caught by the guard, and read as DECLINED: the key
+    was passed through instead of consumed.)
   - `tools/load-check.scm` — stubs the C entry points and loads the
     machinery in a plain `guile`: a load-time error with no compositor.
   - `tools/bind-audit.py` — every `hl--c-*` the machinery calls is
     registered, none twice, none dead — and nothing is left undefined in
     the built `.so` (how a family object missing from `COMMON_OBJS` shows
     up: it links fine and fails only when the compositor loads it).
+  - `tools/doc-audit.py` — every `hl-*` name the WIKI uses exists (in a
+    code block or in prose). Textual, which is the point: a name inside a
+    `lambda` is never looked up by evaluating the block, which is how five
+    nonexistent names survived in `code-snippets.md`.
+  - `tools/doc-exercise.scm` — the wiki's blocks are loaded and then what
+    they REGISTERED is called, so a name inside a thunk is looked up. Fails
+    on `unbound-variable`; other callback errors are notes
+    (`DOC_EXERCISE_NOTES=1` shows them) because the stubs answer `#f` where
+    the compositor would answer a real value.
   Each has been **verified to fail**: a deliberate cross-family call trips
-  module-audit, an undefined call at load trips load-check. A check that
-  cannot fail is worse than no check — `t-coverage` passed vacuously for
-  its whole life.
+  module-audit, an undefined call at load trips load-check, a bad name in
+  the wiki trips doc-audit, a bad name inside a thunk trips doc-exercise.
+  A check that cannot fail is worse than no check — `t-coverage` passed
+  vacuously for its whole life.
+
+  **`load-check.scm` and the `doc-*` tools build the machinery the way
+  `Host.cpp` does, and two things about that are easy to get wrong** (both
+  were, and both made the check weaker than it read): the C entry points
+  must be stubbed into the **kernel** (where `registerAllBindings()` puts
+  the real ones) *before* the kernel is read, and a file loaded form-by-form
+  needs `set-current-module` after its `define-module` — evaluating that form
+  does **not** switch modules the way the loader's own handling does. Get
+  either wrong and every module keeps only its unassigned `#:export`
+  placeholders: the forms all evaluate, and every name dereferences to
+  unbound.
 
 ## How the plugin loads Scheme
 
@@ -319,9 +346,15 @@ the custom-layout entry points. `Handles.*` is the object model,
 
 ## Testing
 
-- `tests/run.sh` — the 13-file suite against a nested compositor
-  (`~/.local/bin/hyprland-scheme`), 13/13 green is the bar.
+- `tests/run.sh` — the 14-file suite against a nested compositor
+  (`~/.local/bin/hyprland-scheme`), 14/14 green is the bar.
   `t-coverage` fails if a public API lacks a test.
+  `t-zzz-snippets.sh` runs the wiki's snippets for real: it extracts a block,
+  pulls the thunk out of the form and calls it (`tests/doc-snippets.scm`), so a
+  snippet whose composition is wrong fails here rather than in a reader's
+  config. The doc tiers are cumulative — `t-zzz-docs` evaluates every block,
+  `doc-audit` checks every name exists, `doc-exercise` calls every registered
+  callback, and this one checks what a callback DOES.
   `t-zzz-monitors.sh` is the one test that changes the *monitor topology*:
   it creates a headless output and moves the primary off the origin, because
   every other test runs on a single output at (0,0) where a layout's
@@ -374,7 +407,7 @@ in the wiki's building-the-plugin page.
   exist. The Chez artifact is not built by this tree at all (frozen in
   `chez/`).
   STEP 3 DONE: SUITE 12/12 ON GUILE (chez 12/12 unchanged — 12 files then;
-  the suite is 13 now, see Testing). The
+  the suite is 14 now, see Testing). The
   gotcha list lives in GUILE-CONVERSION.txt step 3 — headline items:
   boot-9's error template-wraps messages ("~A" + irritants — display
   code must render them); srfi-9 constructor/accessors are syntax
@@ -394,7 +427,9 @@ in the wiki's building-the-plugin page.
 - defun is fully retired from the main tree: every public function is a
   plain `define` with a Guile docstring (private `--` functions too).
   The defun/describe-function machinery is frozen in `chez/` only.
-- doc-name spellcheck for the wiki (balance checker exists).
+- doc-name spellcheck for the wiki: DONE — `tools/doc-audit.py` checks every
+  `hl-*` name the wiki uses, in blocks and in prose, against the API's export
+  lists. (The balance checker is the reader check in `wiki-examples.awk`.)
 - Interactive REPL.
 - Event self-removal-during-fire test.
 - Working tree uncommitted since around `3c0184b` — commit when Chris

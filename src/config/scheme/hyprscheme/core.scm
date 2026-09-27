@@ -10,7 +10,7 @@
            hl--bind-flags hl--bool-act hl--dir hl--emacs-key
            hl--emacs-keys hl--emacs-mods hl--emacs-mouse hl--gesture-mode
            hl--mon-arg hl--monitor-listen hl--notif-act hl--plist-fold
-           hl--plist-has? hl--plist-map hl--push-val hl--rule-kind
+           hl--plist-map hl--push-val hl--rule-kind
            hl--rule-name hl--rule-spec-value hl--special-name hl--str
            hl--window-listen hl--window-rule-mk hl--workspace-listen
            hl--ws-arg hl-after hl-box hl-box-h hl-box-rtd hl-box-w
@@ -105,13 +105,6 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
   ;; raised "Wrong number of arguments" when the default was omitted (apply of
   ;; an empty list), and apply cannot spread a scalar either.
   (hl--plist-get plist key (if (null? default) #f (car default))))
-
-(define (hl--plist-has? pl key)
-  (let loop ((l pl))
-    (if (null? l)
-        #f
-        (let ((tail (hl--plist-cdr l)))
-          (if (eq? (car l) key) #t (loop (cdr tail)))))))
 
 (define (hl--plist-fold f seed pl)
   (let loop ((l pl) (acc seed))

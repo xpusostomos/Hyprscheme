@@ -143,6 +143,8 @@ check: $(TARGET)
 	@echo "== load-check";   guile --no-auto-compile -L src/config/scheme -s tools/load-check.scm >/dev/null 2>&1 \
 	  && echo "ok: the machinery loads" || { echo "load-check FAILED"; exit 1; }
 	@echo "== bind-audit";   python3 tools/bind-audit.py
+	@echo "== doc-audit";    python3 tools/doc-audit.py
+	@echo "== doc-exercise"; guile --no-auto-compile -s tools/doc-exercise.scm
 
 clean:
 	rm -f $(OBJ) $(TARGET)

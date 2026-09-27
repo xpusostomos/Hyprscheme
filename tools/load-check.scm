@@ -83,6 +83,16 @@
                       (report path form)
                       (report-why (if (null? args) k (car args)))
                       (set! failed (+ failed 1))))
+                  ;; `define-module` evaluated form by form does NOT switch the
+                  ;; current module — only the loader's own handling of it does.
+                  ;; Without this, every file is defined into (guile-user) and
+                  ;; the module keeps nothing but its unassigned #:export
+                  ;; placeholders: the forms all evaluate without error, and
+                  ;; every name in the module is then unbound. (It made this
+                  ;; check weaker than it read: it proved the forms RAN, not
+                  ;; that the machinery was there.)
+                  (when (and (pair? form) (eq? (car form) 'define-module))
+                    (set-current-module (resolve-module (cadr form))))
                   (loop (+ n 1))))))))))
 
 (let* ((dir (machinery-dir))
@@ -98,11 +108,17 @@
   (resolve-module '(hyprscheme kernel))
   (set-current-module (resolve-module '(hyprscheme kernel)))
   (module-define! (current-module) 'hl--c-generation (lambda () #f))
+  ;; the stubs go in the KERNEL, where the host puts the real ones
+  ;; (Host.cpp: registerAllBindings() while the kernel is current), and BEFORE
+  ;; the kernel is read so its #:export can name them. Stubbed into
+  ;; (hyprscheme api) instead — as this did — the kernel's own hl--c-*
+  ;; placeholders stay unassigned and every call through one is an unbound
+  ;; variable, which is a class of error this check then could not see.
+  (stub-c-entry-points (cons kernel api))
   (load-reporting kernel)
 
   (resolve-module '(hyprscheme api))
   (set-current-module (resolve-module '(hyprscheme api)))
-  (stub-c-entry-points (cons kernel api))
   (for-each load-reporting api)
 
   (load-reporting pub)

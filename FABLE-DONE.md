@@ -27,9 +27,10 @@ final run, i.e. plugin and `.scm` are from the same build. The count now
 means something — see §2.13.
 
 The suite was **12 files** until the layout-callback pass added
-`t-zzz-monitors.sh` (§2.5), so it is **13** from there on. Earlier entries
-below record the count of their own time — "12/12" in a section written before
-that pass was true when it was written, and has not been rewritten to match.
+`t-zzz-monitors.sh` (§2.5, the 13th) and the doc-verification pass added
+`t-zzz-snippets.sh`, so it is **14** from there on. Earlier entries below record
+the count of their own time — "12/12" in a section written before those passes
+was true when it was written, and has not been rewritten to match.
 
 ---------------------------------------------------------------------
 
@@ -97,7 +98,7 @@ Five items, one pass, suite green.
   every entry point appeared "called". Declarations are now stripped before the
   scan, and the tool found both dead entry points again.
 
-### The four lints now run on every `make`
+### The lints now run on every `make` (six)
 
 `all: $(TARGET) check`, and `check` runs:
 
@@ -107,6 +108,8 @@ Five items, one pass, suite green.
 | `tools/module-audit.py` | the module rule: a family imports only the kernel and core and never calls another family — plus, since the layout-callback pass, that every top-level define is in its own module's `#:export` and every public name reaches the umbrella's `#:re-export` |
 | `tools/load-check.scm` | a load-time error, with no compositor needed |
 | `tools/bind-audit.py` | registrations: unbound, duplicate, dead — and **anything undefined in the built `.so`** |
+| `tools/doc-audit.py` | a name the WIKI uses that does not exist (textual, so it sees inside thunks) |
+| `tools/doc-exercise.scm` | a name inside a callback the wiki REGISTERS — by calling it |
 
 Each was **verified to fail**: a deliberate cross-family call trips module-audit,
 an undefined call at load trips load-check. (A check that cannot fail is the trap
@@ -345,12 +348,24 @@ cleanup pass, §2.4 by Step A's typed accessors and Step C's foreign objects (se
 *(§2.9 — `errorf` discarding its `who` — is **done**, as a consequence of
 §4.1 Step A: `hl--error` keeps the origin and the renderer prints it.)*
 
-## Wiki rot (the non-failing names) — NOT STARTED
+## Wiki rot (the non-failing names) — MOSTLY DONE
 
-Names that still do not exist, but sit inside thunks so the doc test
-cannot see them: `code-snippets.md` `hl-window-into-group` /
-`-out-of-group`, `bind-globals.md` `hl-global`, `binds.md`
-`hl-window-cycle`, and `naming-conventions.md`'s `'release #t` pairs.
+Four of the five are **fixed**, and the class is now **checked rather than
+hunted** — see "the wiki's snippets, verified three ways" below.
+
+- `code-snippets.md` `hl-window-into-group` / `-out-of-group` / `hl-group-cycle`
+  / `hl-group-index` / `hl-group-move-window` — fixed in the rewrite (five
+  names, and the group-toggle that forced groups OFF where the original
+  toggles).
+- `bind-globals.md` — `hl-pass`/`hl-send-shortcut` in prose became
+  `hl-window-pass-shortcut!`/`hl-window-send-shortcut!`.
+- `binds.md` — `(hl-window-cycle)` became `(hl-window-cycle!)`.
+- `scheme-utilities.md` — `(hl-monitor-selector M)` became `(hl-monitor-name M)`
+  (`hlMonitorSelector` returns the same field as `hlMonitorName`, and has no
+  public wrapper of its own).
+
+Still open: `naming-conventions.md`'s `'release #t` pairs (a shape change, not a
+name).
 
 *(`core.md`'s layout-watchdog promise was on this list and is now **true
 rather than rot** — the §2.15 fix; it describes what the code does.)*
@@ -1169,3 +1184,142 @@ check flagged `load`/`eval` and was right to, until that was understood.)
 **Suite: 13/13** — the 13th file is `t-zzz-monitors.sh`, added by this pass for
 §2.5 — with `make check` green on all four lints, and a 25s `soak.sh` at
 `VERDICT: PASS`. Run twice, no flakes.
+
+## The wiki's snippets, verified three ways (Chris's request) — DONE
+
+Not a FABLE item: Chris asked for the code-snippets page to be brought over in
+full and for a way to *exercise* what it contains. The second half turned out to
+be the useful one, because the existing harness loads every snippet without ever
+calling one.
+
+### What the doc test could not see
+
+`tests/wiki-examples.awk` extracts all 125 `scheme` blocks with a **balance**
+check, and `t-zzz-docs.sh` evaluates each one, failing only on `error:`. So a
+block containing
+
+```scheme
+(hl-bind-add! (hl-kbd "s-G") (lambda () ... (hl-window-into-group #f "l") ...))
+```
+
+passes: the lambda is *registered*, never called, and nothing inside it is ever
+looked up. Block 0049 — the Vim-like keymaps snippet — was balanced, unskipped,
+evaluated on every run, and contained **five names that do not exist**, with the
+suite green.
+
+### Three tiers, each answering a different question
+
+| | tool | answers | fails on |
+|---|---|---|---|
+| A | `tools/doc-audit.py` | does every `hl-*` name the wiki uses exist? | an unknown name, in a block or in prose |
+| B | `tools/doc-exercise.scm` | does every callback the wiki registers RUN? | `unbound-variable`, wherever inside a thunk it hides |
+| C | `tests/t-zzz-snippets.sh` | does a snippet DO what it claims? | a composition that produces the wrong effect |
+
+A is textual on purpose — that is the only way to see inside a thunk — and it
+found all five names immediately. B goes further: it loads the blocks into the
+environment a config gets, replaces every *registering* function (derived from
+the API's own export list: every `-add!`, plus `hl-submap`/`hl-repeat`/`hl-after`,
+so the list cannot drift) with a wrapper that records the procedures it is
+handed, and then **calls them** — repeating, because the binds inside an
+`hl-submap` thunk are only registered once that thunk runs. C extracts the block,
+pulls the thunk out of the form and runs it against the live compositor, so it
+tests the *documented* code rather than a copy that can drift.
+
+Each was verified to fail: A on a reintroduced bad name, B on the same name put
+back inside the submap thunk, C on a snippet broken so its two halves disagree
+(drop the tag and the restore half cannot find the window again). A check that
+cannot fail is worth nothing — this repo has that lesson twice already.
+
+### B paid for itself on its first run
+
+It found a **real bug in `scheme-utilities.md`**: three snippets used `(print …)`
+inside timer callbacks. `print` is not a Guile binding — not in `(guile)`,
+`(ice-9 pretty-print)` or `(ice-9 format)` — so every reader who copied them
+got `Unbound variable: print`. `t-zzz-docs` passes them because the name sits
+inside a timer thunk that never runs. Fixed to `(display …)`, which is bound.
+
+### Two bugs in `load-check.scm`, found while building B
+
+`make check` has been running a check that was weaker than it read. Both bugs
+made every module's bindings unreachable, and both are now fixed:
+
+- **`define-module` evaluated form-by-form does not switch the current module** —
+  only the loader's own handling of it does. So every file was being defined into
+  `(guile-user)`, each module kept nothing but its unassigned `#:export`
+  placeholders, and the check proved only that the forms *evaluated*. The fix is
+  one `set-current-module` after that form.
+- **The C entry points were stubbed into `(hyprscheme api)`**, not the kernel —
+  where the host puts the real ones. The kernel's own `hl--c-*` placeholders
+  stayed unassigned, so a call through one was an unbound variable that this
+  check could not see.
+
+Verified: `hl--c-window-close` and a core name (`hl-kbd`) now dereference to
+procedures in the generated module; before, both were unbound. (The `doc-*` tools
+build the machinery the same way, so they would have had the same holes — which
+is why the first version of B reported `hl-kbd` as unbound.)
+
+### The page itself
+
+Rewritten to the page's own structure, section for section, with all 16 snippets
+in Scheme. Fixed: the five names above; the group toggle; a smart-gaps variant
+missing four of its six lines; a sentence duplicated twice; three paragraphs of
+analysis scaffolding left in the prose; and the browser-extension snippet, which
+was a simplification where the original is a two-phase open-then-watch (now
+faithful, with `hl-notification-remove!` doing the original's `sub:remove()`).
+`Per workspace layouts` is kept — an addition to this wiki, verified correct.
+
+**Suite: 14/14**, `make check` green on all six lints, soak `VERDICT: PASS`.
+
+### Two real bugs the doc work turned up, and what found them
+
+Chris asked whether there were bugs, having seen errors on screen. There were
+two, and neither was visible to any of the checks above — they were found by
+reading the **compositor log** after a suite run:
+
+```
+[scheme] error: Unbound variable: hl--plist-has?          (x4)
+[scheme] error: string-append: Wrong type (expecting string): #<hl-workspace …>
+```
+
+**1. The kernel called a name it could not see.** `hl--plist-has?` was defined
+in `core.scm`, and **`kernel.scm` called it** — but the kernel imports nothing
+of ours (core imports the kernel; that is the whole layering). Its sibling
+`hl--plist-cdr` had already been moved into the kernel for exactly this reason;
+`hl--plist-has?` was left behind. The effect was not just a log line:
+`hl--bind-result` normalizes a bind callback's return, so a callback returning a
+**plist** raised, the guard caught it, and the result was read as **DECLINED** —
+the key was passed through instead of consumed, and any `'ok #t` in the plist
+was lost.
+
+Fixed by moving the helper into the kernel, beside `hl--plist-cdr`, with the
+reason in a comment. **And made checkable**: `tools/module-audit.py` now
+verifies that a module can see every name it calls — its own bindings, its
+`#:export` (the host defines some of the kernel's), and what its imports offer.
+Verified to fail: adding a call from the kernel to `hl-kbd` (core's) reports
+`calls hl-kbd, which it cannot see`, which is the exact shape of this bug.
+
+**2. `events.md` said the workspace event passes a name.** It passes a
+**handle**:
+
+```scheme
+(hl-workspace-active-notification-add! (lambda (name)
+    (hl-exec! (string-append "notify-send 'Workspace: " name "'"))))
+```
+
+`string-append` on a handle raises `Wrong type` for every reader who copied it.
+The prose above it even promised "an event that passes a name". Fixed to take a
+`ws` and ask it for `(hl-workspace-name ws)`.
+
+This one is instructive because **every tier above is blind to it**: the names
+all exist (A), the block registers cleanly (t-zzz-docs), and B can only hand a
+callback a fabricated `#f` — which makes a type error indistinguishable from
+the harness's own fault, so it is a note, not a failure. `t-zzz-snippets.sh` is
+the tier with REAL values, so the fix is that it now drives this snippet too:
+`run-snippet-fn` takes an argument, and the test passes it `(hl-active-workspace)`.
+Verified to fail on the original snippet with
+`string-append: Wrong type (expecting string): #<hl-workspace …>` — the same
+error the log had.
+
+**Suite: 14/14**, six lints green, and the compositor log now carries only the
+three errors the tests ask for (two deliberate watchdog runaways, and `t-api`'s
+`boom` error-handling case).
