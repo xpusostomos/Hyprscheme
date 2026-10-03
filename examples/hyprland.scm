@@ -16,8 +16,8 @@
 (hl-bind-add! (hl-kbd "s-g") (lambda () (hl-submap-activate! "resize")))
 (hl-submap "resize"
   (lambda ()
-    (hl-bind-add! (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 'relative)) #:repeat #t)
-    (hl-bind-add! (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 'relative))  #:repeat #t)
+    (hl-bind-add! (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 #:relative #t)) #:repeat #t)
+    (hl-bind-add! (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 #:relative #t))  #:repeat #t)
     (hl-bind-add! (hl-kbd "g")     (lambda () (hl-submap-exit!)))))
 
 ;; ---- events ---------------------------------------------------------------

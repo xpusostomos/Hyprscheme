@@ -127,47 +127,45 @@
   "Swap WINDOW with the window in direction DIR."
   (= 0 (hl--c-window-swap-direction w (hl--dir dir))))
 
-(define (hl-window-swap-next! w . opt)
-  "Swap WINDOW with the next window in its group; 'prev — or any true
-   value — swaps backwards instead. Pass nothing for the next window.
-   The dispatcher it mirrors takes a boolean FLAG, so the value is what
-   counts: (hl-window-swap-next! w #t) is the same as 'prev."
-  ;; any true value is 'prev, deliberately: the Lua dispatcher is
-  ;; swap({prev = <truthy>}), so the VALUE is the flag. (An earlier pass
-  ;; 'fixed' this to accept only 'prev and thereby broke #t, which is the
-  ;; documented spelling — tests/t-api.sh now pins all three forms.)
-  (= 0 (hl--c-window-swap-next w (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 (if (car opt) 1 0))))))
+(define* (hl-window-swap-next! w #:key (prev #f))
+  "Swap WINDOW with the next window in its group; #:prev #t swaps
+   backwards instead. The dispatcher it mirrors takes a boolean flag —
+   the compositor's own lua is swap({prev = true}) — so the option names
+   the flag it turns on."
+  ;; The positional `'prev`/truthy form this used to take is gone: the option
+  ;; IS the flag now, and one documented spelling is the rule (see the wiki's
+  ;; dispatchers page). The trap it replaces was real in both directions — the
+  ;; docstring said "'prev or #t" while the code took anything truthy, and a
+  ;; "fix" that made 'prev the only backwards spelling silently removed #t.
+  (= 0 (hl--c-window-swap-next w (if prev 1 0))))
 
 (define (hl-window-swap-with! w other)
   "Swap WINDOW with OTHER."
   (= 0 (hl--c-window-swap-with w other)))
 
-(define (hl-window-cycle! . opt)
-  "Cycle focus to the next window. Options: 'prev (backwards), 'tiled,
-   'floating (combinable symbols)."
-  (let loop ((rest opt) (next 1) (filter 0))
-    (cond ((null? rest)
-           (= 0 (hl--c-window-cycle #f next filter)))
-          ((eq? (car rest) 'prev) (loop (cdr rest) 0 filter))
-          ((eq? (car rest) 'tiled) (loop (cdr rest) next 1))
-          ((eq? (car rest) 'floating) (loop (cdr rest) next 2))
-          (else (loop (cdr rest) next filter)))))
+(define* (hl-window-cycle! #:key (prev #f) (tiled #f) (floating #f))
+  "Cycle focus to the next window; #:prev #t cycles the other way.
+   #:tiled #t or #:floating #t restricts the cycle to windows of that
+   kind — they are exclusive, as click/drag are for hl-bind-add!."
+  (when (and tiled floating)
+    (hl--error 'hl-window-cycle! "#:tiled and #:floating are exclusive"))
+  (= 0 (hl--c-window-cycle #f (if prev 0 1) (cond (tiled 1) (floating 2) (else 0)))))
 
 (define (hl-window-center! w)
   "Center WINDOW."
   (= 0 (hl--c-window-center w)))
 
-(define (hl-window-size-set! w width height . opt)
-  "Resize WINDOW to WIDTH x HEIGHT pixels; 'relative (or 'rel) makes
-   them deltas."
+(define* (hl-window-size-set! w width height #:key (relative #f))
+  "Resize WINDOW to WIDTH x HEIGHT pixels; #:relative #t makes them
+   deltas to its current size."
   (= 0 (hl--c-window-resize-px w (exact->inexact width) (exact->inexact height)
-         (if (null? opt) 0 (if (memq (car opt) '(relative rel)) 1 0)))))
+         (if relative 1 0))))
 
-(define (hl-window-position-set! w x y . opt)
-  "Move WINDOW to (X, Y); 'relative (or 'rel) makes the coordinates
-   deltas."
+(define* (hl-window-position-set! w x y #:key (relative #f))
+  "Move WINDOW to (X, Y); #:relative #t makes the coordinates deltas
+   from its current position."
   (= 0 (hl--c-window-move-px w (exact->inexact x) (exact->inexact y)
-         (if (null? opt) 0 (if (memq (car opt) '(relative rel)) 1 0)))))
+         (if relative 1 0))))
 
 (define* (hl-window-pinned-set! w #:key (on? 'unset))
   "Pin or unpin WINDOW: absent #:on? toggles, #t/#f set."
@@ -328,12 +326,11 @@
       (= 0 (hl--c-window-fullscreen-toggle w 1))
       (= 0 (hl--c-window-fullscreen-set w (if on? 1 0)))))
 
-(define (hl-window-fullscreen-state w internal client . layout-aware)
+(define* (hl-window-fullscreen-state w internal client #:key (layout-aware #f))
   "Set the explicit fullscreen state: INTERNAL and CLIENT are modes
-   0/1/2; LAYOUT-AWARE? (absent = #f) makes the internal mode
-   layout-aware."
+   0/1/2; #:layout-aware #t makes the internal mode layout-aware."
   (= 0 (hl--c-window-fullscreen-state w internal client
-         (if (null? layout-aware) 0 (if (car layout-aware) 1 0)))))
+         (if layout-aware 1 0))))
 
 (define (hl-window-fullscreen-mode w)
   "The window's fullscreen mode: 0 none, 1 maximized, 2 fullscreen; -1

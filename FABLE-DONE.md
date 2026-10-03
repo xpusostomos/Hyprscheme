@@ -1378,11 +1378,19 @@ lying.
   **removed the documented `#t`**. The dispatcher it mirrors takes a boolean
   FLAG (the compositor's own lua is `swap({prev = <truthy>})`), so the value is
   what selects the direction and any true value IS `'prev`, deliberately.
-  Restored, with the contract stated properly in the docstring, and **all three
-  forms are now pinned by tests** so the same misreading cannot land again.
-  Chris caught this ("you fucked hl-window-swap-next!"), and the lesson is the
-  one this repo keeps teaching: a doc/code mismatch is not evidence about which
-  side is wrong.
+  Restored, and then **changed to the shape the keyword era wants** (Chris:
+  "change it to `#:prev #t"): the option IS the flag, so it is
+  `(hl-window-swap-next! w #:prev #t)` backwards and the bare call forwards. The
+  positional `'prev`/truthy form is gone — one documented spelling is the rule —
+  and both directions are pinned by tests, so neither half of the old trap can
+  come back. Chris caught this ("you fucked hl-window-swap-next!"), and the
+  lesson is the one this repo keeps teaching: a doc/code mismatch is not
+  evidence about which side is wrong.
+
+  **The siblings still take positional `'prev`** (`hl-group-cycle!`,
+  `hl-group-window-move-next!`), so the API is inconsistent until FABLE §2.11's
+  `. opt` sweep is done — noted in CLAUDE.md's conventions rather than half-done
+  here.
 
   Also established while pinning them: **a backwards swap leaves the window
   floating**, and that is the *compositor's* behaviour, not ours — its own lua
@@ -1442,3 +1450,55 @@ did not reload the config (marker=0)".
 covered on every pass.
 
 **Suite: 14/14**, six lints green, soak `VERDICT: PASS`.
+
+### §2.11, group A — the symbol-flag sweep: DONE
+
+FABLE's §2.11 lists sixteen functions that take a **trailing symbol** instead of
+a `#:key` — `(hl-window-size-set! w 20 20 'relative)` — where the house rule is
+now keywords. It lists them as one group; they are not one thing, and Chris
+asked for the split before anything was touched ("I don't fully understand
+them"). Three kinds, and only the first is the inconsistency §2.11 describes:
+
+| | what it is | what happened |
+|---|---|---|
+| **A** | a mode or flag — chooses a *behaviour* | **converted to `#:key`** (below) |
+| **B** | a genuine optional *value* with a default | left alone |
+| **C** | an optional *window* (absent = active) | left alone, still open |
+
+**A, converted** — nine functions, plus `hl-window-swap-next!` done earlier:
+
+| was | now |
+|---|---|
+| `(hl-window-size-set! w 20 20 'relative)` | `… #:relative #t` |
+| `(hl-window-position-set! w 10 10 'relative)` | `… #:relative #t` |
+| `(hl-window-cycle! 'prev 'floating)` | `… #:prev #t #:floating #t` |
+| `(hl-group-cycle! w 'prev)` | `… w #:prev #t` |
+| `(hl-group-window-move-next! w 'prev)` | `… w #:prev #t` |
+| `(hl-window-fullscreen-state w 1 2 #t)` | `… w 1 2 #:layout-aware #t` |
+| `(hl-make-float-gesture 'tile)` | `(hl-make-float-gesture #:mode 'tile)` |
+| `(hl-make-fullscreen-gesture 'maximize)` | `… #:mode 'maximize` |
+| `(hl-make-cursor-zoom-gesture 2 'mult)` | `… 2 #:mode 'mult` |
+
+Two shapes, each with precedent in the tree: a **boolean is `#:flag #t`** (as
+`hl-bind-add!`'s `#:click`/`#:drag` already were — including the exclusivity
+check, which `#:tiled`/`#:floating` now gets from the same idea), and a **choice
+from a set is `#:mode 'x`**, not three booleans. `hl--gesture-mode` was changed
+from validating a rest-list to validating the value, so its "must be one of
+…" error survives (the test that asserts it greps the same string).
+
+**The old spellings are REFUSED, not ignored** — pinned by a test: a stale
+config now fails loudly (`Invalid keyword: relative`) where before it silently
+meant the opposite (absolute instead of relative). 45 call sites across tests,
+the wiki and the example moved in the same pass, which is what `t-zz-example`,
+`t-zzz-docs` and `t-zzz-snippets` prove: the example runs, every wiki block
+evaluates, and the driven snippets still drive.
+
+Two process notes, both mine: my call-site inventory truncated its output with
+`head -8` and so missed `examples/hyprland.scm` (caught by the suite, not by
+me), and a first leftover scan matched only the `(quote relative)` spelling
+while the wiki also uses `'relative` — the wiki's own blocks are Scheme, where
+the apostrophe is normal.
+
+**B** (optional values) and **C** (optional windows) are left for a decision:
+see the summary in the conversation — neither is a flag wearing the wrong
+clothes, which is why they are not part of this sweep.

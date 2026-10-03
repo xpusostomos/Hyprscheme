@@ -1,8 +1,70 @@
-# Hyprscheme
+# Project Hyprscheme
+
+#### Hyprland with Scheme scripting
+
+### Project State
+
+It's feature complete, and it works!
+
+No Hyprland code was touched, it's a legit Hyprland plugin using the
+official plugin API. It supports the entire API that lua supports,
+so you should be able to code exclusively in scheme and not miss anything.
+
+But it also still supports Lua. Nothing was removed. You can have
+part of your config in lua and part in Scheme, it's fine.
+
+The semantics of the scheme configuration has the same semantics as the
+Lua in that when hyprland reloads its config, everything starts from a clean
+slate.
+
+It looks for an init file in:
+* $XDG_CONFIG_HOME/hyprscheme/init.scm
+* $HOME/.config/hyprscheme/init.scm
+* $HOME/.hyprscheme
 
 Guile Scheme scripting for [Hyprland](https://hypr.land), as a loadable
 plugin. Write your window management logic — keybinds, layouts, timers,
 event reactions, queries — in Scheme.
+
+A full API — binds, timers, window queries and actions, events, custom
+layouts with state, submaps, trackpad gestures — runs inside the
+compositor on the system Guile interpreter. Scripting errors
+are contained: a broken config or a failing callback never takes the
+compositor down.
+
+## A quick word from our lack of sponsors...
+
+This project has been moderately expensive to implement in its use of AI, and I'm 
+running out of money to do it. If you want to see it move forward, money, AI tokens
+or human assistence would help it move forward much faster. Having said that, look
+at whats been achieved by one guy in short time.
+
+## Developer Discussion
+
+Github forum is turned on above, you should feel free to discuss the project there.
+
+## Installing
+
+It's probably not a good idea to install separately Hyprland and
+Hyprscheme, because any slight difference in the C++ headers, could
+lead to it crashing. It is recommended that any pre-built packages
+build them together and install them together to make sure
+you have a Hyprscheme that was built to work with your Hyprland.
+
+## Building
+
+All you basically need is a recent version of guile and Hyprland.
+Unfortunately, because Hyprland from time to time changes its C++
+objects. The best way to do it is download Hyprland. Build
+it. Download Hyprscheme at the same directory level as Hyprland. Then
+make install it. Now you have to make sure that you run the Hyprland
+that you just built and not one you might have installed from your
+package manager.
+
+## An example
+
+Full documentation is in the wiki, but to give you a taste 
+of what you can do..
 
 ```scheme
 ;; ~/.config/hypr/hyprland.scm
@@ -39,16 +101,6 @@ layouts with state, submaps, trackpad gestures — runs inside the
 compositor on the system Guile interpreter. Scripting errors
 are contained: a broken config or a failing callback never takes the
 compositor down.
-
-## Status
-
-Working experiment. Verified: the eval channel (`hyprctl scheme '...'`),
-binds (with flags, devices, submaps), exec, timers, the full window/
-workspace/monitor query-and-action surface, events (all of the
-compositor's event bus), notification objects, window/layer/workspace
-rules, trackpad gestures (built-in and callback actions), stateful
-custom layouts, per-device config, cross-reload state. User-facing docs
-live in the wiki (`../Hyprscheme.wiki`).
 
 ## Requirements
 

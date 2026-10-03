@@ -23,17 +23,17 @@
              (srfi srfi-1)
              (ice-9 optargs))
 
-(define (hl-group-cycle! w . opt)
-  "Switch to the next window in WINDOW's group; 'prev goes backwards."
-  (= 0 (hl--c-group-cycle w (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 0)))))
+(define* (hl-group-cycle! w #:key (prev #f))
+  "Switch to the next window in WINDOW's group; #:prev #t goes backwards."
+  (= 0 (hl--c-group-cycle w (if prev 1 0))))
 
 (define (hl-group-window-active! w index)
   "Switch to the member at 1-based INDEX in WINDOW's group."
   (= 0 (hl--c-group-index w index)))
 
-(define (hl-group-window-move-next! w . opt)
-  "Move WINDOW within its group; 'prev moves backwards."
-  (= 0 (hl--c-group-move-window w (if (null? opt) 0 (if (eq? (car opt) 'prev) 1 0)))))
+(define* (hl-group-window-move-next! w #:key (prev #f))
+  "Move WINDOW within its group; #:prev #t moves backwards."
+  (= 0 (hl--c-group-move-window w (if prev 1 0))))
 
 (define* (hl-groups-lock-set! #:key (on? 'unset))
   "Lock or unlock ALL groups compositor-wide (no window involved). See

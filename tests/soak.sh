@@ -236,7 +236,7 @@ while (( SECONDS < END )); do
 
     # getters + actions on the live window
     eval_scheme getters "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (string? (hl-window-title w)) (boolean? (hl-window-floating? w)) (integer? (hl-window-pid w)) (pair? (hl-window-size w)) #t))"
-    eval_scheme actions "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (begin (hl-window-focus! w) (hl-window-float-set! w) (hl-window-float-set! w #:on? #f) (hl-window-position-set! w 10 10 (quote relative)) #t)))"
+    eval_scheme actions "(let ((w (hl-window-from \"class:^soak-main$\"))) (and w (begin (hl-window-focus! w) (hl-window-float-set! w) (hl-window-float-set! w #:on? #f) (hl-window-position-set! w 10 10 #:relative #t) #t)))"
 
     # exec
     eval_scheme exec "(integer? (hl-exec! \"true\"))"
@@ -256,8 +256,8 @@ while (( SECONDS < END )); do
       ((4) (hl-window-workspace-set! w \"8\") (hl-window-workspace-set! w \"9\"))
       ((5) (hl-window-move-direction! w \"r\") (hl-window-center! w)))
     (when (hl-window-floating? w)
-      (hl-window-position-set! w $((ITER % 7)) $((ITER % 5)) (quote relative))
-      (hl-window-size-set! w 20 10 (quote relative)))
+      (hl-window-position-set! w $((ITER % 7)) $((ITER % 5)) #:relative #t)
+      (hl-window-size-set! w 20 10 #:relative #t))
     (hl-layout-msg \"wider\")
     (hl-layout-msg \"narrower\")
     #t)"

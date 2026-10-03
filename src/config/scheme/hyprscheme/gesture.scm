@@ -51,17 +51,17 @@
    supports it, e.g. scrolling)."
   (cons (hl--c-gesture-maker-scroll-move) '()))
 
-(define (hl-make-float-gesture . mode)
-  "A gesture action that floats/tiles the active window. Optional MODE:
+(define* (hl-make-float-gesture #:key (mode 'toggle))
+  "A gesture action that floats/tiles the active window. #:mode:
    'toggle (default), 'float, 'tile."
-  (let ((m (hl--gesture-mode 'hl-make-float-gesture mode '(toggle float tile) 'toggle)))
-    (cons (hl--c-gesture-maker-float) (list 'mode m))))
+  (cons (hl--c-gesture-maker-float)
+        (list 'mode (hl--gesture-mode 'hl-make-float-gesture mode '(toggle float tile)))))
 
-(define (hl-make-fullscreen-gesture . mode)
-  "A gesture action that fullscreens the active window. Optional MODE:
+(define* (hl-make-fullscreen-gesture #:key (mode 'fullscreen))
+  "A gesture action that fullscreens the active window. #:mode:
    'fullscreen (default), 'maximize."
-  (let ((m (hl--gesture-mode 'hl-make-fullscreen-gesture mode '(fullscreen maximize) 'fullscreen)))
-    (cons (hl--c-gesture-maker-fullscreen) (list 'mode m))))
+  (cons (hl--c-gesture-maker-fullscreen)
+        (list 'mode (hl--gesture-mode 'hl-make-fullscreen-gesture mode '(fullscreen maximize)))))
 
 (define (hl-make-special-workspace-gesture name)
   "A gesture action that toggles the named special workspace (empty
@@ -70,13 +70,13 @@
     (hl--error 'hl-make-special-workspace-gesture "workspace name must be a string, got ~a" name))
   (cons (hl--c-gesture-maker-special) (list 'name name)))
 
-(define (hl-make-cursor-zoom-gesture zoom . mode)
+(define* (hl-make-cursor-zoom-gesture zoom #:key (mode 'toggle))
   "A gesture action that zooms the cursor's view. ZOOM is a number;
    optional MODE: 'toggle (default), 'mult, 'live - the numeric argument
    is unused in live mode, so 1 is a good placeholder there."
   (unless (real? zoom)
     (hl--error 'hl-make-cursor-zoom-gesture "zoom must be a number, got ~a" zoom))
-  (let ((m (hl--gesture-mode 'hl-make-cursor-zoom-gesture mode '(toggle mult live) 'toggle)))
+  (let ((m (hl--gesture-mode 'hl-make-cursor-zoom-gesture mode '(toggle mult live))))
     (cons (hl--c-gesture-maker-cursor-zoom) (list 'zoom (exact->inexact zoom) 'mode m))))
 
 (define* (hl-make-custom-gesture #:key start update finish)

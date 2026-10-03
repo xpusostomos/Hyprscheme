@@ -322,6 +322,25 @@ the custom-layout entry points. `Handles.*` is the object model,
   (The old positional `(count W H windows)` → `((x y w h) …)` shape is
   gone from the main tree; `chez/` and FABLE.md still describe it,
   which is history.)
+- **A dispatcher's boolean flag is a `#:key` named after the flag it turns
+  on**, not a positional symbol: `(hl-window-swap-next! w #:prev #t)`, since the
+  Lua dispatcher it mirrors is `swap({prev = true})`. The positional `'prev`
+  form it replaced was a trap in both directions — its docstring promised
+  `"'prev or #t"` while the code took ANY truthy value as backwards, and a
+  "fix" that made `'prev` the only backwards spelling quietly removed `#t`
+  (Chris caught that one). One documented spelling, and the option names the
+  flag.
+  **§2.11's option sweep is DONE for the flags** (`hl-window-cycle!`,
+  `hl-window-size-set!`, `hl-window-position-set!`, `hl-group-cycle!`,
+  `hl-group-window-move-next!`, `hl-window-fullscreen-state`,
+  `hl-window-swap-next!`), and a **choice from a set is `#:mode 'x`** — not
+  three booleans — as the gesture makers now take it. The old positional
+  spellings are refused, not ignored: a stale config fails loudly instead of
+  meaning the opposite. What remains of §2.11 is a separate question — the
+  genuine OPTIONAL VALUES (`hl-state-ref`'s default, `hl-submap`'s NEXT,
+  `hl-group-add!`'s index, `hl-curve-add!`'s variadic data) and the
+  optional-*window* pair (`hl-window-send-shortcut!`, `-send-key-state!`),
+  neither of which is a flag wearing the wrong clothes.
 - Binds validate exclusivity (long-press/release vs repeat conflicts)
   at the Scheme level; hyprland does not.
 - Documentation: every public function is a plain `define` whose body

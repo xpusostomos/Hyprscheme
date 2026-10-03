@@ -357,10 +357,11 @@ one-shot releases its own record lock when it completes."
 (define (hl--notif-act who act)
   (if (= 0 act) #t (hl--error who "~a" (hl--c-config-last-error))))
 
-(define (hl--gesture-mode name args allowed default)
-  (cond ((null? args) default)
-        ((and (= 1 (length args)) (memq (car args) allowed)) (car args))
-        (else (hl--error name "mode must be one of ~a" allowed))))
+(define (hl--gesture-mode who mode allowed)
+  "Validate a gesture maker's #:mode against ALLOWED, for WHO; the value."
+  (unless (memq mode allowed)
+    (hl--error who "#:mode must be one of ~a, got ~a" allowed mode))
+  mode)
 
 (define (hl--window-listen which type thunk who)
   (let ((rec (make-hl-event type thunk)))

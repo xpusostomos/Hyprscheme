@@ -71,8 +71,13 @@ bad_handle=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (h
 # ---- window actions ---------------------------------------------------------
 ok '(hl-window-focus! w)'
 ok '(hl-window-float-set! w)'
-ok '(hl-window-size-set! w 300 200 (quote relative))'
-ok '(hl-window-position-set! w 60 60 (quote relative))'
+ok '(hl-window-size-set! w 300 200 #:relative #t)'
+ok '(hl-window-position-set! w 60 60 #:relative #t)'
+# the POSITIONAL option these took is gone, and must be refused rather than
+# silently ignored: a stale config then fails loudly instead of resizing
+# absolutely when it meant relatively
+bad_opt=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-size-set! w 10 10 (quote relative)))))')
+[[ "$bad_opt" == *"keyword"* ]] || { echo "FAIL: the old positional option was accepted => [$bad_opt]"; FAILED=1; }
 ok '(hl-window-float-set! w #:on? #f)'
 ok '(hl-window-fullscreen-set! w)'
 ok '(= 2 (hl-window-fullscreen-mode w))'
@@ -697,7 +702,7 @@ val '(hl-state-ref (quote proto-ticks) 0)' '1'
 # recipes are values: hl-make-* builds an opaque (maker . args) pair
 ok '(hl-gesture-action? (hl-make-workspace-swipe-gesture))'
 ok '(hl-gesture-action? (hl-make-custom-gesture #:finish (lambda args #f)))'
-ok '(hl-gesture-action? (hl-make-cursor-zoom-gesture 2.0 (quote live)))'
+ok '(hl-gesture-action? (hl-make-cursor-zoom-gesture 2.0 #:mode (quote live)))'
 # registrations across the spec space (fingers/mods/axis must stay disjoint
 # within this file AND from the doc-test blocks, which self-clean)
 ok '(hl-gesture? (hl-gesture-add! #:fingers 4 #:direction "swipe" #:action (hl-make-workspace-swipe-gesture)))'
@@ -705,8 +710,8 @@ ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "pinch" #:action (hl-m
 ok '(hl-gesture? (hl-gesture-add! #:fingers 2 #:direction "up" #:mods (hl-key "SUPER") #:action (hl-make-close-gesture)))'
 ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "down" #:action (hl-make-float-gesture)))'
 ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "left" #:action (hl-make-special-workspace-gesture "mynotes")))'
-ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "right" #:action (hl-make-cursor-zoom-gesture 2.0 (quote live))))'
-ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "up" #:mods (hl-key "ALT") #:action (hl-make-fullscreen-gesture (quote maximize))))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "right" #:action (hl-make-cursor-zoom-gesture 2.0 #:mode (quote live))))'
+ok '(hl-gesture? (hl-gesture-add! #:fingers 3 #:direction "up" #:mods (hl-key "ALT") #:action (hl-make-fullscreen-gesture #:mode (quote maximize))))'
 ok '(hl-gesture? (hl-gesture-add! #:fingers 5 #:direction "swipe" #:action (hl-make-custom-gesture #:finish (lambda args #f))))'
 # mods is a mask: multiple space-separated modifiers are permitted
 ok '(hl-gesture? (hl-gesture-add! #:fingers 4 #:direction "up" #:mods (hl-key "ALT+SHIFT") #:action (hl-make-move-gesture)))'
@@ -724,7 +729,7 @@ bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl-
 [[ "$bad_gest" == *"action is required"* ]] || { echo "FAIL: missing gesture action not rejected => [$bad_gest]"; FAILED=1; }
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:action "workspace"))))')
 [[ "$bad_gest" == *"hl-gesture-action"* ]] || { echo "FAIL: string action not rejected => [$bad_gest]"; FAILED=1; }
-bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-make-float-gesture (quote bogus)))))')
+bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-make-float-gesture #:mode (quote bogus)))))')
 [[ "$bad_gest" == *"toggle float tile"* ]] || { echo "FAIL: bad float mode not rejected => [$bad_gest]"; FAILED=1; }
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-make-custom-gesture))))')
 [[ "$bad_gest" == *"at least one"* ]] || { echo "FAIL: empty custom gesture not rejected => [$bad_gest]"; FAILED=1; }
@@ -826,25 +831,25 @@ ok '(hl-config-reload!)'
 unbound '(api-gen-scoped)'
 val 'hl--watchdog-ms' '5000'
 
-# ---- the swap flag's VALUE, pinned -----------------------------------------
-# (hl-window-swap-next! w) and (… w 'prev) are the documented forms, and #t is
-# the third: the dispatcher it mirrors takes a boolean FLAG — the compositor's
-# own lua is swap({prev = <truthy>}) — so the VALUE is what selects the
-# direction and #t must behave as 'prev. An earlier pass read the docstring
-# literally, made 'prev the only backwards spelling, and broke #t; this pins all
-# three so that cannot happen again.
+# ---- the swap flag, both directions ----------------------------------------
+# The option is the FLAG the dispatcher mirrors (its lua is swap({prev = true})),
+# so both settings get asserted: #:prev #t backwards, and the default forwards.
+# This is the check that stops the trap this option replaced from coming back —
+# the old positional form took ANY truthy value as backwards while its docstring
+# promised "'prev or #t", and a "fix" that made 'prev the only spelling quietly
+# removed #t.
 #
 # It runs last, on its own window, because a swap is not a no-op: it reorders
 # the layout, and a BACKWARDS swap also leaves the window FLOATING. That last
-# part is the compositor's behaviour, not ours — its lua swap({prev = true})
-# does the same — but either way it is a side effect, and the checks above are a
-# long chain that a stray flip or reorder disturbs.
+# part is the compositor's behaviour, not ours — its own lua swap({prev = true})
+# does the same, checked side by side — but either way it is a side effect, and
+# the checks above are a long chain that a stray flip or reorder disturbs.
 $SCHEME '(hl-exec! "foot -a api-swap")' >/dev/null
 WAIT_FOR 10 '(let ((s (hl-window-from "class:^api-swap$"))) (if s #t #f))' >/dev/null \
   || { echo "api-swap fixture never appeared"; FAILED=1; }
 ok '(hl-window-swap-next! (hl-window-from "class:^api-swap$"))'
-ok '(hl-window-swap-next! (hl-window-from "class:^api-swap$") (quote prev))'
-ok '(hl-window-swap-next! (hl-window-from "class:^api-swap$") #t)'
+ok '(hl-window-swap-next! (hl-window-from "class:^api-swap$") #:prev #t)'
+ok '(hl-window-swap-next! (hl-window-from "class:^api-swap$") #:prev #f)'
 ok '(hl-window-float-set! (hl-window-from "class:^api-swap$") #:on? #f)   ; leave it tiled'
 
 [[ $FAILED -eq 0 ]]
