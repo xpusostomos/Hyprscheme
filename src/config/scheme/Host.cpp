@@ -672,21 +672,46 @@ namespace Config::Scheme {
         Layouts::registerSymbols();
     }
 
-    // where the .scm machinery lives. TWO candidates, no chain, and no
-    // compiled-in path: a harness that means to test the TREE names it via
-    // HYPRSCHEME_SCM_DIR and gets exactly that; otherwise the machinery is
-    // beside the .so, because that is where `make install` puts it.
+    // where the .scm machinery lives. THREE candidates, in a fixed order, and
+    // no compiled-in path.
     //
-    // Deliberately NOT a search: a chain would let a test that meant to
-    // exercise the tree silently pick up an installed copy instead (or the
-    // reverse), so which files are running would depend on what happens to
-    // exist on the machine. One answer, and the caller said which.
+    // Not a search in the sense that matters: the order is fixed and each step
+    // is a definite answer, not a guess between plausible places. The one
+    // ambiguity worth avoiding — a harness that means to test the TREE
+    // silently picking up an installed copy, or the reverse — is handled by
+    // the first candidate being explicit and refusing to fall through.
     //
-    // No build-time path is needed for the installed case: DESTDIR is a
-    // staging prefix (the files are copied out of it at package time), so a
-    // baked-in $(DESTDIR)$(PREFIX) would name a directory that exists only on
-    // the build machine. pluginDir() is that same directory AS INSTALLED,
-    // whatever PREFIX and DESTDIR were — and it follows the .so if it moves.
+    // 1. HYPRSCHEME_SCM_DIR — a harness naming the tree it means to test.
+    //    Named and missing is a broken harness: refuse rather than quietly run
+    //    something else.
+    // 2. Beside the .so — where `make install` puts it. No build-time path is
+    //    needed: DESTDIR is a staging prefix copied out at package time, so a
+    //    baked-in $(DESTDIR)$(PREFIX) would name a build-machine directory.
+    //    pluginDir() is that same directory AS INSTALLED, and follows the .so.
+    // 3. ~/.local/share/hyprscheme/scm — the user-level location, for the one
+    //    case the other two cannot serve: a plugin built by hyprpm, which
+    //    installs only the .so (one file per plugin, to a root-owned cache
+    //    dir) and deletes its build tree afterwards. A hyprpm build step
+    //    cannot put the machinery beside the .so, so `make hyprpm-machinery`
+    //    puts it here instead. Absent, this candidate is simply skipped.
+    // ~/.local/share/hyprscheme/scm, honouring XDG_DATA_HOME the way the spec
+    // says (a relative or empty value is invalid and is ignored, falling back
+    // to $HOME/.local/share). Where `make hyprpm-machinery` copies the .scm.
+    static std::string userScmDir() {
+        static const std::string dir = [] {
+            const char* dataHome = getenv("XDG_DATA_HOME");
+            std::string base;
+            if (dataHome && *dataHome && dataHome[0] == '/')
+                base = dataHome;
+            else if (const char* home = getenv("HOME"); home && *home)
+                base = std::string(home) + "/.local/share";
+            else
+                return std::string();
+            return base + "/hyprscheme/scm";
+        }();
+        return dir;
+    }
+
     static std::string schemeDir() {
         static const std::string dir = [] {
             if (const char* ov = getenv("HYPRSCHEME_SCM_DIR"); ov && *ov) {
@@ -701,15 +726,17 @@ namespace Config::Scheme {
                 return std::string(ov);
             }
             const auto beside = pluginDir();
-            // Load-bearing check, not a courtesy: a build run from the tree
-            // (never installed) finds the REPO root here, which holds no
-            // machinery — and the old silent fallback to the source tree is
-            // gone, so this is the point where that has to be said out loud.
-            if (!beside.empty() && !std::filesystem::exists(beside + "/hyprscheme.scm"))
-                LOG(Log::ERR, "[scheme] no machinery beside the plugin ({}); "
-                              "set HYPRSCHEME_SCM_DIR=<tree>/src/config/scheme to test a source tree, "
-                              "or run `make install`",
-                    beside);
+            if (!beside.empty() && std::filesystem::exists(beside + "/hyprscheme.scm"))
+                return beside;
+            const auto userLevel = userScmDir();
+            if (!userLevel.empty() && std::filesystem::exists(userLevel + "/hyprscheme.scm"))
+                return userLevel;
+            // Nothing found. Say so against the location that WOULD have
+            // worked, since the fix differs by how the plugin was installed.
+            LOG(Log::ERR, "[scheme] no machinery beside the plugin ({}), nor in {}; "
+                          "set HYPRSCHEME_SCM_DIR=<tree>/src/config/scheme to test a source tree, "
+                          "run `make install`, or `make hyprpm-machinery` for a hyprpm build",
+                beside, userLevel);
             return beside;
         }();
         return dir;

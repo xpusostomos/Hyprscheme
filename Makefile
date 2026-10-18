@@ -144,6 +144,27 @@ hyprpm-plugin: hyprpm-clean
 	$(CXX) -shared -fPIC -o $(TARGET) $(HYPRPM_OBJS) $(LIBS) $(GUILIBS) || exit 1; \
 	echo "built $(TARGET) for hyprpm"
 
+# The .scm machinery, for a hyprpm build. hyprpm installs ONE file per plugin —
+# always <name>.so, always to a root-owned cache dir — and deletes the build
+# tree afterwards, so the machinery cannot go beside the .so and cannot be left
+# where it was built. It goes to a user-level location the loader knows
+# (Host.cpp schemeDir(), candidate 3), which this target can write with no
+# privileges because it runs as the user, exactly as hyprpm runs build steps.
+#
+# This is what hyprpm itself did before upstream #10211 moved the state store
+# under /var/cache, so it is a return to the previous arrangement rather than a
+# new mechanism.
+HYPRSCHEME_DATA ?= $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)
+HYPRSCHEME_SCM  := $(HYPRSCHEME_DATA)/hyprscheme/scm
+
+.PHONY: hyprpm-machinery
+hyprpm-machinery:
+	@install -d $(HYPRSCHEME_SCM)/hyprscheme
+	@install -m 644 src/config/scheme/hyprscheme.scm $(HYPRSCHEME_SCM)/
+	@install -m 644 src/config/scheme/hyprscheme/*.scm $(HYPRSCHEME_SCM)/hyprscheme/
+	@echo "machinery installed to $(HYPRSCHEME_SCM)"
+	@echo "(the plugin finds it automatically when nothing is beside the .so)"
+
 # the hyprpm build's objects are removed afterwards: they are built from a
 # DIFFERENT header set than the tree build's, so leaving them would let a later
 # `make` mistake them for the tree's, or vice versa
@@ -263,4 +284,4 @@ clean:
 distclean: clean
 	rm -rf build
 
-.PHONY: all hyprland install install-local check clean distclean hyprpm-plugin hyprpm-clean
+.PHONY: all hyprland install install-local check clean distclean hyprpm-plugin hyprpm-clean hyprpm-machinery

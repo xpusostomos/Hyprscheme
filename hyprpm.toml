@@ -24,4 +24,12 @@ version = "0.1.0"
 authors = ["Chris Bitmead"]
 # the artifact the compositor dlopens; must match what hyprpm-plugin builds
 output = "scheme-plugin-guile.so"
-build = ["make hyprpm-plugin"]
+# Two steps, in order:
+#   1. build the .so against hyprpm's headers
+#   2. install the .scm machinery to a USER-level location, because hyprpm
+#      installs only one file per plugin (always <name>.so, to a root-owned
+#      cache dir) and deletes the build tree afterwards — so the machinery
+#      cannot go beside the .so. The plugin looks in that location as its
+#      last resort (Host.cpp schemeDir, candidate 3).
+# Build steps run as the user, so step 2 needs no privileges.
+build = ["make hyprpm-plugin", "make hyprpm-machinery"]
