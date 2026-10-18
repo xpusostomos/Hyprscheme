@@ -101,6 +101,56 @@ src/plugin-main.o: plugin-main.cpp
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
+# ---- hyprpm ----------------------------------------------------------------
+#
+# hyprpm clones Hyprland at the running commit, builds it, installs the headers
+# into its own cache, and points PKG_CONFIG_PATH there — so inside this target
+# `pkg-config --cflags hyprland` resolves to THOSE headers, and there is no
+# Hyprland source tree to point HYPRLAND_SRC at (hyprpm already built one).
+#
+# Deliberately a SEPARATE target, not a mode of the normal build. The normal
+# build's includes come from HYPRLAND_SRC, and on a developer's machine plain
+# `pkg-config hyprland` resolves to the SYSTEM install (here: /usr/include,
+# 0.56.2) while the tree is something else (v0.56.0-203). Compiling the plugin
+# against the wrong headers is the mismatch this repo warns about — loud on a
+# renamed symbol, silent on a changed class layout — so the two include sources
+# must never be mixed by accident. Only this target uses pkg-config, and only
+# because hyprpm has guaranteed which headers it will find.
+#
+# Output the SAME artifact name: hyprpm's manifest declares it, and it is what
+# the compositor dlopens.
+# the sources, spelled out. Deriving them from $(OBJ) cannot work: plugin-main.o
+# sits at the repo ROOT while every other object is under src/, so a blanket
+# .o→.cpp mapping produces a path that does not exist.
+HYPRPM_SRCS := plugin-main.cpp $(filter-out src/plugin-main.cpp,$(COMMON_OBJS:.o=.cpp)) $(HOST_GUILE:.o=.cpp)
+HYPRPM_OBJS := $(HYPRPM_SRCS:.cpp=.hyprpm.o)
+
+.PHONY: hyprpm-plugin
+hyprpm-plugin: hyprpm-clean
+	@pc="$$(pkg-config --cflags hyprland 2>/dev/null)"; \
+	if [ -z "$$pc" ]; then \
+	    echo "error: pkg-config cannot find hyprland."; \
+	    echo "       this target is for a hyprpm build, where hyprpm provides"; \
+	    echo "       hyprland.pc via PKG_CONFIG_PATH. For a tree build use 'make'."; \
+	    exit 1; \
+	fi; \
+	echo "building against: $$(pkg-config --modversion hyprland) ($$(pkg-config --variable=prefix hyprland))"; \
+	for src in $(HYPRPM_SRCS); do \
+	    $(CXX) $(CXXFLAGS) $$pc -Isrc/config/scheme \
+	        `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils` \
+	        `pkg-config --cflags guile-3.0` -c "$$src" -o "$${src%.cpp}.hyprpm.o" || exit 1; \
+	done; \
+	$(CXX) -shared -fPIC -o $(TARGET) $(HYPRPM_OBJS) $(LIBS) $(GUILIBS) || exit 1; \
+	echo "built $(TARGET) for hyprpm"
+
+# the hyprpm build's objects are removed afterwards: they are built from a
+# DIFFERENT header set than the tree build's, so leaving them would let a later
+# `make` mistake them for the tree's, or vice versa
+.PHONY: hyprpm-clean
+hyprpm-clean:
+	@rm -f $(HYPRPM_OBJS)
+	@rm -f $(TARGET).hyprpm
+
 # ---- install ---------------------------------------------------------------
 
 install: $(TARGET)
@@ -207,9 +257,9 @@ check: $(TARGET)
 	@echo "== doc-exercise"; guile --no-auto-compile -s tools/doc-exercise.scm
 
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(OBJ) $(TARGET) $(HYPRPM_OBJS)
 
 distclean: clean
 	rm -rf build
 
-.PHONY: all hyprland install install-local check clean distclean
+.PHONY: all hyprland install install-local check clean distclean hyprpm-plugin hyprpm-clean

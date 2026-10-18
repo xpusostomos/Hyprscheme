@@ -1,0 +1,27 @@
+# hyprpm manifest — lets `hyprpm add <this repo>` build and load the plugin.
+#
+# hyprpm clones Hyprland at the running compositor's commit, builds it, and
+# installs the headers into its own cache (/var/cache/hyprpm/<user>/), then
+# points PKG_CONFIG_PATH there before running the build steps below. So the
+# build step is deliberately NOT plain `make`: it targets `hyprpm-plugin`,
+# which takes its include paths from `pkg-config --cflags hyprland` — inside a
+# hyprpm build that resolves to hyprpm's headers. A plain `make` would instead
+# look for ../Hyprland and try to build a *second* compositor inside the cache.
+#
+# The normal developer workflow (`make`, `make install`, `make install-local`)
+# is untouched by any of this: those keep using HYPRLAND_SRC, because on a
+# developer's machine plain `pkg-config hyprland` resolves to the SYSTEM
+# install rather than the tree, and mixing the two is the mismatch this repo
+# exists to avoid.
+
+[repository]
+name = "hyprscheme"
+authors = ["Chris Bitmead"]
+
+[hyprscheme]
+description = "Guile Scheme scripting for Hyprland, as a loadable plugin"
+version = "0.1.0"
+authors = ["Chris Bitmead"]
+# the artifact the compositor dlopens; must match what hyprpm-plugin builds
+output = "scheme-plugin-guile.so"
+build = ["make hyprpm-plugin"]
