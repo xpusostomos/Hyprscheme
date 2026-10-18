@@ -68,7 +68,13 @@ namespace Config::Scheme {
     static int hlSchemeGroupLock(int act) {
         if (!g_up)
             return -1;
-        return actionResult("group-lock", Config::Actions::lockGroups(sc<Config::Actions::eTogglableAction>(act)));
+        // upstream #16231 split the old global lockGroups() into two: lockGroup()
+        // now locks ONE window's group (and errors if it has none), while
+        // lockAllGroups() keeps the old global-flag behaviour. This function is
+        // the global one — hl-groups-lock-set! — so it follows lockAllGroups.
+        // The per-window lock is a separate entry point (hl--c-window-group-lock,
+        // Window.cpp) and is unaffected.
+        return actionResult("group-lock", Config::Actions::lockAllGroups(sc<Config::Actions::eTogglableAction>(act)));
     }
 
     static int hlSchemeGroupAlive(SCM id) {

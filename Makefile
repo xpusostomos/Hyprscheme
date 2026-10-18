@@ -134,9 +134,10 @@ hyprpm-plugin: hyprpm-clean
 	    echo "       hyprland.pc via PKG_CONFIG_PATH. For a tree build use 'make'."; \
 	    exit 1; \
 	fi; \
-	echo "building against: $$(pkg-config --modversion hyprland) ($$(pkg-config --variable=prefix hyprland))"; \
+	ver="$$(pkg-config --modversion hyprland)"; \
+	echo "building against: $$ver ($$(pkg-config --variable=prefix hyprland))"; \
 	for src in $(HYPRPM_SRCS); do \
-	    $(CXX) $(CXXFLAGS) $$pc -Isrc/config/scheme \
+	    $(CXX) $(CXXFLAGS) -DHYPRLAND_VERSION="\"$$ver\"" $$pc -Isrc/config/scheme \
 	        `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils` \
 	        `pkg-config --cflags guile-3.0` -c "$$src" -o "$${src%.cpp}.hyprpm.o" || exit 1; \
 	done; \
