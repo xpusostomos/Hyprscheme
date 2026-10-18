@@ -7,7 +7,7 @@
 # plugin resolves Hyprland's own symbols at load time and therefore
 # must match the running compositor's build exactly.
 #
-# It installs as an alternative compositor (hyprland-scheme) so it can
+# It installs as an alternative compositor (Hyprscheme) so it can
 # coexist with the system Hyprland; launch it via the provided desktop
 # entry or a nested session.
 
@@ -39,11 +39,13 @@ prepare() {
 build() {
   cd Hyprscheme
 
-  # 1. stock Hyprland (no scheme in-tree) from the pinned commit
-  cmake -B build-hl -S "$srcdir/hyprland-src" \
+  # 1. stock Hyprland (no scheme in-tree) from the pinned commit, built into
+  #    <tree>/build — the layout the Makefile expects ($(HYPRLAND_SRC)/build/
+  #    Hyprland), so one HYPRLAND_SRC serves build and install alike
+  cmake -B "$srcdir/hyprland-src/build" -S "$srcdir/hyprland-src" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr
-  cmake --build build-hl -j"$(nproc)"
+  cmake --build "$srcdir/hyprland-src/build" -j"$(nproc)"
 
   # 2. the plugin, against the same tree's headers (default target:
   #    scheme-plugin-guile.so; the interpreter is the system Guile)
@@ -53,20 +55,12 @@ build() {
 package() {
   cd Hyprscheme
 
-  # the plugin + its .scm machinery, via the Makefile's own install rule
-  make install DESTDIR="$pkgdir" PREFIX=/usr
-
-  # the compositor, under its own name so it coexists with the system hyprland
-  install -Dm755 build-hl/build/Hyprland "$pkgdir/usr/bin/hyprland-scheme"
-
-  # session entry for display-manager logins (SDDM/LightDM pick these up);
-  # uwsm users launch via `uwsm start -e hyprland-scheme` instead
-  if [ -f build-hl/systemd/hyprland-uwsm.desktop ]; then
-    sed -e 's|Name=Hyprland (uwsm-managed)|Name=Hyprland (Scheme)|' \
-        -e 's|-D Hyprland hyprland.desktop|-D Hyprland hyprscheme.desktop|' \
-        build-hl/systemd/hyprland-uwsm.desktop \
-        > "$pkgdir/usr/share/wayland-sessions/hyprland-scheme.desktop"
-  fi
+  # the plugin, its .scm machinery, the compositor (as Hyprscheme) and the
+  # session entry, all from the Makefile's own install rule — one source of
+  # truth for the layout, so the package cannot drift from `make install`.
+  # DESTDIR stages into $pkgdir; PREFIX=/usr is the on-target location, and
+  # the session entry records that runtime path, not the stage.
+  make install DESTDIR="$pkgdir" PREFIX=/usr HYPRLAND_SRC="$srcdir/hyprland-src"
 
   # docs
   install -Dm644 examples/hyprland.scm \

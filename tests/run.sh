@@ -10,37 +10,54 @@
 set -u
 cd "$(dirname "$0")/.."
 
-BIN=${BIN:-$HOME/.local/bin/hyprland-scheme}
+# The suite tests the TREE, pre-install: the compositor built in place next to
+# this repo, and the plugin built in this directory. Neither is looked for in
+# an install prefix — testing what is installed is a different question, and
+# defaulting to it here would silently test a stale copy instead of the edit
+# under test. BIN= / PLUGIN= override both.
+BIN=${BIN:-$PWD/../Hyprland/build/Hyprland}
+if [[ ! -x $BIN ]]; then
+  if command -v Hyprscheme >/dev/null 2>&1; then BIN=$(command -v Hyprscheme)
+  elif command -v hyprland-scheme >/dev/null 2>&1; then BIN=$(command -v hyprland-scheme)
+  else
+    echo "FAIL: no compositor to test — build it first (make hyprland) or set BIN="
+    echo "      looked for: $PWD/../Hyprland/build/Hyprland, Hyprscheme, hyprland-scheme on PATH"
+    exit 1
+  fi
+fi
 # the plugin to load: scheme-plugin-guile.so (the maintained backend; Chez is
 # deprecated, frozen in chez/). An absolute path is required — the compositor
 # resolves plugin paths against ITS cwd, not the caller's, so a bare name
 # like PLUGIN=scheme-plugin-guile.so fails to load.
-PLUGIN=${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin-guile.so}
+PLUGIN=${PLUGIN:-$PWD/scheme-plugin-guile.so}
 case $PLUGIN in /*) ;; *) PLUGIN=$PWD/$PLUGIN ;; esac
+[[ -f $PLUGIN ]] || { echo "FAIL: no plugin at $PLUGIN — run make"; exit 1; }
 
-# freshness warning: the .scm machinery is read from the SOURCE TREE at runtime
-# (SOURCE_DIR is compiled in, and the loader prefers it) while the plugin is
-# whatever $PLUGIN names — so either half can be stale. Two ways to get it
-# wrong, both of which report as code bugs:
-#   - a stale installed plugin tested against current sources (compared below)
-#   - a .scm edited after the last `make`: the plugin registers entry points the
-#     .scm no longer calls, and every C-calling API says "Unbound variable"
-# A warning, not a failure: testing an installed plugin is legitimate.
+# The machinery is found by the plugin through HYPRSCHEME_SCM_DIR, NOT by a
+# compiled-in tree path (that was removed): named, it is used and only it, so
+# the suite always runs the .scm in this tree and never an installed copy.
+# Setting it is what makes "test the tree" true rather than aspirational.
+#
+# An explicitly-set value wins, including an EMPTY one — which the plugin
+# reads as "no override" and makes it look beside the .so instead. So this
+# runs the whole suite against an installed arrangement:
+#   HYPRSCHEME_SCM_DIR= PLUGIN=/usr/local/lib/hyprscheme/scheme-plugin-guile.so \
+#     BIN=/usr/local/bin/Hyprscheme tests/run.sh
+if [[ -z ${HYPRSCHEME_SCM_DIR+set} ]]; then
+  export HYPRSCHEME_SCM_DIR=$PWD/src/config/scheme
+fi
+
+# freshness warning: plugin and .scm are independent halves, and either can be
+# stale against the other — two ways to get it wrong, both of which report as
+# code bugs:
+#   - a .scm edited after the last `make` (the plugin may register entry points
+#     the .scm no longer calls: C-calling APIs say "Unbound variable")
+#   - a plugin older than the .scm it will load (the same, from the other side)
 newest_scm=$(ls -t "$PWD"/src/config/scheme/*.scm 2>/dev/null | head -1)
 if [[ -n ${newest_scm:-} && "$newest_scm" -nt "$PLUGIN" ]]; then
   echo "warn: $(basename "$newest_scm") is newer than the plugin under test"
   echo "warn:   (expected for a Scheme-only edit; if the change touched C++ too, run make)"
 fi
-for cand in scheme-plugin-guile.so scheme-plugin.so; do
-  if [[ -f $PWD/$cand ]]; then
-    if ! cmp -s "$PWD/$cand" "$PLUGIN"; then
-      echo "warn: loading $PLUGIN, which differs from the tree build $PWD/$cand"
-      echo "warn:   (stale plugin against current .scm?) — for the tree build:"
-      echo "warn:   PLUGIN=$PWD/$cand $0"
-    fi
-    break
-  fi
-done
 FILTER=${1:-}
 WORK=$(mktemp -d /tmp/hyprscheme-test.XXXXXX)
 export WORK

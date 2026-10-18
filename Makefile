@@ -2,8 +2,13 @@
 #
 #   make               build Hyprland (in place) as needed, then the plugin
 #                      (scheme-plugin-guile.so; needs guile-3.0 dev headers)
-#   make install       install plugin + .scm machinery locally
-#   make install-compositor  also install the compositor as 'hyprland-scheme'
+#   make install       install the plugin, the .scm machinery and the matched
+#                      compositor (as 'Hyprscheme'), plus a session entry.
+#                      A SYSTEM install (/usr/local) — needs sudo
+#   make install-local config only: appends the plugin load line to THIS
+#                      user's ~/.config/hypr/hyprland.lua, for a system
+#                      install done with `sudo make install` above. Installs
+#                      no files; run without sudo; skips if already present
 #   make clean         remove the plugin build products (not hyprland)
 #
 # The Chez backend is DEPRECATED: frozen in chez/ (see chez/README.md);
@@ -14,15 +19,21 @@
 #                 <tree>/build. The plugin compiles against those headers
 #                 and links with the compositor built from the SAME tree —
 #                 plugin and compositor must always move together.
-#   PREFIX        install destination (default ~/.local)
+#   PREFIX        install destination (default /usr/local)
+#   DESTDIR       staging prefix for packaging (invisible at runtime: it is
+#                 copied out at package time, so it must NOT be baked into
+#                 either the binary or the session entry)
 
-HYPRLAND_SRC ?= $(CURDIR)/../Hyprland
-PREFIX ?= $(HOME)/.local
+# INSTALL_CONFIG=1 (set only by install-local) appends the plugin load line to
+# ~/.config/hypr/hyprland.lua. Off by default: the system install must never
+# write into a user's config, and a packager must never write into its own.
+HYPRLAND_SRC    ?= $(CURDIR)/../Hyprland
+PREFIX          ?= /usr/local
+INSTALL_CONFIG  ?= 0
 HYPR_COMMIT ?= c26dbf93
 
 HYPRLAND_VERSION := $(shell git -C $(HYPRLAND_SRC) describe --tags --always 2>/dev/null || echo $(HYPR_COMMIT))
-CXXFLAGS += -std=c++2b -g -O2 -fPIC -DHYPRLAND_VERSION='"$(HYPRLAND_VERSION)"' \
-           -DSOURCE_DIR='"$(CURDIR)"'
+CXXFLAGS += -std=c++2b -g -O2 -fPIC -DHYPRLAND_VERSION='"$(HYPRLAND_VERSION)"'
 INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
            -Isrc/config/scheme \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
@@ -70,7 +81,7 @@ hyprland:
 	@if [ ! -d "$(HYPRLAND_SRC)" ]; then \
 	    echo "cloning Hyprland at commit $(HYPR_COMMIT)..."; \
 	    git clone https://github.com/hyprwm/Hyprland "$(HYPRLAND_SRC)"; \
-	    git -C "$(HYPRLAND_SRC)" checkout -q $(HYPR_COMMIT); \
+		git -C "$(HYPRLAND_SRC)" checkout -q $(HYPR_COMMIT); \
 	    git -C "$(HYPRLAND_SRC)" submodule update --init; \
 	fi
 	cmake -B $(HYPRLAND_SRC)/build -S $(HYPRLAND_SRC) -DCMAKE_BUILD_TYPE=Release
@@ -93,32 +104,81 @@ src/plugin-main.o: plugin-main.cpp
 # ---- install ---------------------------------------------------------------
 
 install: $(TARGET)
+	@if [ -z "$(DESTDIR)" ]; then \
+	    d="$(PREFIX)"; \
+	    while [ ! -e "$$d" ] && [ "$$d" != "/" ]; do d=$$(dirname "$$d"); done; \
+	    if [ ! -w "$$d" ]; then \
+	        echo "error: $$d is not writable."; \
+	        echo "       run:  sudo make install   # system install (the default)"; \
+	        echo "       or:   make install PREFIX=\$$HOME/.local  # files only, per-user"; \
+	        exit 1; \
+	    fi; \
+	fi
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 src/config/scheme/hyprscheme.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 src/config/scheme/hyprscheme/*.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
-	@echo ""
-	@echo "Plugin installed: $(DESTDIR)$(PREFIX)/lib/hyprscheme/$(TARGET)"
-	@echo "Load into a compositor built from $(HYPRLAND_SRC):"
-	@echo "    hyprctl plugin load $(DESTDIR)$(PREFIX)/lib/hyprscheme/$(TARGET)"
-	@echo "or install a matching compositor: make install-compositor"
-
-# installs the in-place-built compositor binary as 'hyprland-scheme' next to
-# the plugin, so plugin+compositor move together
-install-compositor: $(TARGET) $(HYPRLAND_SRC)/build/Hyprland
 	install -d $(DESTDIR)$(PREFIX)/bin
-	install -m 755 $(HYPRLAND_SRC)/build/Hyprland $(DESTDIR)$(PREFIX)/bin/hyprland-scheme
+	install -m 755 $(HYPRLAND_SRC)/build/Hyprland $(DESTDIR)$(PREFIX)/bin/Hyprscheme
+	install -m 755 $(HYPRLAND_SRC)/build/start/start-hyprland $(DESTDIR)$(PREFIX)/bin/start-hyprscheme
 	@if [ -f "$(HYPRLAND_SRC)/systemd/hyprland-uwsm.desktop" ]; then \
 	    install -d $(DESTDIR)$(PREFIX)/share/wayland-sessions; \
-	    sed -e 's|Name=Hyprland (uwsm-managed)|Name=Hyprland (Scheme)|' \
-	        -e 's|^Exec=.*|Exec=$(abspath $(DESTDIR)$(PREFIX))/bin/hyprland-scheme|' \
-	        -e '/^TryExec=/d' \
+	    sed -e 's|Name=Hyprland (uwsm-managed)|Name=Hyprscheme|' \
+	        -e 's|^Exec=.*|Exec=uwsm start -g -1 -e -D Hyprscheme -- start-hyprscheme --path $(PREFIX)/bin/Hyprscheme|' \
+	        -e 's|^DesktopNames=.*|DesktopNames=Hyprscheme|' \
 	        $(HYPRLAND_SRC)/systemd/hyprland-uwsm.desktop \
-	        > $(DESTDIR)$(PREFIX)/share/wayland-sessions/hyprland-scheme.desktop; \
+	        > $(DESTDIR)$(PREFIX)/share/wayland-sessions/Hyprscheme.desktop; \
 	    echo "Session entry installed."; \
 	fi
+	@if [ "$(INSTALL_CONFIG)" = "1" ]; then \
+	    echo ""; \
+	    echo "load the plugin in your config with:"; \
+	    echo "    hl.plugin.load(\"$(PREFIX)/lib/hyprscheme/$(TARGET)\")"; \
+	fi
 	@echo ""
-	@echo "hyprland-scheme installed at: $(DESTDIR)$(PREFIX)/bin/hyprland-scheme"
+	@echo "Hyprscheme installed at: $(DESTDIR)$(PREFIX)/bin/Hyprscheme"
+	@echo "Session entry: $(DESTDIR)$(PREFIX)/share/wayland-sessions/Hyprscheme.desktop"
+	@echo "Log out and pick 'Hyprscheme' at the login screen (or: uwsm start -e Hyprscheme)"
+
+# ---- install-local ---------------------------------------------------------
+#
+# CONFIG ONLY — installs no files. The program is a system install (`sudo make
+# install`); what is per-user is the one line that loads it, because
+# ~/.config/hypr/hyprland.lua belongs to this user and nothing else can write
+# it for them.
+#
+# It cannot be folded into `install`: that runs under sudo, where $HOME is
+# root's, so it would edit /root/.config/hypr/hyprland.lua and never find the
+# real one. Some guess at the invoking user would always be a guess. Run as
+# the user instead, $(HOME) IS the user, and the file that gets edited is the
+# right one by construction.
+#
+# NOTE: it must NOT build, and specifically must not depend on $(TARGET).
+# Depending on it would drag in $(HYPRLAND_SRC)/build/Hyprland, and a plain
+# user has no business reconfiguring the root-owned Hyprland tree.
+.PHONY: install-local
+install-local:
+	@cfg="$(HOME)/.config/hypr/hyprland.lua"; \
+	lib="$(PREFIX)/lib/hyprscheme/$(TARGET)"; \
+	block="$$(printf -- '-- Hyprscheme: load the Scheme plugin (added by make install-local)\nif (os.getenv("DESKTOP_SESSION") or "") == "Hyprscheme" then\n  hl.plugin.load("%s")\nend' "$$lib")"; \
+	if [ ! -f "$$cfg" ]; then \
+	    echo "no $$cfg — nothing to edit. Add this to your Hyprland config:"; \
+	    printf '%s\n' "$$block"; \
+	elif grep -qF "$$lib" "$$cfg"; then \
+	    echo "$$cfg already loads $$lib — left alone."; \
+	elif existing=$$(grep -o 'hl\.plugin\.load([^)]*)' "$$cfg" | head -1) && [ -n "$$existing" ]; then \
+	    echo "$$cfg already loads a plugin:"; \
+	    echo "    $$existing"; \
+	    echo "NOT appending a second one. Two hl.plugin.load calls for the same"; \
+	    echo "plugin (different paths — e.g. ~/.local vs /usr/local) both load, and"; \
+	    echo "the duplicate IPC registration breaks 'hyprctl scheme' until the"; \
+	    echo "compositor restarts. Replace that line by hand if the path is wrong."; \
+	    exit 1; \
+	else \
+	    printf '\n%s\n' "$$block" >> "$$cfg"; \
+	    echo "added the plugin load to $$cfg"; \
+	    echo "it is guarded by DESKTOP_SESSION, so it is inert in any other session"; \
+	fi
 
 # ---- the lints -------------------------------------------------------------
 #
@@ -152,4 +212,4 @@ clean:
 distclean: clean
 	rm -rf build
 
-.PHONY: all hyprland install install-compositor clean distclean
+.PHONY: all hyprland install install-local check clean distclean

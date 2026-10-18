@@ -25,6 +25,11 @@ Lua feature has a `hl-*` equivalent.
   "all you do now days is hallucinate that work needs to be done").
 - Tests live in `tests/`, docs in `../Hyprscheme.wiki`; both must be
   updated with any behavior change, in the same pass.
+  
+-  A piece of work isn't done till you fix most of the warnings. There are a
+few warnings that we can't avoid, those are fine, but all the ones we
+can fix should be fixed before a piece of work is complete.
+
 
 ## Build environment (in place, no copies/staging)
 
@@ -37,11 +42,33 @@ Lua feature has a `hl-*` equivalent.
 - The compositor **binary is a make prerequisite** of the plugin — a
   Hyprland rebuild forces a plugin relink automatically (the plugin
   resolves Hyprland symbols at load time).
-- `make install` → `~/.local/lib/hyprscheme/`: the `.so` and the two
-  `.scm` machinery files (prelude, bootstrap). No boot
-  files — the interpreter is the system Guile.
-  `make install-compositor` → `~/.local/bin/hyprland-scheme` +
-  session `.desktop`. `PREFIX` selects the destination.
+- `make install` → `$(PREFIX)/lib/hyprscheme/` (**default `PREFIX=/usr/local`,
+  so it needs `sudo`**; `PREFIX=$HOME/.local` for a per-user install): the
+  `.so`, the machinery `.scm`, the matched compositor as
+  `$(PREFIX)/bin/Hyprscheme`, and a session entry in
+  `$(PREFIX)/share/wayland-sessions/`, plus the compositor's launcher
+  wrapper as `$(PREFIX)/bin/start-hyprscheme`. One target — there is no
+  `install-compositor` any more. No boot files — the interpreter is the
+  system Guile. `DESTDIR` is a packaging staging prefix and is never baked
+  into the binary or the session entry.
+- **The session entry launches through `start-hyprscheme`, not the
+  compositor directly**: `Exec=uwsm start -g -1 -e -D Hyprscheme --
+  start-hyprscheme --path $(PREFIX)/bin/Hyprscheme`. Hyprland started
+  without its wrapper logs "WARNING: Hyprland is being launched without
+  start-hyprland" and loses the watchdog (`--watchdog-fd`, passed only by
+  the wrapper). We ship the wrapper from our own tree under our own name
+  so the package neither requires nor collides with a system
+  `start-hyprland`. **The `--` is load-bearing**: uwsm passes everything
+  after the compositor ID through, and without it uwsm eats `--path` as
+  its own argument and refuses to start. Nested runs bypass the wrapper
+  and get the warning, which is expected.
+- `make install-local` is **config only — it installs no files.** It appends
+  a `DESKTOP_SESSION`-guarded `hl.plugin.load(...)` to this user's
+  `~/.config/hypr/hyprland.lua`, skipping if the exact path is already there
+  and **refusing (exit 1)** if any *other* `hl.plugin.load` is present. It
+  cannot be folded into `install`: that runs under sudo where `$HOME` is
+  root's, so it would edit `/root/.config`. It must not depend on `$(TARGET)`
+  — that would drag in the root-owned Hyprland tree for a plain user.
 - **If anything starts crashing weirdly, rebuild all three** (Chez,
   Hyprland, plugin). A mismatched pairing either fails loud (renamed
   symbol) or misbehaves silently (changed class layout). Never run the
@@ -101,9 +128,16 @@ Lua feature has a `hl-*` equivalent.
 
 The machinery is **three modules** (no embedded blobs — the `.scm` were
 extracted out of the C++ in Sep 2026), installed next to the `.so`, found
-via `dladdr` on a known symbol, with fallbacks to the source tree
-(`SOURCE_DIR` compile define) and `HYPRSCHEME_SCM_DIR` env var. **The file
-paths are the module names** — `(hyprscheme kernel)` must be resolvable as
+via `dladdr` on a known symbol — `HYPRSCHEME_SCM_DIR` overrides it for a
+harness testing the tree. **TWO candidates, deliberately not a search
+chain** (`schemeDir()`, Host.cpp): named, the override is used and only it
+(refused outright if the directory does not exist, so a typo'd harness
+cannot silently run an installed copy); unnamed, the machinery is wherever
+the `.so` was loaded from, which is where `make install` puts it — no
+compiled-in path, because `DESTDIR` is a staging prefix that is copied out
+at package time and would name a build-machine directory. A chain would let
+a test that meant to exercise the tree silently pick up an installed copy,
+or the reverse. **The file paths are the module names** — `(hyprscheme kernel)` must be resolvable as
 `hyprscheme/kernel.scm` — so the machinery directory goes on `%load-path`
 at build time:
 
@@ -373,8 +407,14 @@ the custom-layout entry points. `Handles.*` is the object model,
   a lint must never resolve — let alone read or run — the real config. This is
   the same rule as never touching `~/.config/`, one level down: a tool that
   inherits the ambient environment is a tool that pokes the user's config.
-- `tests/run.sh` — the 14-file suite against a nested compositor
-  (`~/.local/bin/hyprland-scheme`), 14/14 green is the bar.
+- `tests/run.sh` — the 14-file suite against a nested compositor, 14/14
+  green is the bar. It tests the **tree, pre-install**: the compositor is
+  `../Hyprland/build/Hyprland` (never an installed one — testing what is
+  installed is a different question), the plugin is this directory's
+  `scheme-plugin-guile.so`, and `HYPRSCHEME_SCM_DIR` is exported at the
+  tree's `src/config/scheme` so the machinery that runs is the machinery
+  under test. `BIN=`/`PLUGIN=` override; both harnesses fail loudly rather
+  than silently exec a missing binary.
   `t-coverage` fails if a public API lacks a test.
   `t-zzz-snippets.sh` runs the wiki's snippets for real: it extracts a block,
   pulls the thunk out of the form and calls it (`tests/doc-snippets.scm`), so a

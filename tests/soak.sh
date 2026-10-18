@@ -33,13 +33,24 @@ SECS=$((DURATION < 5 ? 5 : DURATION))
 BATCH_EVALS=8      # hyprctl scheme evals per iteration batch
 MAX_WINDOWS=6      # concurrent churn windows
 
-BIN="${BIN:-$HOME/.local/bin/hyprland-scheme}"
+# the TREE, pre-install — same rule as run.sh (see the note there)
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+BIN="${BIN:-$REPO/../Hyprland/build/Hyprland}"
+if [[ ! -x $BIN ]]; then
+  if command -v Hyprscheme >/dev/null 2>&1; then BIN=$(command -v Hyprscheme)
+  elif command -v hyprland-scheme >/dev/null 2>&1; then BIN=$(command -v hyprland-scheme)
+  else
+    echo "FAIL: no compositor to soak — build it first (make hyprland) or set BIN="
+    exit 1
+  fi
+fi
 # the plugin to load; the maintained Guile backend is the default (the Chez
 # one is deprecated and this tree does not build it — override PLUGIN= for it)
-PLUGIN="${PLUGIN:-$HOME/.local/lib/hyprscheme/scheme-plugin-guile.so}"
-[[ -x $BIN ]] || BIN=hyprland-scheme
-command -v "$BIN" >/dev/null 2>&1 || { echo "FAIL: no hyprland-scheme binary (make install-compositor?)"; exit 1; }
-[[ -f $PLUGIN ]] || { echo "FAIL: plugin not installed"; exit 1; }
+PLUGIN="${PLUGIN:-$REPO/scheme-plugin-guile.so}"
+case $PLUGIN in /*) ;; *) PLUGIN=$REPO/$PLUGIN ;; esac
+[[ -f $PLUGIN ]] || { echo "FAIL: no plugin at $PLUGIN — run make"; exit 1; }
+# the machinery comes from the tree, named explicitly (not a compiled-in path)
+export HYPRSCHEME_SCM_DIR=$REPO/src/config/scheme
 
 WORK=/tmp/hyprscheme-soak.$$
 mkdir -p "$WORK"

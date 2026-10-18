@@ -34,10 +34,11 @@ compositor down.
 
 ## A quick word from our lack of sponsors...
 
-This project has been moderately expensive to implement in its use of AI, and I'm 
-running out of money to do it. If you want to see it move forward, money, AI tokens
-or human assistence would help it move forward much faster. Having said that, look
-at whats been achieved by one guy in short time.
+This project has been moderately expensive to implement in its use of
+AI, and I'm running out of money to do it. If you want to see it move
+forward, money, AI tokens or human assistence would help it move
+forward much faster. Having said that, look at whats been achieved by
+one guy in a short time.
 
 ## Developer Discussion
 
@@ -132,32 +133,79 @@ See the wiki's [[building-the-plugin]] page for the full story (or
 The plugin resolves Hyprland's own symbols at load time, so it must be
 compiled against headers matching the running compositor. Keep the
 plugin and the compositor moving together: rebuild both from the same
-tree (`make install-compositor` installs the matched compositor as
-`hyprland-scheme`). A Hyprland update with the plugin stale either
+tree (`make install` installs the matched compositor as `Hyprscheme`
+alongside the plugin). A Hyprland update with the plugin stale either
 fails to load (renamed symbols — loud) or misbehaves (changed class
 layouts — silent and bad).
 
 ## Installing
 
 ```sh
-make install                # plugin + Scheme machinery: ~/.local/lib/hyprscheme
-make install-compositor     # matched compositor: ~/.local/bin/hyprland-scheme
-                            # + a session entry in ~/.local/share/wayland-sessions
+sudo make install                        # everything, to /usr/local (the default)
+make install-local                       # per user: wire up ~/.config/hypr/hyprland.lua
+make install PREFIX=$HOME/.local         # files only, per-user, no sudo
 ```
 
-`PREFIX` selects the destination (default `~/.local`).
+One target installs all of it: the plugin and the Scheme machinery to
+`$(PREFIX)/lib/hyprscheme/`, the matched compositor as
+`$(PREFIX)/bin/Hyprscheme`, and a session entry in
+`$(PREFIX)/share/wayland-sessions/`. The default `PREFIX` is
+`/usr/local` — a system install, hence the `sudo`. Only a system
+location works for a display-manager session: SDDM reads its session
+entries from `/usr/local/share/wayland-sessions` and
+`/usr/share/wayland-sessions` (its `SessionDir`), and never from
+anywhere under `$HOME`.
 
-Then add to your `hyprland.lua` (the Lua config — the old
-`plugin = path` hyprlang directive does not exist there):
+Then load the plugin from your `hyprland.lua` (the Lua config — the
+old `plugin = path` hyprlang directive does not exist there). Run
+
+```sh
+make install-local
+```
+
+which appends this to `~/.config/hypr/hyprland.lua` for you (and does
+nothing else — it installs no files; add the block by hand if you
+prefer):
 
 ```lua
-hl.plugin.load("/home/YOU/.local/lib/hyprscheme/scheme-plugin-guile.so")
+-- Hyprscheme: load the Scheme plugin (added by make install-local)
+if (os.getenv("DESKTOP_SESSION") or "") == "Hyprscheme" then
+  hl.plugin.load("/usr/local/lib/hyprscheme/scheme-plugin-guile.so")
+end
 ```
 
-and reload. The plugin loads once, during config processing, before
-the rest of the config runs. The Chez backend is deprecated and frozen
-in `chez/` (see `chez/README.md`); `scheme-plugin-guile.so` is the
-artifact this tree builds.
+It cannot be done for you by `make install`: that runs under `sudo`,
+where `$HOME` is root's, so it would edit `/root/.config/...` and
+never find the real file. `install-local` runs as you, so `$HOME` is
+you.
+
+**The guard is the point.** The plugin resolves the compositor's own
+symbols at load time, so it only loads into the compositor installed
+alongside it — `Hyprscheme`, not the system `Hyprland`. In any other
+build the load fails at `dlopen` with an `undefined symbol: …` error
+and a failure notification. Harmless, but it would repeat on every
+config pass of that session. `DESKTOP_SESSION` is the one variable
+that survives to the end of the config: it is set by the session
+launcher and nothing in the config rewrites it, whereas
+`XDG_CURRENT_DESKTOP` and `XDG_SESSION_DESKTOP` are both set back to
+`Hyprland` by Omarchy's `envs.lua` on every parse. In a session
+started without a launcher (nested from a terminal, say) the variable
+is empty, the guard is false, and the plugin does not load — start
+such a session with `DESKTOP_SESSION=Hyprscheme` if you want it.
+
+**Do not add a second `hl.plugin.load` for the same plugin.** Hyprland
+compares plugin paths as literal strings, so `/home/you/.local/lib/...`
+and `/usr/local/lib/...` are two different plugins and *both* load.
+Each registers its own `scheme` IPC command, the duplicate registration
+collides, and `hyprctl scheme` stops working — and no config reload
+evicts the extra copy, because the reload only unloads plugins whose
+path has disappeared from the config. Restart the compositor.
+`install-local` refuses to append when it finds any existing
+`hl.plugin.load`, for this reason.
+
+The Chez backend is deprecated and frozen in `chez/` (see
+`chez/README.md`); `scheme-plugin-guile.so` is the artifact this tree
+builds.
 
 ## Usage
 
@@ -201,25 +249,49 @@ re-installed handler that calls Hyprland's exported crash reporter.
 
 ## Session integration
 
-`make install-compositor` (or the AUR package) installs the compositor
-as `hyprland-scheme` plus a `hyprland-scheme.desktop` session entry
-under `share/wayland-sessions/`. How you reach it depends on how you
-log in:
+`sudo make install` (or the AUR package) installs the compositor as
+`Hyprscheme` plus a `Hyprscheme.desktop` session entry under
+`$(PREFIX)/share/wayland-sessions/`. The entry is
 
-- **Display manager (SDDM/LightDM):** pick "Hyprland (Scheme)" from the
+```
+Exec=uwsm start -g -1 -e -D Hyprscheme -- start-hyprscheme --path /usr/local/bin/Hyprscheme
+```
+
+Three things in that line are deliberate:
+
+- **`start-hyprscheme`, not the compositor directly.** Hyprland is meant
+  to be launched through its `start-hyprland` wrapper, which forks a
+  watchdog and execs the compositor with `--watchdog-fd`; started
+  without it, Hyprland logs a warning and loses hang recovery. The
+  wrapper is built from the same tree as the compositor and installed
+  under our own name so the package neither needs nor clashes with a
+  system `start-hyprland`; `--path` is how it is told which binary to
+  run.
+- **`--` before it**, because everything after the compositor ID is
+  passed through: without it uwsm reads `--path` as its own argument
+  and refuses to start.
+- **`DesktopNames=Hyprscheme`** rather than `Hyprland`, so
+  desktop-aware tooling can tell the two sessions apart.
+
+The `uwsm` wrapper makes the session's systemd services bind to the
+compositor properly. How you reach it depends on how you log in:
+
+- **Display manager (SDDM/LightDM):** pick "Hyprscheme" from the
   session menu at login.
-- **uwsm:** `uwsm start -e hyprland-scheme` from a TTY, or add a uwsm
-  desktop entry pointing at the same command.
-- **Nested (testing):** run `~/.local/bin/hyprland-scheme` from a
-  terminal inside your existing session — it opens as a window like
-  any other.
+- **uwsm:** from a TTY,
+  `uwsm start -e -D Hyprscheme -- start-hyprscheme --path /usr/local/bin/Hyprscheme`
+  (the `--` matters — see above), or add a uwsm desktop entry pointing
+  at the same command.
+- **Nested (testing):** run `Hyprscheme` from a terminal inside your
+  existing session — it opens as a window like any other. Nested runs
+  skip the wrapper, so the watchdog warning appears; harmless here.
 - **Making it your main compositor:** point whatever launches your
-  compositor today at `hyprland-scheme` instead of `Hyprland`. For
+  compositor today at `Hyprscheme` instead of `Hyprland`. For
   display managers the honest caveat is that every setup hides the
   session picker differently — some log in automatically to a fixed
   session. The generic mechanism: display managers list session
   entries from `share/wayland-sessions/*.desktop`, and most can be
-  told to auto-select one (for SDDM: a `Session=hyprland-scheme` line
+  told to auto-select one (for SDDM: a `Session=Hyprscheme` line
   in `/etc/sddm.conf.d/*.conf` — consult your distribution's
   display-manager configuration for where that lives in your setup).
 

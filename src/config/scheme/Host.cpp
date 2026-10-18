@@ -672,40 +672,55 @@ namespace Config::Scheme {
         Layouts::registerSymbols();
     }
 
-    // where the .scm machinery lives. The dev tree is the first candidate so a
-    // dev build loads its own sources before any installed copies (mirroring
-    // the boot-file fallback order).
-#ifndef SOURCE_DIR
-#define SOURCE_DIR "" // hand compiles: only the plugin dir is consulted
-#endif
-    static std::string schemePath(const char* name);
-
-    // the machinery directory the host resolved, for %load-path
+    // where the .scm machinery lives. TWO candidates, no chain, and no
+    // compiled-in path: a harness that means to test the TREE names it via
+    // HYPRSCHEME_SCM_DIR and gets exactly that; otherwise the machinery is
+    // beside the .so, because that is where `make install` puts it.
+    //
+    // Deliberately NOT a search: a chain would let a test that meant to
+    // exercise the tree silently pick up an installed copy instead (or the
+    // reverse), so which files are running would depend on what happens to
+    // exist on the machine. One answer, and the caller said which.
+    //
+    // No build-time path is needed for the installed case: DESTDIR is a
+    // staging prefix (the files are copied out of it at package time), so a
+    // baked-in $(DESTDIR)$(PREFIX) would name a directory that exists only on
+    // the build machine. pluginDir() is that same directory AS INSTALLED,
+    // whatever PREFIX and DESTDIR were — and it follows the .so if it moves.
     static std::string schemeDir() {
-        return std::filesystem::path(schemePath("hyprscheme.scm")).parent_path().string();
+        static const std::string dir = [] {
+            if (const char* ov = getenv("HYPRSCHEME_SCM_DIR"); ov && *ov) {
+                // A named override that is not there is a broken harness, and
+                // falling back would run the installed machinery while the
+                // harness believed it was running the tree — the exact failure
+                // the override exists to prevent. Refuse, loudly.
+                if (!std::filesystem::exists(ov)) {
+                    LOG(Log::ERR, "[scheme] HYPRSCHEME_SCM_DIR={} does not exist", ov);
+                    return std::string();
+                }
+                return std::string(ov);
+            }
+            const auto beside = pluginDir();
+            // Load-bearing check, not a courtesy: a build run from the tree
+            // (never installed) finds the REPO root here, which holds no
+            // machinery — and the old silent fallback to the source tree is
+            // gone, so this is the point where that has to be said out loud.
+            if (!beside.empty() && !std::filesystem::exists(beside + "/hyprscheme.scm"))
+                LOG(Log::ERR, "[scheme] no machinery beside the plugin ({}); "
+                              "set HYPRSCHEME_SCM_DIR=<tree>/src/config/scheme to test a source tree, "
+                              "or run `make install`",
+                    beside);
+            return beside;
+        }();
+        return dir;
     }
 
+    // one machinery file, or empty when the directory was refused above
     static std::string schemePath(const char* name) {
-        static const std::vector<std::string> dirs = [] {
-            std::vector<std::string> d;
-            const char*              src = getenv("HYPRSCHEME_SCM_DIR"); // dev/test override
-            if (src && *src)
-                d.push_back(src);
-            if (const auto dev = std::filesystem::path(SOURCE_DIR) / "src" / "config" / "scheme"; std::filesystem::exists(dev))
-                d.push_back(dev.string());
-            d.push_back(pluginDir());
-            d.push_back("/usr/lib/hyprscheme");
-            return d;
-        }();
-        for (const auto& dir : dirs) {
-            if (dir.empty())
-                continue;
-            const auto p = dir + "/" + name;
-            if (std::filesystem::exists(p))
-                return p;
-        }
-        LOG(Log::ERR, "[scheme] {} not found (looked in HYPRSCHEME_SCM_DIR, the source tree, the plugin dir)", name);
-        return std::string(name);
+        const auto dir = schemeDir();
+        if (dir.empty())
+            return {};
+        return dir + "/" + name;
     }
 
     /*
@@ -728,7 +743,12 @@ namespace Config::Scheme {
         // and a config's own (use-modules ...) resolves from it too.
         // (`add-to-load-path` is a syntax transformer, not a procedure, so it
         // cannot be called from C++ — the runtime does the variable directly.)
-        if (!hl::addLoadPath(schemeDir().c_str()))
+        const auto scmDir = schemeDir();
+        if (scmDir.empty()) {
+            LOG(Log::ERR, "[scheme] no machinery directory (unset/fix HYPRSCHEME_SCM_DIR, or install the machinery beside the plugin)");
+            return false;
+        }
+        if (!hl::addLoadPath(scmDir.c_str()))
             LOG(Log::ERR, "[scheme] could not put the machinery on %load-path");
 
         // 1. the KERNEL: created first, given its one gsubr, then loaded. Its
@@ -865,14 +885,15 @@ namespace Config::Scheme {
             return;
         }
         done = true;
-        g_configPath = userConfigPath();
-        if (g_configPath.empty() || !std::filesystem::exists(g_configPath)) {
-            LOG(Log::INFO, "[scheme] no scheme config found at {} (HYPRSCHEME_CONFIG {}), scheme scripting disabled",
-                g_configPath.empty() ? "<unset>" : g_configPath, getenv("HYPRSCHEME_CONFIG") ? "override ignored: file missing" : "not set");
-            return;
-        }
-        LOG(Log::INFO, "[scheme] config: {}", g_configPath);
 
+        // The interpreter is built FIRST, and unconditionally: "the machinery
+        // is up" and "a config file was found" are different questions, and
+        // conflating them meant a missing hyprland.scm left the plugin loaded
+        // but inert — no machinery, and no `hyprctl scheme` either (the IPC
+        // command is registered below, and its handler needs hl--eval to
+        // exist). The config file is what the machinery LOADS, not what makes
+        // it exist.
+        //
         // pin ourselves: bump the dlopen refcount so the compositor's
         // dlclose on unload never unmaps the live interpreter
         {
@@ -904,9 +925,6 @@ namespace Config::Scheme {
         // direct registration is safe here: verified working (the deferred
         // doLater variant never fired its callback).
         registerIpc();
-        // watch the file for edits (skipped during --verify: no event loop yet)
-        if (g_pEventLoopManager)
-            setupWatch();
 
         // the lua config load clears all binds; (re)load our file once it settles.
         // as a plugin we load AFTER the initial config load, so also load now.
@@ -915,6 +933,23 @@ namespace Config::Scheme {
         // lifecycle: dispatch start-notification handlers on the session's first
         // render frame (start fires exactly once, after the first preChecks)
         registerStartDispatch();
+
+        // NOW the config file. Absent is a legitimate state, not an error: the
+        // API is fully available (the machinery is loaded and `hyprctl scheme`
+        // answers), there is simply nothing to evaluate into the generation.
+        // That is the state to explore the API from before writing a config.
+        g_configPath = userConfigPath();
+        if (g_configPath.empty() || !std::filesystem::exists(g_configPath)) {
+            LOG(Log::INFO, "[scheme] no config file at {} (HYPRSCHEME_CONFIG {}) — the API is loaded and "
+                           "`hyprctl scheme` works; nothing to evaluate",
+                g_configPath.empty() ? "<unset>" : g_configPath, getenv("HYPRSCHEME_CONFIG") ? "override ignored: file missing" : "not set");
+            return;
+        }
+        LOG(Log::INFO, "[scheme] config: {}", g_configPath);
+
+        // watch the file for edits (skipped during --verify: no event loop yet)
+        if (g_pEventLoopManager)
+            setupWatch();
         reloadScheme();
     }
 }
