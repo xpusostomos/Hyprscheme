@@ -187,7 +187,7 @@
 ;; filters are plist-style: (hl-layers), (hl-layers 'monitor MON),
 ;; (hl-layers 'namespace "ns"), or combined.
 
-(define* (hl-monitor-rule-add! output #:key #:allow-other-keys #:rest fields)
+(define* (hl-monitor-rule-add! output #:key #:rest fields)
   "Add a monitor rule for OUTPUT (name or desc: selector), e.g.
    (hl-monitor-rule-add! \"DP-1\" #:mode \"preferred\" #:scale \"1.6\"
    #:position \"0x0\" #:transform 0 #:bitdepth 10 #:vrr 1 #:reserved

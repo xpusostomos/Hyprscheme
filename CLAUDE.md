@@ -237,6 +237,16 @@ Things that bit us and are worth not rediscovering:
   sets `%load-path` as a variable.
 - An **exception escaping into C++ corrupts the compositor heap**
   (`corrupted size vs. prev_size`). Every C++→Scheme call must be contained.
+- **Never write `#:key #:allow-other-keys` with no named key between them.**
+  Guile 3.0.11 fails to *link* such a `define*` — `Undefined symbol #f` from
+  the VM linker, at `guild compile` time, with no hint that the lambda list is
+  the cause. A named key first (`#:key x #:allow-other-keys`) links fine, and
+  so does `#:key` + `#:rest`. Six functions had the broken adjacency
+  (`hl-exec!` and the four `*-rule-add!`s plus `hl-device-add!`) and it went
+  unnoticed because the *interpreter* accepts it happily — only compilation
+  trips. And the keyword was **doing nothing**: with `#:rest` present, every
+  unrecognised keyword pair is already captured by `#:rest`, which is exactly
+  what those signatures want. So the rule is `#:key #:rest`, full stop.
 
 (The deprecated Chez tree loaded prelude → defun → bootstrap; that
 machinery — including the defun/describe-function file — is frozen in

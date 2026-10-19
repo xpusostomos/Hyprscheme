@@ -236,7 +236,41 @@ run directly, so the next reader can see the test did real work.
 
 ---------------------------------------------------------------------
 
-## §2.14 — stale installed artifacts + wrong README commands: PARTLY DONE
+## §2.14 — stale installed artifacts + wrong README commands: OBSOLETE (2026-10-19)
+
+**Obsolete — superseded by the install redesign; do not action this section.**
+Every bullet below describes the *old* arrangement, in which the plugin was
+installed per-user into `~/.local/lib/hyprscheme/` and `tests/run.sh` defaulted
+to testing that installed copy. Both of those are gone:
+
+- `make install` now defaults to `PREFIX=/usr/local` (a system install,
+  `sudo`), and installs the plugin, the machinery, the matched compositor as
+  `$(PREFIX)/bin/Hyprscheme` and a session entry. `~/.local/lib/hyprscheme/`
+  is no longer an install target at all — the copy still on disk is a stale
+  leftover, not the install.
+- `tests/run.sh` no longer tests an installed copy: it tests the **tree,
+  pre-install** (`../Hyprland/build/Hyprland` + this directory's
+  `scheme-plugin-guile.so`), with `HYPRSCHEME_SCM_DIR` pointed at the tree's
+  `src/config/scheme`. So the freshness warning described below — comparing the
+  plugin under test against "the tree build next to the sources" — no longer
+  has two things to compare, and the whole failure mode it guarded against
+  ("a default `tests/run.sh` failing in ways that looked like code bugs") cannot
+  arise.
+- The README corrections listed below **were** made and are still correct; they
+  have since been superseded by the fuller rewrite that the redesign required
+  (install/install-local/session-entry/hyprpm sections).
+
+The one live item that *descends* from this section is not about staleness but
+about a broken install: `/usr/local` was last installed on 2026-10-18 17:05,
+before commit `9298c84` added `bin/Hyprscheme`, `bin/start-hyprscheme` and the
+session entry to the install rule — so the installed
+`/usr/local/share/wayland-sessions/Hyprscheme.desktop` names a
+`start-hyprscheme` that was never installed, and the session cannot start. Fixed
+by re-running `sudo make install`. Tracked in the conversation, not here.
+
+### §2.14, as originally recorded (historical)
+
+- **`make install` run**: `~/.local/lib/hyprscheme/` now holds the
 
 - **`make install` run**: `~/.local/lib/hyprscheme/` now holds the
   current `scheme-plugin-guile.so` and the three current `.scm` files
@@ -947,10 +981,89 @@ exactly where:
   `layer`, `monitor`, `window`, `workspace` use the idiom and fail; the other ten
   do not and compile. `hl-device-add!` alone reproduces it.
 
-So the lint needs either that idiom to change, a different compile path
-(`compile-file` through the Guile API rather than `guild`), or a Guile that links
-it. The tools built for it were removed rather than left half-working; the
-findings are above.
+#### Re-diagnosed 2026-10-19: the trigger is narrower, and there is a fix
+
+The "six modules use the idiom" correlation was right but not the *cause*. Bisected
+on Guile 3.0.11 with minimal single-file cases:
+
+| form | links? |
+|---|---|
+| `(f a #:key b #:rest r)` | **yes** |
+| `(f a #:rest r)` | yes |
+| `(f a #:key b #:allow-other-keys)` | yes |
+| `(f a #:key #:allow-other-keys)` | **no** — `Undefined symbol #f` |
+| `(f a #:key #:allow-other-keys #:rest r)` | **no** |
+| `(f name #:key dummy #:allow-other-keys #:rest r)` | yes |
+
+**The trigger is `#:allow-other-keys` appearing immediately after `#:key` with no
+named key between them.** A named key first (`#:key dummy #:allow-other-keys`)
+links fine. So it is not the idiom as such, it is that specific adjacency — and
+all six modules happen to write it that way.
+
+**`#:allow-other-keys` is not needed at all here.** With `#:rest` present, every
+unrecognised keyword pair is already collected by `#:rest` — which is precisely
+what these signatures want (`(hl-exec! "foot" #:float #t #:ws "games")` capturing
+`(#:float #t #:ws games)`). Verified side by side: the current form and
+`(define* (f name #:key #:rest r) …)` produce **identical** results for known
+keys, unknown keys, and no keys; only the first fails to link. So dropping
+`#:allow-other-keys` is a no-op semantically, and it is a one-token change in six
+places.
+
+**So Step F is not blocked** — it needs `#:allow-other-keys` dropped from those six
+signatures (or a named key inserted ahead of it, the other verified fix), and then
+the dependency-ordered compile can proceed.
+
+#### Prototyped end to end, 2026-10-19 — it works
+
+A throwaway prototype (in `/tmp`, not committed) did the whole of Step F against a
+copy of the machinery with the six signatures patched:
+
+1. **Generate a stub kernel.** Scan every `.scm` for `hl--c-*` symbols and emit
+   `(hyprscheme kernel)` with a no-op `(define (hl--c-x . _) #f)` for each — **308
+   names found, matching `bind-audit`'s count exactly**, which is the cross-check
+   that the scan sees the same boundary the C++ registers.
+2. **Compile in dependency order** — stub kernel, `core`, the 16 families, the
+   umbrella — via `compile-file`.
+3. **Result: all 19 modules compile, the six previously-failing ones included.**
+4. **The lint works.** Injecting `(hl-nonexistent-helper 1 2)` into
+   `window.scm` produced, through `guild compile -Wunbound-variable` with
+   `GUILE_LOAD_PATH` + `GUILE_LOAD_COMPILED_PATH` set:
+
+   ```
+   hyprscheme/window.scm:74:29: warning: possibly unbound variable `hl-nonexistent-helper'
+   ```
+
+   — the exact file:line:col. Note it is a **warning, not an error**: the compile
+   still wrote the `.go`. So "unbound-variable fails the build" (FABLE §4.6's
+   wording) is a deliberate gate we would add, not something the tool does by
+   itself.
+
+The two pieces of work Step F always had are therefore both solved in prototype:
+dependency-ordered compilation with a generated kernel stub, and the env-var route
+in (`guild` has no `-C`). What remains is to land it as a real tool — decide
+whether the lint gates `make`, and whether the `.go` artifacts ship (FABLE §4.6
+also proposes compiling *user* configs into `$XDG_CACHE_HOME/hyprscheme/`, which is
+the §12 Q5 decision).
+
+#### LANDED 2026-10-19 — the six signatures are fixed
+
+`#:allow-other-keys` was dropped from all six `define*` signatures in the real
+tree (`hl-exec!`, `hl-window-rule-add!`, `hl-device-add!`,
+`hl-workspace-rule-add!`, `hl-monitor-rule-add!`, `hl-layer-rule-add!`), each now
+`#:key #:rest fields/effects`.
+
+**Verified:**
+- The real machinery now compiles in dependency order — **all 19 modules**, the
+  six included (was 10 of 16).
+- Behaviour unchanged, checked directly: `(f "n" #:float #t #:ws "games")` →
+  `("n" (#:float #t #:ws games))`, `(f "n")` → `("n" ())`, and three unknown keys
+  all land in the `#:rest` list. `#:rest` already captured every unrecognised
+  pair, so `#:allow-other-keys` was doing nothing.
+- `make check` green; suite **15/15**, including `t-exec` (drives `hl-exec!`) and
+  `t-rules` (drives the rule-adders).
+
+**Still to land:** the tooling itself — the compile/lint tool and whether it gates
+`make` — and the §12 Q5 decision on shipping `.go` and compiling user configs.
 
 ### §4.7 Step G — split `SchemeManager.cpp`: DONE
 

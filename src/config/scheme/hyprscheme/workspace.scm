@@ -77,7 +77,7 @@
   (let ((l (hl--c-workspace-groups WS)))
     (if l l '())))
 
-(define* (hl-workspace-rule-add! ws #:key #:allow-other-keys #:rest fields)
+(define* (hl-workspace-rule-add! ws #:key #:rest fields)
   "Add a workspace rule for WS (a selector or handle):
    (hl-workspace-rule-add! \"3\" #:monitor \"DP-1\" #:layout \"master\").
    #:enabled toggles the rule (a rule is enabled unless you pass

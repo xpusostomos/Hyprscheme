@@ -24,7 +24,7 @@
              (srfi srfi-1)
              (ice-9 optargs))
 
-(define* (hl-layer-rule-add! name #:key #:allow-other-keys #:rest fields)
+(define* (hl-layer-rule-add! name #:key #:rest fields)
   "Add a layer rule: the same keyword-rule-spec shape as
    hl-window-rule-add!, matching on the namespace property inside
    #:match."

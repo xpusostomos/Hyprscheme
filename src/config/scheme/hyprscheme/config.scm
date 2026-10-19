@@ -43,7 +43,7 @@
    (number, string, boolean, or a plist for tables)."
   (hl--c-config-get (hl--str key)))   ; #t/#f, number, string, or a plist for tables
 
-(define* (hl-device-add! name #:key #:allow-other-keys #:rest fields)
+(define* (hl-device-add! name #:key #:rest fields)
   "Configure a device: NAME plus keyword fields, e.g.
    (hl-device-add! \"tablet\" #:repeat_rate 25 #:natural_scroll #t).
    Write-only (no device read side, no per-field unset); validated

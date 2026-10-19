@@ -270,7 +270,7 @@
     (hl--error 'hl-window-send-key-state! "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
   (= 0 (hl--c-send-key-state mods key state (if (null? w) -1 (car w)))))
 
-(define* (hl-window-rule-add! name #:key #:allow-other-keys #:rest fields)
+(define* (hl-window-rule-add! name #:key #:rest fields)
   "Add a window rule and return its rule handle. NAME (#f = anonymous).
    #:match takes a plist of match properties to values: ((class .
    \"foot\") (title . \"foo\") (floating . #t) ...). #:enabled toggles

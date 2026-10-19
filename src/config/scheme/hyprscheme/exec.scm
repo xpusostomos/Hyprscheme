@@ -95,7 +95,7 @@
 
 ;; ---- config -----------------------------------------------------------------
 
-(define* (hl-exec! cmd #:key #:allow-other-keys #:rest effects)
+(define* (hl-exec! cmd #:key #:rest effects)
   "The one exec. Spawns CMD asynchronously through the compositor's
 executor (shell, env injection; never blocks the config). Keyword
 EFFECTS build a one-shot window rule pinned to the spawned window by
