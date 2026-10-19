@@ -98,7 +98,7 @@ Five items, one pass, suite green.
   every entry point appeared "called". Declarations are now stripped before the
   scan, and the tool found both dead entry points again.
 
-### The lints now run on every `make` (six)
+### The lints now run on every `make` (seven)
 
 `all: $(TARGET) check`, and `check` runs:
 
@@ -107,13 +107,15 @@ Five items, one pass, suite green.
 | `tools/syntax-check.scm` | the reader's view: parens, quotes, docstring corruption, at the edit site |
 | `tools/module-audit.py` | the module rule: a family imports only the kernel and core and never calls another family — plus, since the layout-callback pass, that every top-level define is in its own module's `#:export` and every public name reaches the umbrella's `#:re-export` |
 | `tools/load-check.scm` | a load-time error, with no compositor needed |
+| `tools/compile-lint.scm` | **a name used but never defined**, anywhere — including inside a `lambda` body that never runs (FABLE §4.6 Step F; added 2026-10-19, see below) |
 | `tools/bind-audit.py` | registrations: unbound, duplicate, dead — and **anything undefined in the built `.so`** |
 | `tools/doc-audit.py` | a name the WIKI uses that does not exist (textual, so it sees inside thunks) |
 | `tools/doc-exercise.scm` | a name inside a callback the wiki REGISTERS — by calling it |
 
 Each was **verified to fail**: a deliberate cross-family call trips module-audit,
-an undefined call at load trips load-check. (A check that cannot fail is the trap
-`t-coverage` spent its whole life in.)
+an undefined call at load trips load-check, an unbound name in a lambda trips
+compile-lint. (A check that cannot fail is the trap `t-coverage` spent its whole
+life in.)
 
 `bind-audit` earned its keep again in this pass: it is what caught that
 consolidating the registrations had dropped `hl--c-run-finalizers`, which would
@@ -956,7 +958,47 @@ workspace implied. Both are small and separate.
   kept as the record; `DONE.txt`/`TODO.txt` still describe the two-backend
   era).
 
-### §4.6 Step F, the compile lint — ATTEMPTED, NOT LANDED
+### §4.6 Step F, the compile lint — LANDED 2026-10-19
+
+**`tools/compile-lint.scm`**, wired into `make check` (the seventh lint). It
+compiles the machinery in dependency order against a generated stub kernel, so
+`possibly unbound variable` is reported for every branch including the ones that
+never run. `--no-fail` reports without failing; extra file arguments are linted
+too (a user config, `examples/`, a wiki block).
+
+Two things make it work, and both were got wrong first:
+
+- **The stub kernel mirrors the real kernel's `#:export` list** (363 names: 308
+  `hl--c-*` gsubrs plus 55 real definitions — `hl--error`, `hl--plist-get`, the
+  fire trampolines, the record types). Scanning the machinery for `hl--c-*`
+  symbols instead — the obvious first move — misses every non-gsubr export, and
+  then every caller of one (`hl--error` is called in fourteen modules) reports as
+  a false positive.
+- **A command-line file compiles in an environment that imports the API**, as the
+  host's generation does. Without it every `hl-*` in a user's config reads as
+  unbound, which is all false positives — the difference between a usable config
+  lint and a useless one.
+
+**Verified to fail, both ways:** an unbound name inside a lambda body
+(`(lambda () (hl-this-name-does-not-exist 1 2))` injected into `window.scm`)
+reports `window.scm:75:14: possibly unbound variable`; removing a name from the
+kernel's export list reports every caller of it (3 sites for `hl--plist-get`).
+And verified **not** to false-positive: a valid config lints clean, a config with
+one typo reports exactly one warning.
+
+**The `.go` files are NOT shipped** — the tool builds them in a temp directory and
+throws them away. Chris asked whether they should accompany the `.scm`; they
+cannot be useful. The host loads every machinery file by explicit path through
+`scm_primitive_load`, and **Guile's `load` never consults a `.go`** — only
+`use-modules` does. Verified three ways (`.go` older than the `.scm`, newer than
+it, and with `%load-compiled-path` set): `load` read the source every time. A
+compiled kernel is additionally impossible to ship, since its export list names
+gsubrs that do not exist until the compositor registers them — a `.go` built
+against the stub would give the stub, not the C++ boundary.
+
+*(The original finding follows, kept as the record of what blocked it.)*
+
+### §4.6 Step F, as first attempted — the blocker
 
 `-Wunbound-variable` is the only thing that sees "a name used but never defined"
 in a lambda body: the reader does not resolve it and `load-check` only finds it

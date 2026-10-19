@@ -44,10 +44,21 @@ LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 # points) and the bootstrap (the API). The Chez-only defun machinery is
 # frozen in chez/.
 # the machinery as MODULES (the file paths are the module names: (hyprscheme)
-# resolves to hyprscheme.scm, (hyprscheme kernel) to hyprscheme/kernel.scm)
-SCM_FILES = src/config/scheme/hyprscheme.scm \
-            src/config/scheme/hyprscheme/kernel.scm \
-            src/config/scheme/hyprscheme/api.scm
+# resolves to hyprscheme.scm, (hyprscheme kernel) to hyprscheme/kernel.scm).
+#
+# init.scm is the ENTRY POINT — the one file the host loads; it loads everything
+# else by name. It must be first in this list, and its presence is what
+# schemeDir() probes for.
+SCM_ENTRY = src/config/scheme/init.scm
+SCM_FILES = $(SCM_ENTRY) \
+            src/config/scheme/hyprscheme.scm \
+            $(wildcard src/config/scheme/hyprscheme/*.scm)
+
+# the compiled forms, built beside the .scm by `make scm-compile` and shipped by
+# install. They are an ACCELERATOR, never a replacement: `reload-module` (the
+# wipe) re-reads the .scm and cannot work from a .go alone, so the sources
+# always ship too. See the scm-compile target for why the order matters.
+SCM_GO = $(SCM_FILES:.scm=.go)
 
 # guile-3.0 cflags/libs: Guile.cpp, Handles.* and Bindings.hpp include
 # libguile headers
@@ -100,6 +111,41 @@ src/plugin-main.o: plugin-main.cpp
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+# ---- the machinery's compiled forms -----------------------------------------
+#
+# `use-modules` uses a .go when one is there and compiles+caches one when not,
+# so these are an accelerator for the first load of a session — and they are
+# never a replacement for the .scm, which always ship: `reload-module` (the
+# wipe, once per config reload) re-reads the SOURCE and cannot work from a .go
+# alone ("Unable to find file k.scm in load path" — verified).
+#
+# ORDER IS LOAD-BEARING, exactly as in init.scm: a module that imports another
+# fails to compile with "no code for module" unless that dependency is already
+# a .go. So: kernel, core, the families, extras, the umbrella, then init.scm.
+#
+# The kernel compiles like any other module — its #:export names the hl--c-*
+# gsubrs, which do not exist until the compositor registers them, but a .go
+# binds those by NAME at load time rather than resolving them now, so no stub is
+# needed here (verified: the shipped kernel.go loads and the host's gsubrs
+# survive it).
+SCM_DIR     = src/config/scheme
+SCM_FAMILIES = core bind config event exec gesture group layer monitor \
+               notification query rule timer window workspace extras
+
+.PHONY: scm-compile
+scm-compile:
+	@GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
+	  guild compile -o $(SCM_DIR)/hyprscheme/kernel.go $(SCM_DIR)/hyprscheme/kernel.scm
+	@for m in $(SCM_FAMILIES); do \
+	  GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
+	    guild compile -o $(SCM_DIR)/hyprscheme/$$m.go $(SCM_DIR)/hyprscheme/$$m.scm || exit 1; \
+	done
+	@GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
+	  guild compile -o $(SCM_DIR)/hyprscheme.go $(SCM_DIR)/hyprscheme.scm
+	@GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
+	  guild compile -o $(SCM_DIR)/init.go $(SCM_DIR)/init.scm
+	@echo "compiled $(words $(SCM_GO)) machinery files"
 
 # ---- hyprpm ----------------------------------------------------------------
 #
@@ -165,10 +211,14 @@ HYPRSCHEME_DATA ?= $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)
 HYPRSCHEME_SCM  := $(HYPRSCHEME_DATA)/hyprscheme/scm
 
 .PHONY: hyprpm-machinery
-hyprpm-machinery:
+hyprpm-machinery: scm-compile
 	@install -d $(HYPRSCHEME_SCM)/hyprscheme
+	@install -m 644 src/config/scheme/init.scm $(HYPRSCHEME_SCM)/
 	@install -m 644 src/config/scheme/hyprscheme.scm $(HYPRSCHEME_SCM)/
 	@install -m 644 src/config/scheme/hyprscheme/*.scm $(HYPRSCHEME_SCM)/hyprscheme/
+	@install -m 644 src/config/scheme/init.go $(HYPRSCHEME_SCM)/
+	@install -m 644 src/config/scheme/hyprscheme.go $(HYPRSCHEME_SCM)/
+	@install -m 644 src/config/scheme/hyprscheme/*.go $(HYPRSCHEME_SCM)/hyprscheme/
 	@echo "machinery installed to $(HYPRSCHEME_SCM)"
 	@echo "(the plugin finds it automatically when nothing is beside the .so)"
 
@@ -182,7 +232,7 @@ hyprpm-clean:
 
 # ---- install ---------------------------------------------------------------
 
-install: $(TARGET)
+install: $(TARGET) scm-compile
 	@if [ -z "$(DESTDIR)" ]; then \
 	    d="$(PREFIX)"; \
 	    while [ ! -e "$$d" ] && [ "$$d" != "/" ]; do d=$$(dirname "$$d"); done; \
@@ -195,8 +245,12 @@ install: $(TARGET)
 	fi
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 src/config/scheme/init.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 src/config/scheme/hyprscheme.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 src/config/scheme/hyprscheme/*.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
+	install -m 644 src/config/scheme/init.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 src/config/scheme/hyprscheme.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 src/config/scheme/hyprscheme/*.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(HYPRLAND_SRC)/build/Hyprland $(DESTDIR)$(PREFIX)/bin/Hyprscheme
 	install -m 755 $(HYPRLAND_SRC)/build/start/start-hyprland $(DESTDIR)$(PREFIX)/bin/start-hyprscheme
@@ -269,6 +323,10 @@ install-local:
 #                 never calls another family
 #   load-check    stubs the C entry points and loads the machinery in a plain
 #                 guile: catches a load-time error with no compositor
+#   compile-lint  COMPILES the machinery in dependency order against a generated
+#                 stub kernel, so `possibly unbound variable` is a warning: the
+#                 only check that sees a name used but never defined inside a
+#                 lambda body, which neither the reader nor load-check can
 #   bind-audit    every hl--c-* the machinery calls is registered, none twice,
 #                 none dead — and nothing is left UNDEFINED IN THE BUILT .so,
 #                 which is how a family object missing from COMMON_OBJS shows up
@@ -281,6 +339,8 @@ check: $(TARGET)
 	@echo "== module-audit"; python3 tools/module-audit.py
 	@echo "== load-check";   guile --no-auto-compile -L src/config/scheme -s tools/load-check.scm >/dev/null 2>&1 \
 	  && echo "ok: the machinery loads" || { echo "load-check FAILED"; exit 1; }
+	@echo "== compile-lint"; guile --no-auto-compile -s tools/compile-lint.scm \
+	  || { echo "compile-lint FAILED"; exit 1; }
 	@echo "== bind-audit";   python3 tools/bind-audit.py
 	@echo "== doc-audit";    python3 tools/doc-audit.py
 	@echo "== doc-exercise"; guile --no-auto-compile -s tools/doc-exercise.scm
@@ -291,8 +351,9 @@ check: $(TARGET)
 
 clean:
 	rm -f $(OBJ) $(DEPS) $(TARGET) $(HYPRPM_OBJS) $(HYPRPM_DEPS)
+	rm -f $(SCM_GO)
 
 distclean: clean
 	rm -rf build
 
-.PHONY: all hyprland install install-local check clean distclean hyprpm-plugin hyprpm-clean hyprpm-machinery
+.PHONY: all hyprland install install-local check clean distclean hyprpm-plugin hyprpm-clean hyprpm-machinery scm-compile

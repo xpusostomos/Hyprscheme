@@ -43,6 +43,9 @@ EXTRAS = 'extras'
 UMBRELLA = 'hyprscheme'
 # the umbrella is not in DIR: it is the file the directory is named after
 UMBRELLA_PATH = 'src/config/scheme/hyprscheme.scm'
+# the ENTRY POINT: the one file the host loads, which loads everything else by
+# name. Every module must be named here or it is never loaded at all.
+ENTRY_PATH = 'src/config/scheme/init.scm'
 # modules allowed to import beyond the kernel + core
 FREE = {KERNEL, CORE, EXTRAS}
 
@@ -155,6 +158,23 @@ def main():
             public |= {n for n in exports_of(read(path)) if is_public(n)}
     for n in sorted(public - exports_of(umbrella, '#:re-export')):
         print('PUBLIC:  %s is exported but does not reach (hyprscheme)' % n)
+        bad = 1
+
+    # EVERY module must be named in init.scm. That file is the only thing the
+    # host loads, and it reaches the rest by name, so a module missing from it
+    # is simply never loaded — with no error anywhere: its `hl-*` names are
+    # unbound at the call site, and load-check cannot see it, because not
+    # loading something is not a load failure. (It is the module-tree analogue
+    # of the family-import rule this tool exists for: silent decay.)
+    entry = read(ENTRY_PATH)
+    # `(hyprscheme x)` names module x; a bare `(hyprscheme)` names the umbrella
+    named = {m.group(1) for m in re.finditer(r"\(hyprscheme ([a-z]+)\)", entry)}
+    for name in sorted(fams):
+        if name not in named:
+            print('ENTRY:   %s is never loaded — init.scm does not name it' % name)
+            bad = 1
+    if not re.search(r"\(hyprscheme\)", entry):
+        print('ENTRY:   (hyprscheme) is never loaded — init.scm does not name it')
         bad = 1
 
     print('%s: %d modules — %d families, plus kernel, core and extras'

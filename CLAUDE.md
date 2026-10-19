@@ -121,6 +121,20 @@ can fix should be fixed before a piece of work is complete.
     was passed through instead of consumed.)
   - `tools/load-check.scm` — stubs the C entry points and loads the
     machinery in a plain `guile`: a load-time error with no compositor.
+  - `tools/compile-lint.scm` — **compiles** the machinery, in dependency
+    order, against a generated stub kernel, so `possibly unbound variable`
+    becomes a warning. It is the only check that sees **a name used but never
+    defined inside a lambda body**: the reader does not resolve names, and
+    load-check only finds one if the form actually runs. (FABLE §4.6 Step F.)
+    Two things make it work, both non-obvious: the stub kernel is generated
+    from the **real kernel's `#:export` list** (363 names — scanning for
+    `hl--c-*` alone misses the ~55 real definitions like `hl--error` and
+    `hl--plist-get`, and every caller of one then reads as a false positive),
+    and a file given on the command line compiles in an environment that
+    **imports the API**, the way the host's generation does, or every `hl-*`
+    in a user's config reads as unbound. Verified to fail both ways: a typo in
+    a lambda body trips it, and removing a name from the kernel's export list
+    reports every caller.
   - `tools/bind-audit.py` — every `hl--c-*` the machinery calls is
     registered, none twice, none dead — and nothing is left undefined in
     the built `.so` (how a family object missing from `COMMON_OBJS` shows
@@ -135,10 +149,10 @@ can fix should be fixed before a piece of work is complete.
     (`DOC_EXERCISE_NOTES=1` shows them) because the stubs answer `#f` where
     the compositor would answer a real value.
   Each has been **verified to fail**: a deliberate cross-family call trips
-  module-audit, an undefined call at load trips load-check, a bad name in
-  the wiki trips doc-audit, a bad name inside a thunk trips doc-exercise.
-  A check that cannot fail is worse than no check — `t-coverage` passed
-  vacuously for its whole life.
+  module-audit, an undefined call at load trips load-check, an unbound name
+  inside a lambda trips compile-lint, a bad name in the wiki trips doc-audit,
+  a bad name inside a thunk trips doc-exercise. A check that cannot fail is
+  worse than no check — `t-coverage` passed vacuously for its whole life.
 
   **`load-check.scm` and the `doc-*` tools build the machinery the way
   `Host.cpp` does, and two things about that are easy to get wrong** (both
@@ -153,7 +167,7 @@ can fix should be fixed before a piece of work is complete.
 
 ## How the plugin loads Scheme
 
-The machinery is **three modules** (no embedded blobs — the `.scm` were
+The machinery is **modules** (no embedded blobs — the `.scm` were
 extracted out of the C++ in Sep 2026), installed next to the `.so`, found
 via `dladdr` on a known symbol — `HYPRSCHEME_SCM_DIR` overrides it for a
 harness testing the tree. **THREE candidates, in a fixed order, and not a
@@ -177,10 +191,61 @@ and refusing to fall through.
    puts it here instead. Absent, the candidate is simply skipped.
 
 A chain would let a test that meant to exercise the tree silently pick up an
-installed copy, or the reverse. **The file paths are the module names** — `(hyprscheme kernel)` must be resolvable as
-`hyprscheme/kernel.scm` — so the machinery directory goes on `%load-path`
-at build time:
+installed copy, or the reverse. **`init.scm` is the marker** the probe looks
+for, because it is the entry point (below).
 
+**ONE FILE IS LOADED: `init.scm`.** The host loads that and nothing else; it
+reaches every other module by name with `use-modules`. Before this, the host
+enumerated all nineteen files itself and loaded each through
+`scm_primitive_load` — a list in C++ to keep in step with the module tree, and
+**no compilation at all**, because the primitive bypasses the Scheme-level
+loader (so `GUILE_AUTO_COMPILE` never applied to the machinery). Loading by
+name puts every module through Guile's own loader, which uses a shipped `.go`
+when there is one and compiles and caches one when there is not. `make
+scm-compile` builds them (in dependency order — a module fails to compile with
+"no code for module" unless its dependency is already a `.go`), and `install`
+ships them **beside** the `.scm`.
+
+**The `.scm` always ship too, and that is not redundancy.** The wipe reloads by
+`reload-module`, which re-reads the SOURCE and cannot work from a `.go` alone
+("Unable to find file k.scm in load path" — verified). The `.go` is a
+first-load accelerator, never a replacement.
+
+**Three things about the loader that are easy to get wrong, all verified:**
+
+- **`use-modules` loads a module once per PROCESS, ever.** A second call for one
+  already loaded is a no-op — so a loader that only called `use-modules` would
+  leave the previous generation's definitions live and silently break the wipe
+  (it did: `hl--watchdog-ms` stayed at a value a test had `set!`, and `t-api`
+  and `t-watchdog` failed with no error logged). `init.scm` therefore calls
+  `reload-module` on every module from the second generation on.
+- **`reload-module` does NOT cascade.** Reloading a module leaves its dependents
+  as they were, so every module is reloaded, in dependency order. The module
+  OBJECT is reused rather than replaced, which is why the gsubrs the host
+  registered into the kernel survive the reload — that is what lets the kernel's
+  `#:export`, which names them, be satisfied on every generation.
+- **`use-modules` is a SYNTAX form** whose arguments must be literal module names
+  at expansion time. A runtime `(use-modules name)` — or an `eval` of one —
+  fails to expand, so no *procedure* can wrap it. A **macro** can, and does:
+  `init.scm`'s `use-or-reload-module` takes the module name as a `syntax-rules`
+  pattern variable and uses it both as a quoted datum (for the `in?` and
+  `resolve-module` lookups) and as the literal name `use-modules` needs. That is
+  why the module list is one line per module rather than three. And the
+  "already loaded?" test must use `resolve-module` with `#:ensure #f`: plain
+  `resolve-module` CREATES an empty module for a name it cannot find, so a naive
+  probe always says yes.
+
+`tools/module-audit.py` checks that every module is named in `init.scm` — a
+module missing from it is simply never loaded, with no error anywhere, and
+load-check cannot see that (not loading something is not a load failure).
+
+**The file paths are the module names** — `(hyprscheme kernel)` must be resolvable as
+`hyprscheme/kernel.scm` — so the machinery directory goes on `%load-path`
+(and `%load-compiled-path`, a SEPARATE list) at build time:
+
+0. `init.scm` → the **entry point**, loaded directly by the host. Names every
+   module below, in this order, and reloads them all on each later generation.
+   It defines no module of its own.
 1. `hyprscheme/kernel.scm` → `(hyprscheme kernel)` — the machinery AND the
    **whole C++ boundary**: error plumbing, the watchdog, the fire trampolines,
    the custom-layout entry points, the record types those read, and every

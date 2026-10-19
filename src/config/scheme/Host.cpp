@@ -761,11 +761,15 @@ namespace Config::Scheme {
                 }
                 return std::string(ov);
             }
+            // init.scm is the marker: it is the one file the host loads, so a
+            // directory without it is not a machinery directory (hyprscheme.scm
+            // would do as a marker too, but this is the entry point and the
+            // thing whose absence actually matters).
             const auto beside = pluginDir();
-            if (!beside.empty() && std::filesystem::exists(beside + "/hyprscheme.scm"))
+            if (!beside.empty() && std::filesystem::exists(beside + "/init.scm"))
                 return beside;
             const auto userLevel = userScmDir();
-            if (!userLevel.empty() && std::filesystem::exists(userLevel + "/hyprscheme.scm"))
+            if (!userLevel.empty() && std::filesystem::exists(userLevel + "/init.scm"))
                 return userLevel;
             // Nothing found. Say so against the location that WOULD have
             // worked, since the fix differs by how the plugin was installed.
@@ -813,10 +817,17 @@ namespace Config::Scheme {
         }
         if (!hl::addLoadPath(scmDir.c_str()))
             LOG(Log::ERR, "[scheme] could not put the machinery on %load-path");
+        // and the compiled path, where `use-modules` looks for a .go. A
+        // separate list from %load-path, and the .go sit BESIDE the .scm, so
+        // the same directory goes on both.
+        if (!hl::addLoadCompiledPath(scmDir.c_str()))
+            LOG(Log::ERR, "[scheme] could not put the machinery on %load-compiled-path");
 
-        // 1. the KERNEL: created first, given its one gsubr, then loaded. Its
-        //    export list is explicit (module-export-all! is not enough — see
-        //    the note there), so the binding must exist before the file is read.
+        // 1. the KERNEL: created first and given the whole C++ surface, then
+        //    left for init.scm to load BY NAME. `use-modules` loads a module
+        //    that already exists rather than replacing it, so the gsubrs
+        //    registered here survive the load — which is what lets the kernel's
+        //    own file, whose #:export names them, be read at all.
         const SCM kernel = hl::makeModule("hyprscheme kernel");
         if (scm_is_false(kernel)) {
             LOG(Log::ERR, "[scheme] could not create the kernel module");
@@ -827,35 +838,19 @@ namespace Config::Scheme {
         // boundary belongs — and its export list names them, hence the order.
         scm_set_current_module(kernel);
         registerAllBindings();
-        if (!hl::loadModule(schemePath("hyprscheme/kernel.scm").c_str())) {
-            LOG(Log::ERR, "[scheme] the kernel failed to load");
-            scm_set_current_module(prevModule);
-            return false;
-        }
 
-        // 2. the modules that hold the API: (hyprscheme core) is the shared
-        //    plumbing, one module per family is the raw API, and extras holds
-        //    the few conveniences that compose several calls. Each imports the
-        //    kernel (and core); none imports another family except extras.
-        static const char* kApiModules[] = {
-            "hyprscheme/core.scm", "hyprscheme/bind.scm", "hyprscheme/config.scm",
-            "hyprscheme/event.scm", "hyprscheme/exec.scm", "hyprscheme/gesture.scm",
-            "hyprscheme/group.scm", "hyprscheme/layer.scm", "hyprscheme/monitor.scm",
-            "hyprscheme/notification.scm", "hyprscheme/query.scm", "hyprscheme/rule.scm",
-            "hyprscheme/timer.scm", "hyprscheme/window.scm", "hyprscheme/workspace.scm",
-            "hyprscheme/extras.scm",
-        };
-        for (const char* rel : kApiModules) {
-            if (!hl::loadModule(schemePath(rel).c_str())) {
-                LOG(Log::ERR, "[scheme] {} failed to load", rel);
-                scm_set_current_module(prevModule);
-                return false;
-            }
-        }
-
-        // 3. the curated public umbrella over them
-        if (!hl::loadModule(schemePath("hyprscheme.scm").c_str())) {
-            LOG(Log::ERR, "[scheme] the public API umbrella failed to load");
+        // 2. ONE FILE loads everything else. init.scm `use-modules`es the kernel,
+        //    core, the families, extras and the umbrella, so each module is
+        //    loaded exactly once, by name, in dependency order — and, being
+        //    loaded by name rather than by path, through Guile's own loader,
+        //    which finds a shipped .go or compiles and caches one.
+        //
+        //    The host used to enumerate all nineteen files here and load each
+        //    through scm_primitive_load: a list in C++ that had to be kept in
+        //    step with the module tree, and no compilation at all, since the
+        //    primitive bypasses the Scheme-level loader.
+        if (!hl::evalFile(schemePath("init.scm").c_str())) {
+            LOG(Log::ERR, "[scheme] init.scm failed to load");
             scm_set_current_module(prevModule);
             return false;
         }

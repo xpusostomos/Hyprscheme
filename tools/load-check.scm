@@ -97,31 +97,38 @@
 
 (let* ((dir (machinery-dir))
        (kernel (string-append dir "/hyprscheme/kernel.scm"))
-       (api    (map (lambda (m) (string-append dir "/hyprscheme/" m ".scm"))
-                    (list "core" "bind" "config" "event" "exec" "gesture" "group"
-                          "layer" "monitor" "notification" "query" "rule" "timer"
-                          "window" "workspace" "extras")))
-       (pub    (string-append dir "/hyprscheme.scm")))
-  ;; the host's order (Host.cpp buildGeneration): create each module, define its
-  ;; bindings into it, THEN read its file — the export lists are explicit and
-  ;; name bindings that do not come from the file, so they must exist first
+       (entry  (string-append dir "/init.scm"))
+       ;; every .scm the machinery is made of, for the stub scan: the entry
+       ;; point, the umbrella, and the modules under hyprscheme/
+       (all    (cons entry
+                     (cons (string-append dir "/hyprscheme.scm")
+                           (map (lambda (m) (string-append dir "/hyprscheme/" m ".scm"))
+                                (list "kernel" "core" "bind" "config" "event" "exec"
+                                      "gesture" "group" "layer" "monitor"
+                                      "notification" "query" "rule" "timer"
+                                      "window" "workspace" "extras"))))))
+  ;; THE HOST'S ACTUAL SEQUENCE (Host.cpp buildGeneration), which is now short:
+  ;;   1. the machinery directory on %load-path and %load-compiled-path
+  ;;   2. create the kernel module and register the gsubrs into it — the stubs
+  ;;      go in the KERNEL, where the host puts the real ones, and BEFORE the
+  ;;      kernel is read, so its #:export can name them. Stubbed anywhere else
+  ;;      the kernel's own hl--c-* placeholders stay unassigned and every call
+  ;;      through one is an unbound variable — a class of error this check then
+  ;;      could not see.
+  ;;   3. load init.scm, which `use-modules`es everything else by name.
+  ;;
+  ;; This used to reimplement steps 2-3 by loading all nineteen files itself,
+  ;; which meant it could not catch a fault in init.scm — the file the host
+  ;; actually loads. Now it loads the same file the host does.
+  (set! %load-path (cons dir %load-path))
+  (set! %load-compiled-path (cons dir %load-compiled-path))
+
   (resolve-module '(hyprscheme kernel))
   (set-current-module (resolve-module '(hyprscheme kernel)))
   (module-define! (current-module) 'hl--c-generation (lambda () #f))
-  ;; the stubs go in the KERNEL, where the host puts the real ones
-  ;; (Host.cpp: registerAllBindings() while the kernel is current), and BEFORE
-  ;; the kernel is read so its #:export can name them. Stubbed into
-  ;; (hyprscheme api) instead — as this did — the kernel's own hl--c-*
-  ;; placeholders stay unassigned and every call through one is an unbound
-  ;; variable, which is a class of error this check then could not see.
-  (stub-c-entry-points (cons kernel api))
-  (load-reporting kernel)
+  (stub-c-entry-points all)
 
-  (resolve-module '(hyprscheme api))
-  (set-current-module (resolve-module '(hyprscheme api)))
-  (for-each load-reporting api)
-
-  (load-reporting pub)
+  (load-reporting entry)
   ;; the host sets this once every module is in (see Host.cpp)
   (module-set! (resolve-module '(hyprscheme kernel)) 'hl--ready #t)
 

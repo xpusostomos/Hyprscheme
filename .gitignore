@@ -4,5 +4,6 @@ build/
 *.so
 *.a
 *.boot
+*.go
 \#*
 *~

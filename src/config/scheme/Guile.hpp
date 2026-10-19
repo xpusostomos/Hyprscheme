@@ -44,6 +44,10 @@ namespace hl {
     SCM  makeModule(const char* name);
     // prepend DIR to %load-path (the modules resolve each other by name)
     bool addLoadPath(const char* dir);
+    // prepend DIR to %load-compiled-path — where `use-modules` finds a .go. A
+    // SEPARATE list from %load-path: a directory on one is not searched on the
+    // other, so both need it when the .go sit beside the .scm
+    bool addLoadCompiledPath(const char* dir);
     // set a variable in a named module, contained
     bool setModuleVariable(SCM module, const char* name, SCM value);
     // export every local binding of a module (the kernel, after registration)

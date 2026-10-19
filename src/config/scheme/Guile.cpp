@@ -52,9 +52,23 @@ namespace hl {
     }
 
     void init() {
-        // no auto-compilation inside the compositor: deterministic startup, no
-        // ~/.cache/guile writes (must be set before scm_init_guile)
-        setenv("GUILE_AUTO_COMPILE", "0", 0);
+        // GUILE_AUTO_COMPILE is deliberately NOT set here, and must not be.
+        //
+        // It used to be `setenv("GUILE_AUTO_COMPILE", "0", 0)` — to keep the
+        // compositor's startup deterministic and stop the plugin writing to
+        // ~/.cache. But setenv mutates the LIVE process environment, and the
+        // compositor is the ancestor of everything the user launches: every
+        // process started after the plugin loaded inherited it. That is not a
+        // subtle leak — it turned auto-compilation off for every Guile program
+        // on the machine, for the whole session, including ones that have
+        // nothing to do with Hyprscheme. Found via `GUILE_AUTO_COMPILE=0` in a
+        // terminal, in a shell that had never been told any such thing.
+        //
+        // If auto-compilation ever needs suppressing for OUR interpreter alone,
+        // set the Scheme variable `%load-should-auto-compile` to #f — that is
+        // the variable the environment variable is read into at init, and it is
+        // what `--no-auto-compile` sets. It is scoped to this interpreter and
+        // touches no global state.
         scm_init_guile();
 
         // handles are finalized by the machinery on the compositor's thread,
@@ -158,9 +172,18 @@ namespace hl {
         return scm_c_catch(SCM_BOOL_T, freshModuleThunk, NULL, freshModuleHandler, NULL, NULL, NULL);
     }
 
-    static SCM addLoadPathThunk(void* d) {
-        SCM var = scm_c_lookup("%load-path");
-        scm_variable_set_x(var, scm_cons(scm_from_utf8_string((const char*)d), scm_variable_ref(var)));
+    // which path variable to prepend to, and what to prepend. A struct rather
+    // than a capture because the thunk is a plain C function pointer.
+    struct PathSpec {
+        const char* var;
+        const char* dir;
+    };
+
+    static SCM addPathThunk(void* d) {
+        // the struct carries which variable to prepend to; see addLoadPath
+        const auto* spec = (const PathSpec*)d;
+        SCM         var  = scm_c_lookup(spec->var);
+        scm_variable_set_x(var, scm_cons(scm_from_utf8_string(spec->dir), scm_variable_ref(var)));
         return SCM_BOOL_T;
     }
 
@@ -168,7 +191,18 @@ namespace hl {
         // contained: an exception escaping into C++ corrupts the compositor
         // heap (observed — an uncaught Scheme error here took the process out
         // with "corrupted size vs. prev_size")
-        return scm_is_true(scm_c_catch(SCM_BOOL_T, addLoadPathThunk, (void*)dir, callHandler, NULL, NULL, NULL));
+        const PathSpec spec{"%load-path", dir};
+        return scm_is_true(scm_c_catch(SCM_BOOL_T, addPathThunk, (void*)&spec, callHandler, NULL, NULL, NULL));
+    }
+
+    bool addLoadCompiledPath(const char* dir) {
+        // %load-compiled-path is where `use-modules` looks for a .go, and it is
+        // a SEPARATE list from %load-path — a directory on one is not searched
+        // on the other. `guild` has no -C, so setting the variable is the way
+        // in. Shipped machinery puts the .go beside each .scm, so this is
+        // normally the SAME directory as addLoadPath's.
+        const PathSpec spec{"%load-compiled-path", dir};
+        return scm_is_true(scm_c_catch(SCM_BOOL_T, addPathThunk, (void*)&spec, callHandler, NULL, NULL, NULL));
     }
 
     static SCM lookupThunk(void* d) {
