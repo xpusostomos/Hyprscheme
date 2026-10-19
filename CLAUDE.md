@@ -3,7 +3,10 @@
 Hyprscheme embeds Guile Scheme inside Hyprland as a loadable plugin
 (`scheme-plugin-guile.so`). The original Chez backend is DEPRECATED:
 frozen in `chez/` (see `chez/README.md`), still buildable there, no
-longer developed — don't evolve it. Configs are `~/.config/hypr/hyprland.scm`; the
+longer developed — don't evolve it. Configs are `hypr/hyprland.scm`, found
+by the **same XDG search the compositor uses for its own config**
+(`XDG_CONFIG_HOME` base → each `XDG_CONFIG_DIRS` entry → `/etc/xdg`, always
+under `hypr/`; `HYPRSCHEME_CONFIG` overrides the whole thing); the
 companion Lua config (`hyprland.lua`) loads the plugin. The design
 target is parity with upstream Hyprland's Lua scripting API — every
 Lua feature has a `hl-*` equivalent.
@@ -77,6 +80,30 @@ can fix should be fixed before a piece of work is complete.
   Hyprland + the Guile plugin (installs via the Makefile's DESTDIR
   rule) and ships the matched compositor as `hyprland-scheme`. The
   frozen Chez variant lives at `chez/packaging/PKGBUILD`.
+- **hyprpm** — the second way to build/load the plugin, for users who want
+  it alongside other hyprpm plugins instead of a whole matched compositor.
+  `hyprpm.toml` is the manifest; `make hyprpm-plugin` and
+  `make hyprpm-machinery` are its two build steps. Three things about it
+  are non-obvious and each cost real time:
+  - **Never run hyprpm under sudo.** It refuses outright
+    (`PluginManager.cpp`, `isSuperuser()` → `Debug::die("Don't run hyprpm
+    as a superuser.")`) and escalates internally by polkit only to create
+    `/var/cache/hyprpm`. Running it as root is not a workaround; it is the
+    error.
+  - **The build is against hyprpm's headers, not the tree.** hyprpm clones
+    Hyprland at the running commit, builds it, and points `PKG_CONFIG_PATH`
+    at its own cache, so `hyprpm-plugin` takes its includes from
+    `pkg-config --cflags hyprland` — deliberately a *separate target* from
+    plain `make`, whose includes come from `HYPRLAND_SRC`. Mixing the two
+    include sources is the mismatch this repo exists to avoid, so they must
+    never be merged.
+  - **hyprpm installs exactly ONE file per plugin** — always `<name>.so`, to
+    a root-owned cache (`/var/cache/hyprpm/<user>/<name>/`), and deletes the
+    build tree afterwards. So the machinery cannot go beside the `.so`; that
+    is what `hyprpm-machinery` (and `schemeDir()`'s third candidate) exist
+    for. `hyprpm enable` also does **not** survive a restart: nothing loads
+    hyprpm plugins at compositor startup, so `hyprpm reload` has to run at
+    session start.
 - **`make` runs the lints** (`all: $(TARGET) check`), so they are not
   optional:
   - `tools/syntax-check.scm` — Guile's own reader over every machinery
@@ -129,15 +156,28 @@ can fix should be fixed before a piece of work is complete.
 The machinery is **three modules** (no embedded blobs — the `.scm` were
 extracted out of the C++ in Sep 2026), installed next to the `.so`, found
 via `dladdr` on a known symbol — `HYPRSCHEME_SCM_DIR` overrides it for a
-harness testing the tree. **TWO candidates, deliberately not a search
-chain** (`schemeDir()`, Host.cpp): named, the override is used and only it
-(refused outright if the directory does not exist, so a typo'd harness
-cannot silently run an installed copy); unnamed, the machinery is wherever
-the `.so` was loaded from, which is where `make install` puts it — no
-compiled-in path, because `DESTDIR` is a staging prefix that is copied out
-at package time and would name a build-machine directory. A chain would let
-a test that meant to exercise the tree silently pick up an installed copy,
-or the reverse. **The file paths are the module names** — `(hyprscheme kernel)` must be resolvable as
+harness testing the tree. **THREE candidates, in a fixed order, and not a
+search in the sense that matters** (`schemeDir()`, Host.cpp): each step is
+a definite answer rather than a guess between plausible places, and the one
+ambiguity worth avoiding is handled by the first candidate being explicit
+and refusing to fall through.
+
+1. `HYPRSCHEME_SCM_DIR` — a harness naming the tree it means to test. Named
+   and missing is a **broken harness**: refuse loudly rather than quietly
+   run something else (the exact failure the override exists to prevent).
+2. **Beside the `.so`** — where `make install` puts it. No compiled-in path,
+   because `DESTDIR` is a staging prefix copied out at package time and
+   would name a build-machine directory; `pluginDir()` is that same
+   directory *as installed*, and follows the `.so`.
+3. **`~/.local/share/hyprscheme/scm`** (honouring `XDG_DATA_HOME`, per the
+   spec: a relative or empty value is invalid and ignored) — the one case
+   the other two cannot serve, a **hyprpm** build: hyprpm installs only the
+   `.so` (one file per plugin, into a root-owned cache dir) and deletes its
+   build tree, so the machinery cannot go beside it. `make hyprpm-machinery`
+   puts it here instead. Absent, the candidate is simply skipped.
+
+A chain would let a test that meant to exercise the tree silently pick up an
+installed copy, or the reverse. **The file paths are the module names** — `(hyprscheme kernel)` must be resolvable as
 `hyprscheme/kernel.scm` — so the machinery directory goes on `%load-path`
 at build time:
 
@@ -407,7 +447,7 @@ the custom-layout entry points. `Handles.*` is the object model,
   a lint must never resolve — let alone read or run — the real config. This is
   the same rule as never touching `~/.config/`, one level down: a tool that
   inherits the ambient environment is a tool that pokes the user's config.
-- `tests/run.sh` — the 14-file suite against a nested compositor, 14/14
+- `tests/run.sh` — the 15-file suite against a nested compositor, 15/15
   green is the bar. It tests the **tree, pre-install**: the compositor is
   `../Hyprland/build/Hyprland` (never an installed one — testing what is
   installed is a different question), the plugin is this directory's
@@ -429,6 +469,14 @@ the custom-layout entry points. `Handles.*` is the object model,
   real data; two were found that way in one pass. Verified to fail by injecting
   a window-open callback that closes its window with a stray argument: every
   other tier passed it, and the log check named the error.
+  `t-zzz-configpath.sh` is the one test that **launches its own compositors**,
+  because the config path is resolved once at plugin load and the suite's
+  compositor cannot be reconfigured for it. It unsets `HYPRSCHEME_CONFIG`
+  (which run.sh exports) so the default XDG search is actually exercised, and
+  covers the three cases that matter: the `XDG_CONFIG_HOME` config, a config
+  found only through `XDG_CONFIG_DIRS` (with invalid entries skipped), and a
+  user config shadowing a system one. Verified to fail by disabling the
+  `XDG_CONFIG_DIRS` walk in `userConfigPath`.
   `t-zzz-monitors.sh` is the one test that changes the *monitor topology*:
   it creates a headless output and moves the primary off the origin, because
   every other test runs on a single output at (0,0) where a layout's
@@ -506,5 +554,4 @@ in the wiki's building-the-plugin page.
   lists. (The balance checker is the reader check in `wiki-examples.awk`.)
 - Interactive REPL.
 - Event self-removal-during-fire test.
-- Working tree uncommitted since around `3c0184b` — commit when Chris
-  says so, never before (he does the committing).
+- Chris does the committing — never commit unprompted.

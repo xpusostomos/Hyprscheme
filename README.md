@@ -17,10 +17,11 @@ The semantics of the scheme configuration has the same semantics as the
 Lua in that when hyprland reloads its config, everything starts from a clean
 slate.
 
-It looks for an init file in:
-* $XDG_CONFIG_HOME/hyprscheme/init.scm
-* $HOME/.config/hyprscheme/init.scm
-* $HOME/.hyprscheme
+The Scheme config is `hyprland.scm`, beside the `hyprland.lua` that loads
+the plugin. It is found the same way Hyprland finds its own config: the
+`$XDG_CONFIG_HOME` base (or `$HOME/.config` when that is unset), then each
+`$XDG_CONFIG_DIRS` entry, then `/etc/xdg` — always under `hypr/`.
+`HYPRSCHEME_CONFIG` overrides the whole search.
 
 Guile Scheme scripting for [Hyprland](https://hypr.land), as a loadable
 plugin. Write your window management logic — keybinds, layouts, timers,
@@ -127,6 +128,39 @@ Everything builds **in place** — no copies, no staging:
 
 See the wiki's [[building-the-plugin]] page for the full story (or
 `packaging/PKGBUILD` for an all-in-one package build).
+
+## Installing through hyprpm
+
+There are two ways to get the plugin running. The one above installs a
+whole matched compositor, which is the safest. The other is
+[hyprpm](https://wiki.hypr.land/Plugins/Using-Plugins/), Hyprland's own
+plugin manager — worth using if you already run other plugins through it,
+since a hyprpm plugin loads into your existing compositor and coexists with
+them:
+
+```sh
+hyprpm add file:///path/to/Hyprscheme    # a local checkout is fine
+hyprpm enable hyprscheme
+hyprpm reload                            # load it now
+```
+
+**Do not run hyprpm under `sudo`** — it refuses to run as root, and
+escalates on its own (via polkit) for the one thing that needs it.
+
+hyprpm clones Hyprland at your running compositor's commit, builds it, and
+compiles the plugin against **those** headers, so the result always matches
+the compositor you are running. It installs exactly one file per plugin —
+the `.so` — into its own cache, and throws the build tree away afterwards,
+so the Scheme machinery is installed separately to
+`~/.local/share/hyprscheme/scm/` by the second build step. The plugin finds
+it there automatically.
+
+Two caveats. `hyprpm enable` does not survive a restart — nothing loads
+hyprpm plugins at compositor startup — so put `hyprpm reload` in your
+Hyprland config's startup, or run it after logging in. And a hyprpm build
+follows your running Hyprland, which may be older than the commit this
+plugin targets; a build against a release the plugin has not caught up with
+will fail loudly rather than misbehave.
 
 ## Version matching
 

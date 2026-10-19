@@ -1,5 +1,6 @@
 build/
 *.o
+*.d
 *.so
 *.a
 *.boot

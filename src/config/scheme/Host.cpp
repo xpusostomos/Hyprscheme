@@ -465,16 +465,52 @@ namespace Config::Scheme {
         if (const char* overridePath = getenv("HYPRSCHEME_CONFIG"); overridePath && *overridePath)
             return overridePath;
 
-        const char* cfg = getenv("XDG_CONFIG_HOME");
-        std::string base;
-        if (cfg && *cfg)
-            base = cfg;
+        // Otherwise the SAME search the compositor makes for its own config,
+        // so the scheme config is found wherever the lua config beside it is
+        // (Jeremy::getMainConfigPath → Hyprutils::Path::findConfig): the
+        // XDG_CONFIG_HOME base, then each XDG_CONFIG_DIRS entry, then
+        // /etc/xdg. XDG_CONFIG_HOME unset or empty is not "no config" — the
+        // spec says fall back to $HOME/.config, and a relative value is
+        // invalid and ignored the same way.
+        //
+        // The file NAME is still ours (hyprland.scm, beside hyprland.lua),
+        // and only the base varies: the search walks bases, not filenames.
+        std::vector<std::string> bases;
+
+        const char* xdgHome = getenv("XDG_CONFIG_HOME");
+        if (xdgHome && *xdgHome && xdgHome[0] == '/')
+            bases.emplace_back(xdgHome);
         else if (const char* home = getenv("HOME"); home && *home)
-            base = std::string(home) + "/.config";
-        else
+            bases.emplace_back(std::string(home) + "/.config");
+
+        // XDG_CONFIG_DIRS is a colon-separated list, searched in order; empty
+        // or relative entries are invalid per the spec and skipped. Defaults
+        // to /etc/xdg when unset.
+        bool sawDirs = false;
+        if (const char* dirs = getenv("XDG_CONFIG_DIRS"); dirs && *dirs) {
+            std::stringstream ss(dirs);
+            std::string       entry;
+            while (std::getline(ss, entry, ':')) {
+                if (!entry.empty() && entry[0] == '/') {
+                    bases.emplace_back(entry);
+                    sawDirs = true;
+                }
+            }
+        }
+        if (!sawDirs)
+            bases.emplace_back("/etc/xdg");
+
+        if (bases.empty())
             return {};
 
-        return base + "/hypr/hyprland.scm";
+        // first base that actually has the file; else the first base, so the
+        // "no config file at <path>" log names the place to create one
+        for (const auto& base : bases) {
+            const auto candidate = base + "/hypr/hyprland.scm";
+            if (std::filesystem::exists(candidate))
+                return candidate;
+        }
+        return bases.front() + "/hypr/hyprland.scm";
     }
 
     // reimplements Compositor.cpp's handleUnrecoverableSignal using the

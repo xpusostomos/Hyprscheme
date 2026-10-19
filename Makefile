@@ -96,10 +96,10 @@ $(TARGET): $(COMMON_OBJS) $(HOST_GUILE) $(HYPRLAND_SRC)/build/Hyprland
 	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(LIBS) $(GUILIBS)
 
 src/plugin-main.o: plugin-main.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 # ---- hyprpm ----------------------------------------------------------------
 #
@@ -124,6 +124,13 @@ src/plugin-main.o: plugin-main.cpp
 # .o→.cpp mapping produces a path that does not exist.
 HYPRPM_SRCS := plugin-main.cpp $(filter-out src/plugin-main.cpp,$(COMMON_OBJS:.o=.cpp)) $(HOST_GUILE:.o=.cpp)
 HYPRPM_OBJS := $(HYPRPM_SRCS:.cpp=.hyprpm.o)
+HYPRPM_DEPS := $(HYPRPM_OBJS:.o=.d)
+
+# header dependencies, so a changed header rebuilds what includes it. Without
+# this a stale object survives an edit to a header it reads — which is how an
+# "API version mismatch" and a stale Host.o both happened: the .cpp had not
+# changed, so make saw nothing to do.
+DEPS := $(OBJ:.o=.d)
 
 .PHONY: hyprpm-plugin
 hyprpm-plugin: hyprpm-clean
@@ -139,7 +146,7 @@ hyprpm-plugin: hyprpm-clean
 	for src in $(HYPRPM_SRCS); do \
 	    $(CXX) $(CXXFLAGS) -DHYPRLAND_VERSION="\"$$ver\"" $$pc -Isrc/config/scheme \
 	        `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils` \
-	        `pkg-config --cflags guile-3.0` -c "$$src" -o "$${src%.cpp}.hyprpm.o" || exit 1; \
+	        `pkg-config --cflags guile-3.0` -MMD -MP -c "$$src" -o "$${src%.cpp}.hyprpm.o" || exit 1; \
 	done; \
 	$(CXX) -shared -fPIC -o $(TARGET) $(HYPRPM_OBJS) $(LIBS) $(GUILIBS) || exit 1; \
 	echo "built $(TARGET) for hyprpm"
@@ -170,7 +177,7 @@ hyprpm-machinery:
 # `make` mistake them for the tree's, or vice versa
 .PHONY: hyprpm-clean
 hyprpm-clean:
-	@rm -f $(HYPRPM_OBJS)
+	@rm -f $(HYPRPM_OBJS) $(HYPRPM_DEPS)
 	@rm -f $(TARGET).hyprpm
 
 # ---- install ---------------------------------------------------------------
@@ -278,8 +285,12 @@ check: $(TARGET)
 	@echo "== doc-audit";    python3 tools/doc-audit.py
 	@echo "== doc-exercise"; guile --no-auto-compile -s tools/doc-exercise.scm
 
+# the generated header dependencies (-MMD). -include, not include: on a
+# fresh tree the files do not exist yet, and that is not an error.
+-include $(DEPS) $(HYPRPM_DEPS)
+
 clean:
-	rm -f $(OBJ) $(TARGET) $(HYPRPM_OBJS)
+	rm -f $(OBJ) $(DEPS) $(TARGET) $(HYPRPM_OBJS) $(HYPRPM_DEPS)
 
 distclean: clean
 	rm -rf build
