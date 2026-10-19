@@ -129,7 +129,16 @@ src/plugin-main.o: plugin-main.cpp
 # binds those by NAME at load time rather than resolving them now, so no stub is
 # needed here (verified: the shipped kernel.go loads and the host's gsubrs
 # survive it).
-SCM_DIR     = src/config/scheme
+# ABSOLUTE, via $(CURDIR), and that is not tidiness. These paths go into
+# GUILE_LOAD_PATH, and a RELATIVE entry in a load path resolves against the
+# CURRENT directory — so `make hyprpm-machinery` run from anywhere but the repo
+# root could not resolve `(hyprscheme kernel)` and `guild compile` died on the
+# first file with "Unable to find file ... in load path", aborting the whole
+# target before a single `install` ran. hyprpm runs build steps with its own
+# `cd` (into its cache dir), so that was every hyprpm build: the machinery was
+# never installed and hyprpm still reported success (it checks only that the
+# declared output exists, never a step's exit status).
+SCM_DIR     = $(CURDIR)/src/config/scheme
 SCM_FAMILIES = core bind config event exec gesture group layer monitor \
                notification query rule timer window workspace extras
 
