@@ -55,7 +55,7 @@ $SCHEME '(begin (hl-window-workspace-set! (hl-window-from "class:^snippet-win$")
 val '(length (hl-workspace-windows "special:minimized"))' '0'
 
 # first press: minimize
-ok "(run-snippet-thunk \"$MIN\" \"s-X\")"
+ok "(run-snippet-thunk \"$MIN\" \"s-x\")"
 WAIT_FOR 10 '(> (length (hl-workspace-windows "special:minimized")) 0)' >/dev/null \
   || { echo "FAIL: the minimize snippet did not park the window"; FAILED=1; }
 ok '(> (length (hl-workspace-windows "special:minimized")) 0)'
@@ -64,7 +64,7 @@ ok '(let ((w (car (hl-workspace-windows "special:minimized"))))
        (and (member "minimized" (hl-window-tags w)) #t))'
 
 # second press: restore
-ok "(run-snippet-thunk \"$MIN\" \"s-X\")"
+ok "(run-snippet-thunk \"$MIN\" \"s-x\")"
 WAIT_FOR 10 '(= (length (hl-workspace-windows "special:minimized")) 0)' >/dev/null \
   || { echo "FAIL: the restore half did not bring the window back"; FAILED=1; }
 ok '(= (length (hl-workspace-windows "special:minimized")) 0)'
@@ -87,9 +87,9 @@ ok "(run-snippet-thunk \"$ZOOM\" \"s-MINUS\")"
 ok '(= (hl-config-get "cursor:zoom_factor") 1)'
 
 # the toggle: at the minimum it jumps to the toggle factor
-ok "(run-snippet-thunk \"$ZOOM\" \"s-Z\")"
+ok "(run-snippet-thunk \"$ZOOM\" \"s-z\")"
 ok '(= (hl-config-get "cursor:zoom_factor") 1.5)'
-ok "(run-snippet-thunk \"$ZOOM\" \"s-Z\")"
+ok "(run-snippet-thunk \"$ZOOM\" \"s-z\")"
 ok '(= (hl-config-get "cursor:zoom_factor") 1)'
 
 # ---- "Events": a callback and the type of what it is handed ----------------

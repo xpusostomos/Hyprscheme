@@ -18,6 +18,7 @@
   #:use-module (hyprscheme bind)
   #:use-module (hyprscheme config)
   #:use-module (hyprscheme core)
+  #:use-module (hyprscheme emacs-keymaps)
   #:use-module (hyprscheme event)
   #:use-module (hyprscheme exec)
   #:use-module (hyprscheme extras)
@@ -35,7 +36,8 @@
   #:re-export (
     hl-active-monitor hl-active-special-workspace hl-active-title
     hl-active-window hl-active-workspace hl-after hl-animation-add!
-    hl-bind-add! hl-bind-thunk hl-bind-tokens hl-bind? hl-box hl-box-h
+    hl-bind-add! hl-bind-enabled-set! hl-bind-enabled? hl-bind-thunk
+    hl-bind-tokens hl-bind? hl-box hl-box-h
     hl-box-w hl-box-x hl-box-y hl-clear-crashed-lockscreen!
     hl-config-add! hl-config-get
     hl-config-props-refreshed-notification-add! hl-config-reload!
@@ -47,11 +49,13 @@
     hl-focus-direction-set! hl-focus-last! hl-focus-urgent!
     hl-force-idle! hl-force-renderer-reload! hl-gesture-action?
     hl-gesture-add! hl-gesture-remove! hl-gesture? hl-global!
+    define-key! global-set-key!
     hl-group-add! hl-group-alive? hl-group-current hl-group-current-index
     hl-group-cycle! hl-group-denied? hl-group-locked? hl-group-members
     hl-group-remove! hl-group-size hl-group-window-active!
     hl-group-window-move-next! hl-group=? hl-group? hl-groups-lock-set!
-    hl-groups-locked? hl-is-key-down hl-kbd hl-key
+    hl-groups-locked? hl-is-key-down hl-kbd hl-key hl-key-description
+    hl-key-logical-to-physical hl-key-physical-to-logical hl-key-regularise
     hl-keyboard-key-notification-add! hl-last-window hl-last-workspace
     hl-layer-above-fullscreen? hl-layer-address hl-layer-alive?
     hl-layer-close-notification-add! hl-layer-kb-interactivity
@@ -92,7 +96,7 @@
     hl-rule-enabled? hl-rule? hl-screenshare-state-notification-add!
     hl-shutdown-notification-add! hl-start-notification-add!
     hl-state-keys hl-state-ref hl-state-remove! hl-state-set! hl-submap
-    hl-submap-activate! hl-submap-exit! hl-submap-notification-add!
+    hl-submap! hl-submap-activate! hl-submap-exit! hl-submap-notification-add!
     hl-timer-cancel! hl-timer-enabled-set! hl-timer-enabled?
     hl-timer-set-timeout hl-timer? hl-unbind! hl-unbind-key!
     hl-urgent-window hl-version hl-window-accepts-input?

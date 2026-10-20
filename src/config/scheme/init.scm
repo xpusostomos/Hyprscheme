@@ -98,4 +98,5 @@
                       (hyprscheme workspace))
 
 (use-or-reload-modules (hyprscheme extras)
+                      (hyprscheme emacs-keymaps)
                       (hyprscheme))

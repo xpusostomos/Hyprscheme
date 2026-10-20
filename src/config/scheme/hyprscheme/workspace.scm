@@ -82,9 +82,10 @@
    (hl-workspace-rule-add! \"3\" #:monitor \"DP-1\" #:layout \"master\").
    #:enabled toggles the rule (a rule is enabled unless you pass
    #:enabled #f). Fields as keywords: monitor default persistent
-   gaps_in gaps_out float_gaps border_size no_border no_rounding
-   decorate no_shadow on_created_empty default_name layout animation
-   layout_opts."
+   gaps-in gaps-out float-gaps border-size no-border no-rounding
+   decorate no-shadow on-created-empty default-name layout animation
+   layout-opts. Scheme spells these with dashes; the compositor's own
+   underscore spelling is accepted too."
   (let ((spec (map (lambda (x) (if (keyword? x) (keyword->symbol x) x)) fields)))
     (if (not (= 0 (hl--c-workspace-rule-begin (hl--ws-arg ws)
                 (if (hl--plist-get spec 'enabled #t) 1 0))))
@@ -96,7 +97,9 @@
                      (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error))))
                 (else
                  (let* ((tail (hl--plist-cdr rest))
-                        (k  (hl--str (car rest)))
+                        ;; the compositor's spelling, so the field names
+                        ;; below and the C++ lookups agree with the keyword
+                        (k  (hl--hyprland-name (hl--str (car rest))))
                         (v  (car tail)))
                    (cond ((member k (list "workspace" "enabled"))
                           (loop (cdr tail)))
@@ -107,7 +110,7 @@
                                    (let* ((otail (hl--plist-cdr o))
                                           (sv (hl--rule-spec-value (car otail))))
                                      (if (not sv)
-                                         (hl--error 'hl-workspace-rule-add! "bad layout_opts value")
+                                         (hl--error 'hl-workspace-rule-add! "bad layout-opts value")
                                          (if (= 0 (hl--c-workspace-rule-layout-opt (hl--str (car o)) sv))
                                              (oloop (cdr otail))
                                              (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error)))))))))

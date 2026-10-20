@@ -208,7 +208,7 @@ namespace Config::Scheme {
                 return -1;
             }
             const std::string effect = schemeDatumToStr(scm_car(l));
-            const auto        e      = Desktop::Rule::windowEffects()->get(std::string_view(effect));
+            const auto        e      = Desktop::Rule::windowEffects()->get(hyprlandName(effect));
             if (!e) {
                 g_configError = std::format("hl-exec!: unknown rule effect '{}'", effect);
                 return -1;

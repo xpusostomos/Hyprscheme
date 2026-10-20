@@ -23,11 +23,70 @@ ok '(pair? (hl-kbd "C-M-a"))'
 val '(car (hl-kbd "RET"))' '"Return"'
 val '(list-ref (hl-key "SUPER+SHIFT+Q") 2)' '"Q"'
 # the terminal slot is the KEY even when it spells like a modifier letter;
-# a TRAILING DASH makes the spec a pure modifier list
-val '(hl-kbd "s-M")' '("SUPER" "M")'
+# a TRAILING DASH makes the spec a pure modifier list.
+# "M" is UPPER CASE, so it is the character M — shift+m — which is what emacs
+# means by it; the physical form Hyprland needs is therefore SHIFT plus "m".
+val '(hl-kbd "s-M")' '("SUPER" "SHIFT" "m")'
+val '(hl-kbd "s-m")' '("SUPER" "m")'
 val '(hl-kbd "C-M-")' '("CTRL" "ALT")'
 val '(hl-key "CTRL+ALT")' '("CTRL" "ALT")'
 val '(hl-key "SUPER")' '("SUPER")'
+
+# ---- hl-key-regularise: the canonical form of one chord ---------------------
+# Every spelling of the same chord must collapse to ONE list, because a key
+# SEQUENCE's submap is keyed on it: "MOD1+x" and "M-x" that did not collapse
+# would build two different submaps and the prefix would silently fail to
+# chain. Modifier aliases are Hyprland's tables and the key's case is xkb's,
+# so this is not something a caller could reproduce by sorting.
+val '(hl-key-regularise (quote ("MOD1" "x")))' '("ALT" "x")'
+val '(hl-key-regularise (quote ("META" "Q")))' '("SUPER" "q")'
+val '(hl-key-regularise (quote ("CONTROL" "X")))' '("CTRL" "x")'
+# order does not matter — the canonical order is fixed
+val '(hl-key-regularise (quote ("x" "CTRL")))' '("CTRL" "x")'
+val '(hl-key-regularise (quote ("ALT" "CTRL" "s")))' '("CTRL" "ALT" "s")'
+# several keys are kept, in order: a chord is not reduced to its last key
+val '(hl-key-regularise (quote ("TAB" "T")))' '("tab" "t")'
+# one spelling per key: xkb capitalises some names, we fold the case
+val '(hl-key-regularise (quote ("CTRL" "Return")))' '("CTRL" "return")'
+val '(hl-key-regularise (quote ("CTRL" "F1")))' '("CTRL" "f1")'
+# a token that is not a keysym is passed through untouched
+val '(hl-key-regularise (quote ("SUPER" "code:28")))' '("SUPER" "code:28")'
+val '(hl-key-regularise (quote ("catchall")))' '("catchall")'
+# a chord needs a key, not only modifiers
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-key-regularise (quote ("CTRL" "ALT"))))))')
+[[ "$bad_bf" == *"needs a key"* ]] || { echo "FAIL: modifier-only chord not rejected => [$bad_bf]"; FAILED=1; }
+
+# ---- logical <-> physical --------------------------------------------------
+# Hyprland keys binds on the keysym of a PHYSICAL key at level 0, so a bind on
+# "percent" parses and matches nothing: the "%" character is really SHIFT plus
+# the key carrying it. These two convert between what the user means and what
+# has to be pressed. Layout-aware, so the expectations are the us layout's.
+val '(hl-key-logical-to-physical (quote ("SHIFT" "5")))' '("SHIFT" "5")'
+val '(hl-key-logical-to-physical (quote ("%")))' '("SHIFT" "5")'
+val '(hl-key-logical-to-physical (quote ("CTRL" "%")))' '("CTRL" "SHIFT" "5")'
+val '(hl-key-logical-to-physical (quote ("A")))' '("SHIFT" "a")'
+val '(hl-key-logical-to-physical (quote ("a")))' '("a")'
+# named keys need no level lookup and pass through untouched
+val '(hl-key-logical-to-physical (quote ("Return")))' '("Return")'
+val '(hl-key-logical-to-physical (quote ("SUPER" "Left")))' '("SUPER" "Left")'
+val '(hl-key-physical-to-logical (quote ("SHIFT" "5")))' '("%")'
+val '(hl-key-physical-to-logical (quote ("CTRL" "SHIFT" "5")))' '("CTRL" "%")'
+val '(hl-key-physical-to-logical (quote ("SHIFT" "a")))' '("A")'
+val '(hl-key-physical-to-logical (quote ("a")))' '("a")'
+val '(hl-key-physical-to-logical (quote ("Return")))' '("Return")'
+# hl-kbd emits the PHYSICAL form, because that is what Hyprland binds
+val '(hl-kbd "C-%")' '("CTRL" "SHIFT" "5")'
+
+# ---- hl-key-description ----------------------------------------------------
+# the logical, readable rendering — emacs' key-description, in two steps:
+# logicalise (physical -> logical), then regularise and join
+val '(hl-key-description (hl-kbd "C-x"))' '"C-x"'
+val '(hl-key-description (hl-kbd "C-%"))' '"C-%"'
+val '(hl-key-description (hl-kbd "C-M-s"))' '"C-M-s"'
+val '(hl-key-description (hl-kbd "s-m"))' '"s-m"'
+# the shift is folded back into the character, so it renders as "s-M" — the
+# same thing the user wrote, which is the round trip we want
+val '(hl-key-description (hl-kbd "s-M"))' '"s-M"'
 
 # ---- plist helper (public: gesture events and config tables arrive as plists)
 val '(hl-plist-get (quote (a 1 b 2)) (quote b))' '2'
@@ -463,6 +522,19 @@ ok '(hl-rule? (hl-window-rule-add! "api-rule" #:match (quote (class "^api-main$"
 $SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" #:match (quote (namespace "^nope$")) #:blur #f)))' >/dev/null 2>&1
 $SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" #:match (quote (namespace "^nope$")) #:blur #f))' >/dev/null
 ok '(hl-rule? api-layer-rule)'
+# Scheme identifiers use '-' where the compositor's registries use '_'. Both
+# spellings must work: the dash form is the documented one, the underscore form
+# is what every existing config already has.
+ok '(hl-rule? (hl-window-rule-add! #f #:match (quote (class "^api-main$"))
+                                   #:border-color "rgba(ff0000ff)"))'
+ok '(hl-rule? (hl-window-rule-add! #f #:match (quote (class "^api-main$"))
+                                   #:border_color "rgba(ff0000ff)"))'
+# the same conversion reaches the device field table and the workspace rules
+ok '(hl-device-add! "api-kbd" #:repeat-rate 30 #:repeat_delay 300 #:natural-scroll #f)'
+# NOTE: hl-workspace-rule-add! returns #t, NOT a rule handle — unlike the
+# window and layer variants — so a workspace rule cannot be toggled afterwards.
+# That is the current API, not a mistake in this test.
+ok '(hl-workspace-rule-add! "5" #:gaps-in "5" #:no-border #t)'
 ok '(boolean? (hl-rule-enabled? api-layer-rule))'
 ok '(hl-rule-enabled-set! api-layer-rule #:on? #f)'
 
@@ -585,10 +657,10 @@ ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F13>") (lambda () #f)))'
 ok '(hl-bind? (hl-bind-add! (hl-kbd "C-M-<F15>") (lambda () #f)))'
 ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F16>") (lambda () #f) #:release #t #:description "api"))'
 ok '(let ((b (hl-bind-add! (hl-kbd "s-<F18>") (lambda () #f)))) (hl-unbind! b))'
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key! "SUPER F19"))'
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key! (hl-kbd "s-<f19>")))'
 # function keys use emacs' bracketed notation; Hyprland matches key names
 # case-insensitively, so a lowercase emacs spelling resolves the same keysym
-ok '(let ((b (hl-bind-add! (hl-kbd "<f24>") (lambda () #f)))) b (hl-unbind-key! "f24"))'
+ok '(let ((b (hl-bind-add! (hl-kbd "<f24>") (lambda () #f)))) b (hl-unbind-key! (hl-kbd "<f24>")))'
 
 # ---- bind records: the handle carries the token list and the thunk ----------
 ok '(let ((b (hl-bind-add! (hl-kbd "C-M-a") (lambda () #f))))
@@ -601,6 +673,27 @@ ok '(let ((b (hl-bind-add! (hl-kbd "C-M-a") (lambda () #f))))
 ok '(let ((a (hl-bind-add! (hl-kbd "s-<F33>") (lambda () #f)))
          (c (hl-bind-add! (hl-kbd "s-<F33>") (lambda () #f))))
      (and (hl-unbind! a) (hl-unbind! c)))'
+# ---- arming and disarming a bind -------------------------------------------
+# a CONDITIONAL bind: registered once, enabled only while a predicate holds. A
+# disabled bind does not match, so its key falls through to the focused app
+# untouched — with the app's own autorepeat, which injection cannot reproduce.
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F25>") (lambda () #f))))
+     (and (hl-bind-enabled? b)            ; armed on registration
+          (hl-bind-enabled-set! b #f)
+          (not (hl-bind-enabled? b))      ; disarmed, still registered
+          (hl-bind-enabled-set! b #t)
+          (hl-bind-enabled? b)
+          (hl-unbind! b)))'
+# a stale handle reads #f rather than raising — the bind is gone, and a reload
+# discards every handle the same way
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F26>") (lambda () #f))))
+     (hl-unbind! b)
+     (not (hl-bind-enabled? b)))'
+# disarming a stale handle fails rather than pretending
+ok '(let ((b (hl-bind-add! (hl-kbd "s-<F27>") (lambda () #f))))
+     (hl-unbind! b)
+     (not (hl-bind-enabled-set! b #t)))'
+
 # double unbind: the second is #f (already gone)
 ok '(let ((b (hl-bind-add! (hl-kbd "s-<F34>") (lambda () #f))))
      (and (hl-unbind! b) (not (hl-unbind! b))))'

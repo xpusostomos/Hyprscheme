@@ -27,8 +27,10 @@
   (= 0 (hl--c-reload-config)))
 
 (define (hl-config-add! key val)
-  "Set the config option KEY to VAL. Keys accept \"general:gaps_in\"or
-   \"general.gaps_in\". Values: numbers, strings, booleans, lists
+  "Set the config option KEY to VAL. KEY is the compositor's own config
+   path — the string you would write in hyprland.conf — so it keeps the
+   compositor's spelling: \"general:gaps_in\" or \"general.gaps_in\",
+   with an underscore, NOT a dash. Values: numbers, strings, booleans, lists
    (vec2-style arrays) or a plist for tables (e.g. '(top 10 bottom 10)).
    Writes propagate like a runtime config change - the affected
    subsystems refresh immediately."
@@ -45,10 +47,11 @@
 
 (define* (hl-device-add! name #:key #:rest fields)
   "Configure a device: NAME plus keyword fields, e.g.
-   (hl-device-add! \"tablet\" #:repeat_rate 25 #:natural_scroll #t).
+   (hl-device-add! \"tablet\" #:repeat-rate 25 #:natural-scroll #t).
    Write-only (no device read side, no per-field unset); validated
    against the field table and applied to the live device. Unknown
-   keywords are rejected by the field table."
+   keywords are rejected by the field table. Scheme spells the fields
+   with dashes; the compositor's own underscore spelling is accepted too."
   (let ((plist (map (lambda (x) (if (keyword? x) (keyword->symbol x) x)) fields)))
     (if (= 0 (hl--c-device-add (hl--str name) plist))
         #t

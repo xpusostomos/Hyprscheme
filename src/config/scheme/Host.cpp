@@ -873,7 +873,8 @@ namespace Config::Scheme {
             !hl::useModule(gen, "hyprscheme monitor") || !hl::useModule(gen, "hyprscheme notification") ||
             !hl::useModule(gen, "hyprscheme query") || !hl::useModule(gen, "hyprscheme rule") ||
             !hl::useModule(gen, "hyprscheme timer") || !hl::useModule(gen, "hyprscheme window") ||
-            !hl::useModule(gen, "hyprscheme workspace") || !hl::useModule(gen, "hyprscheme extras")) {
+            !hl::useModule(gen, "hyprscheme workspace") || !hl::useModule(gen, "hyprscheme extras") ||
+            !hl::useModule(gen, "hyprscheme emacs-keymaps")) {
             LOG(Log::ERR, "[scheme] could not assemble the generation");
             scm_set_current_module(prevModule);
             return false;

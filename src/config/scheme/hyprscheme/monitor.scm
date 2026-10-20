@@ -192,10 +192,12 @@
    (hl-monitor-rule-add! \"DP-1\" #:mode \"preferred\" #:scale \"1.6\"
    #:position \"0x0\" #:transform 0 #:bitdepth 10 #:vrr 1 #:reserved
    '((top . 60))). String fields: mode position scale mirror cm icc
-   sdr_eotf. Numeric fields: transform bitdepth vrr supports_wide_color
-   supports_hdr sdrbrightness sdrsaturation sdr_min_luminance
-   sdr_max_luminance min_luminance max_luminance max_avg_luminance. Gap
-   fields (plist): reserved / reserved_area. Bool: disabled."
+   sdr-eotf. Numeric fields: transform bitdepth vrr supports-wide-color
+   supports-hdr sdrbrightness sdrsaturation sdr-min-luminance
+   sdr-max-luminance min-luminance max-luminance max-avg-luminance. Gap
+   fields (plist): reserved / reserved-area. Bool: disabled. Scheme
+   spells these with dashes; the compositor's own underscore spelling is
+   accepted too."
   (let ((plist (map (lambda (x) (if (keyword? x) (keyword->symbol x) x)) fields)))
     (if (not (= 0 (hl--c-monitor-begin (hl--mon-arg output))))
         (hl--error 'hl-monitor-rule-add! "~a" (hl--c-config-last-error))

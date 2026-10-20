@@ -336,8 +336,9 @@ namespace Config::Scheme {
                 g_configError = "hl-device-add!: odd plist of fields";
                 return -1;
             }
-            const std::string key = schemeDatumToStr(scm_car(l));
-            const SDeviceField* f  = nullptr;
+            // Scheme identifiers use '-', the field table uses '_'
+            const std::string   key = hyprlandName(schemeDatumToStr(scm_car(l)));
+            const SDeviceField* f   = nullptr;
             for (const auto& F : DEVICE_FIELDS) {
                 if (key == F.name) { f = &F; break; }
             }
@@ -386,7 +387,7 @@ namespace Config::Scheme {
     static int hlMonitorFieldStr(const char* field, const char* value) {
         if (!g_up || !g_monitorParser)
             return -1;
-        const std::string f = field ? field : "";
+        const std::string f = hyprlandName(field ? field : "");
         const std::string v = value ? value : "";
         auto&             p = *g_monitorParser;
         bool              ok;
@@ -418,7 +419,7 @@ namespace Config::Scheme {
     static int hlMonitorFieldNum(const char* field, double v) {
         if (!g_up || !g_monitorParser)
             return -1;
-        const std::string f = field ? field : "";
+        const std::string f = hyprlandName(field ? field : "");
         auto&             p = *g_monitorParser;
 
         // typed validation with the same ranges the lua config uses
@@ -495,7 +496,7 @@ namespace Config::Scheme {
     static int hlMonitorFieldGap(const char* field) {
         if (!g_up || !g_monitorParser)
             return -1;
-        const std::string f = field ? field : "";
+        const std::string f = hyprlandName(field ? field : "");
         if (f != "reserved" && f != "reserved_area") {
             g_configError = "hl-monitor-rule-add!: unknown gap field '" + f + "'";
             return -1;
@@ -518,7 +519,7 @@ namespace Config::Scheme {
     static int hlMonitorFieldBool(const char* field, int v) {
         if (!g_up || !g_monitorParser)
             return -1;
-        const std::string f = field ? field : "";
+        const std::string f = hyprlandName(field ? field : "");
         if (f != "disabled") {
             g_configError = "hl-monitor-rule-add!: unknown bool field '" + f + "'";
             return -1;

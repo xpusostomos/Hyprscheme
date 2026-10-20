@@ -128,14 +128,16 @@ plain path. Returns the new pid."
 ;;   (hl-window-rule-add! "term" '((match . ((class . "foot"))) (float . #t)
 ;;                            (opacity . "0.8") (workspace . "3")))
 ;;   (hl-window-rule-add! #f '((match . ((class . "(?i)games"))) (monitor . "DP-1")))
-;; match properties: class title initial_class initial_title floating tag
-;;   xwayland fullscreen pinned focus group modal on_workspace content
-;;   namespace exec_token exec_pid ...
-;; effects: float tile fullscreen maximize fullscreen_state move size center
-;;   pseudo monitor workspace no_initial_focus pin group suppress_event
-;;   content no_close_for scrolling_width rounding opacity border_color
-;;   idle_inhibit animation tag min_size max_size ... (the window-rule page
+;; match properties: class title initial-class initial-title floating tag
+;;   xwayland fullscreen pinned focus group modal on-workspace content
+;;   namespace exec-token exec-pid ...
+;; effects: float tile fullscreen maximize fullscreen-state move size center
+;;   pseudo monitor workspace no-initial-focus pin group suppress-event
+;;   content no-close-for scrolling-width rounding opacity border-color
+;;   idle-inhibit animation tag min-size max-size ... (the window-rule page
 ;;   has the full list with value forms)
+;; Scheme spells these with dashes; the compositor's own underscore spelling
+;; is accepted too.
 ;; rules: the record IS the handle - the rule KIND ('window or 'layer) and
 ;; the NAME (or "" for anonymous). The index C++-side locks the record while
 ;; the rule is registered (rules live for their config generation); a stale

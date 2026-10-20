@@ -89,7 +89,7 @@ these for the same reason."
 
 (define api-modules
   '(core bind config event exec gesture group layer monitor
-    notification query rule timer window workspace extras))
+    notification query rule timer window workspace extras emacs-keymaps))
 
 (define (stub-c-entry-points files)
   (for-each

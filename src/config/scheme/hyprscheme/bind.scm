@@ -9,7 +9,7 @@
   #:export (
            hl-submap hl-submap-activate! hl-submap-exit! hl-bind-add!
            hl-repeat hl-bind? hl-submap-notification-add! hl-unbind!
-           hl-unbind-key!))
+           hl-unbind-key! hl-bind-enabled-set! hl-bind-enabled?))
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
@@ -69,6 +69,19 @@ key is still a list. THUNK is the action. Keyword options: #:description
 #:submap-universal, #:allow-input-capture, #:mouse. Returns the bind
 handle; remove with (hl-unbind! B). There is no two-string shorthand in
 the core API - define your own wrapper on top if you want one."
+  ;; ONE CHORD ONLY. hl-bind-add! is the raw call: Hyprland binds a single
+  ;; key+modifier set, and it has no notion of a sequence. hl-kbd returns a LIST
+  ;; OF CHORDS for a multi-key spec like "C-x C-f", and feeding that here would
+  ;; otherwise die deep in C++ as "A bind requires a trigger" — because
+  ;; non-string tokens are skipped — with a stale message attached. Say what is
+  ;; actually wrong instead.
+  (unless (every string? tokens)
+    (hl--error 'hl-bind-add!
+               "tokens must be a list of key-name strings, but got ~s. \
+If that came from (hl-kbd \"...\") with a space in it, it is a SEQUENCE \
+(a list of chords) — bind those with hl-bind-keys!, which registers the \
+submaps to chain them."
+               tokens))
   (let* ((key (car (reverse tokens)))
          (rec (make-hl-bind tokens thunk))
          (rc (hl--c-bind rec
@@ -120,9 +133,31 @@ hl-timer handle like hl-after's."
   "Remove a bind: pass back the hl-bind record hl-bind-add! returned."
   (= 0 (hl--c-unbind-rec b)))
 
-(define (hl-unbind-key! key)
-  "Remove EVERY bind whose display key matches KEY (case- and
-   whitespace-insensitive, manager-side). For precise removal use
-   hl-unbind!."
-  (= 0 (hl--c-unbind-key (hl--str key))))
+(define (hl-unbind-key! tokens)
+  "Remove EVERY bind registered on the same key as TOKENS — a token list,
+   as (hl-kbd \"s-l\") returns, never a string. A key can carry several
+   binds and this removes them all (the coarse removal, matching the
+   compositor's own unbind-by-key); for precise removal use hl-unbind!.
+
+   The comparison is the compositor's, on the bind's DISPLAY KEY, and it is
+   case- and whitespace-insensitive. That is why the tokens are joined the
+   way they are: a bind registered from the Lua config keeps its argument
+   verbatim, so its display key is e.g. \"SUPER + comma\", which normalises
+   to \"super+comma\" — the same thing a (hl-kbd \"s-,\") bind's derived
+   display key normalises to. Both are reachable with this one call."
+  (= 0 (hl--c-unbind-key tokens)))
+
+(define (hl-bind-enabled-set! b on)
+  "Arm or disarm bind B, keeping it registered. This is what makes a bind
+   CONDITIONAL: register it once and enable it only while some predicate
+   holds. A DISABLED bind does not match at all, so its key reaches the
+   focused application untouched — with the app's own autorepeat, which
+   synthetic key injection cannot reproduce. Returns #t on success; #f if B
+   is a stale handle (already unbound, or from a previous generation)."
+  (= 0 (hl--c-bind-enabled-set b (if on #t #f))))
+
+(define (hl-bind-enabled? b)
+  "#t when bind B is currently armed. #f for a stale handle — one that has
+   been unbound, or that a reload has already discarded."
+  (= 1 (hl--c-bind-enabled b)))
 

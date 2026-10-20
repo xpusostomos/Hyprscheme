@@ -140,7 +140,8 @@ src/plugin-main.o: plugin-main.cpp
 # declared output exists, never a step's exit status).
 SCM_DIR     = $(CURDIR)/src/config/scheme
 SCM_FAMILIES = core bind config event exec gesture group layer monitor \
-               notification query rule timer window workspace extras
+               notification query rule timer window workspace extras \
+               emacs-keymaps
 
 .PHONY: scm-compile
 scm-compile:

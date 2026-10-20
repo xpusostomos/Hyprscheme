@@ -63,10 +63,12 @@
 (define scm-dir (string-append repo "/src/config/scheme"))
 
 ;; the load order. Kernel first (its stub), then core, then the families, then
-;; extras (the only module that composes families), then the umbrella.
+;; the two composers (extras, emacs-keymaps), then the umbrella — which imports
+;; the composers, so they must already be compiled.
 (define families
   '("core" "bind" "config" "event" "exec" "gesture" "group" "layer" "monitor"
-    "notification" "query" "rule" "timer" "window" "workspace" "extras"))
+    "notification" "query" "rule" "timer" "window" "workspace" "extras"
+    "emacs-keymaps"))
 
 (define (machinery-files)
   (cons (string-append scm-dir "/hyprscheme/kernel.scm")
@@ -189,6 +191,17 @@
                   (lambda () (module-use! gen (resolve-interface (list 'hyprscheme (string->symbol m)))))
                   (lambda _ #f)))
               families)
+    ;; The standard library the HOST gives the generation (Host.cpp), so this
+    ;; environment matches the one a config is really evaluated in. Without it
+    ;; an extra file using, say, srfi-1's `find` warns falsely — the import is
+    ;; there at runtime, and a warning a config cannot act on is worse than no
+    ;; warning at all.
+    (for-each (lambda (m)
+                (catch #t
+                  (lambda () (module-use! gen (resolve-interface m)))
+                  (lambda _ #f)))
+              '((rnrs io ports) (rnrs lists) (srfi srfi-1)
+                (ice-9 optargs) (ice-9 exceptions)))
     gen))
 
 (for-each

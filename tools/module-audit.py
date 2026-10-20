@@ -8,8 +8,8 @@ The machinery is modules, and the split is only worth having if it stays true:
   - a FAMILY module imports (hyprscheme kernel) and (hyprscheme core) and
     nothing else of ours — it never reaches into another family;
   - (hyprscheme core) is shared plumbing: it imports the kernel only;
-  - (hyprscheme extras) is the one module allowed to compose the raw API, so it
-    may import families;
+  - (hyprscheme extras) and (hyprscheme emacs-keymaps) are the modules allowed
+    to compose the raw API, so they may import families;
   - (hyprscheme) is the public umbrella: it imports everything and re-exports;
   - nothing calls a name a FAMILY owns from outside a family, except extras;
   - every top-level define in a module file is in that module's own `#:export`,
@@ -40,6 +40,7 @@ DIR = 'src/config/scheme/hyprscheme'
 KERNEL = 'kernel'
 CORE = 'core'
 EXTRAS = 'extras'
+EMACS_KEYMAPS = 'emacs-keymaps'
 UMBRELLA = 'hyprscheme'
 # the umbrella is not in DIR: it is the file the directory is named after
 UMBRELLA_PATH = 'src/config/scheme/hyprscheme.scm'
@@ -47,7 +48,7 @@ UMBRELLA_PATH = 'src/config/scheme/hyprscheme.scm'
 # name. Every module must be named here or it is never loaded at all.
 ENTRY_PATH = 'src/config/scheme/init.scm'
 # modules allowed to import beyond the kernel + core
-FREE = {KERNEL, CORE, EXTRAS}
+FREE = {KERNEL, CORE, EXTRAS, EMACS_KEYMAPS}
 
 
 def read(path):
@@ -55,9 +56,21 @@ def read(path):
 
 
 def strip_prose(text):
-    # a name in a docstring or a comment is not a call
-    text = re.sub(r';.*$', '', text, flags=re.M)
-    return re.sub(r'"(?:[^"\\]|\\.)*"', '""', text)
+    # a name in a docstring or a comment is not a call.
+    #
+    # STRINGS FIRST, then comments — the order matters. Stripping `;` first
+    # truncates any line with a semicolon INSIDE a string ("...; #:prev #t
+    # swaps..."), leaving an unbalanced quote; the string regex then mis-pairs
+    # and prose that was inside a docstring survives as if it were code. That
+    # produced a false "calls hl-key" on (hyprscheme window), whose docstrings
+    # are full of semicolons.
+    #
+    # re.S matters: `\\.` must be able to consume a backslash-NEWLINE, which is
+    # how a long Scheme string is continued across lines. Without it the match
+    # fails at that backslash, stripping desyncs from there on, and every later
+    # docstring in the file survives as if it were code.
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', '""', text, flags=re.S)
+    return re.sub(r';.*$', '', text, flags=re.M)
 
 
 def imports_of(text):
@@ -107,7 +120,7 @@ def main():
             return own
         if name == CORE:
             return own | exports_of(read(fams[KERNEL]))
-        if name == EXTRAS:
+        if name in (EXTRAS, EMACS_KEYMAPS):
             return own | {n for p in fams.values() for n in exports_of(read(p))}
         return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[CORE]))
 
@@ -124,12 +137,12 @@ def main():
         code = strip_prose(text)
         for callee in sorted(calls_of(code)):
             src = owner.get(callee)
-            if src and src not in (name, KERNEL, CORE) and name != EXTRAS:
+            if src and src not in (name, KERNEL, CORE) and name not in (EXTRAS, EMACS_KEYMAPS):
                 print('CALL:    (hyprscheme %s) calls %s, which belongs to '
                       '(hyprscheme %s)' % (name, callee, src))
                 bad = 1
         # is every definition reachable?
-        if name != EXTRAS:
+        if name not in (EXTRAS, EMACS_KEYMAPS):
             for d in sorted(defines_of(text) - exports_of(text)):
                 print('EXPORT:  (hyprscheme %s) defines %s but does not export it'
                       % (name, d))
@@ -168,7 +181,7 @@ def main():
     # of the family-import rule this tool exists for: silent decay.)
     entry = read(ENTRY_PATH)
     # `(hyprscheme x)` names module x; a bare `(hyprscheme)` names the umbrella
-    named = {m.group(1) for m in re.finditer(r"\(hyprscheme ([a-z]+)\)", entry)}
+    named = {m.group(1) for m in re.finditer(r"\(hyprscheme ([a-z-]+)\)", entry)}
     for name in sorted(fams):
         if name not in named:
             print('ENTRY:   %s is never loaded — init.scm does not name it' % name)
@@ -177,8 +190,9 @@ def main():
         print('ENTRY:   (hyprscheme) is never loaded — init.scm does not name it')
         bad = 1
 
-    print('%s: %d modules — %d families, plus kernel, core and extras'
-          % ('FAIL' if bad else 'ok', len(fams), len(fams) - len(FREE)))
+    print('%s: %d modules — %d families, plus %s'
+          % ('FAIL' if bad else 'ok', len(fams), len(fams) - len(FREE),
+             ', '.join(sorted(FREE))))
     return bad
 
 

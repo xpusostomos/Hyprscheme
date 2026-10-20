@@ -12,8 +12,10 @@
 
 struct lua_State; // the config family's scratch state (Config.cpp)
 
+#include <algorithm>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -102,6 +104,21 @@ namespace Config::Scheme {
         every getter, like an expired Lua object" — so they live here rather
         than in whichever family happened to define them first.
     */
+    /*
+        A Scheme identifier as the compositor spells it. Scheme names use '-'
+        and the compositor's registries use '_' ("border-color" vs
+        "border_color"), so every name that is looked up in one of them goes
+        through here first.
+
+        Only '-' becomes '_': a name that already uses underscores is passed
+        through unchanged, so both spellings work and no existing config breaks.
+    */
+    inline std::string hyprlandName(std::string_view name) {
+        std::string out(name);
+        std::ranges::replace(out, '-', '_');
+        return out;
+    }
+
     inline SCM boolResult(bool b) {
         return b ? SCM_BOOL_T : SCM_BOOL_F;
     }

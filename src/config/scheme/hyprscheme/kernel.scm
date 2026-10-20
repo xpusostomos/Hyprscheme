@@ -55,7 +55,8 @@
            hl--c-group-move-window hl--c-group-remove hl--c-group-same
            hl--c-group-set hl--c-group-size hl--c-group-toggle
            hl--c-group? hl--c-groups-locked hl--c-is-key-down
-           hl--c-keyboard-key-listen hl--c-last-window
+           hl--c-key-logical-to-physical hl--c-key-physical-to-logical
+           hl--c-key-regularise hl--c-keyboard-key-listen hl--c-last-window
            hl--c-last-workspace hl--c-layer-above-fs hl--c-layer-address
            hl--c-layer-alive hl--c-layer-kb-interactivity
            hl--c-layer-level hl--c-layer-listen hl--c-layer-mapped
@@ -103,6 +104,7 @@
            hl--c-state-set hl--c-submap-listen hl--c-timer
            hl--c-timer-cancel hl--c-timer-enabled hl--c-timer-set-enabled
            hl--c-timer-set-timeout hl--c-toggle-swallow hl--c-unbind-key
+           hl--c-bind-enabled hl--c-bind-enabled-set
            hl--c-unbind-rec hl--c-urgent-window hl--c-version
            hl--c-window-accepts-input hl--c-window-address
            hl--c-window-alive hl--c-window-allowed-over-fullscreen

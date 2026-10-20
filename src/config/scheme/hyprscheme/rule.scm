@@ -19,7 +19,10 @@
              (ice-9 optargs))
 
 
-(define (hl-rule? x) (and (struct? x) (eq? (struct-vtable x) )))
+;; the rtd argument was missing, and Guile's eq? accepts ONE argument (it
+;; returns #t), so this read as "is x any struct at all" — a bind handle, a
+;; timer, a window all passed. Compare against the rule type, as hl-bind? does.
+(define (hl-rule? x) (and (struct? x) (eq? (struct-vtable x) hl-rule-rtd)))
 
 (define (hl-rule-enabled? rule)
   "#t when RULE is enabled."

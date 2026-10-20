@@ -7,14 +7,14 @@
 
 (define-module (hyprscheme core)
   #:export (
-           hl--bind-flags hl--bool-act hl--dir hl--emacs-key
-           hl--emacs-keys hl--emacs-mods hl--emacs-mouse hl--gesture-mode
+           hl--bind-flags hl--bool-act hl--dir hl--gesture-mode
            hl--mon-arg hl--monitor-listen hl--notif-act hl--plist-fold
            hl--plist-map hl--push-val hl--rule-kind
-           hl--rule-name hl--rule-spec-value hl--special-name hl--str
+           hl--hyprland-name hl--rule-name hl--rule-spec-value
+           hl--special-name hl--str
            hl--window-listen hl--window-rule-mk hl--workspace-listen
            hl--ws-arg hl-after hl-box hl-box-h hl-box-rtd hl-box-w
-           hl-box-x hl-box-y hl-current-submap hl-group? hl-kbd hl-key
+           hl-box-x hl-box-y hl-current-submap hl-group?
            hl-layer? hl-layout-add! hl-monitor? hl-notification?
            hl-plist-get hl-state-keys hl-state-ref hl-state-remove!
            hl-state-set! hl-window? hl-workspace? make-hl-bind
@@ -154,67 +154,6 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
         (if drag 1024 0) (if submap-universal 2048 0)
         (if allow-input-capture 4096 0) (if mouse 32768 0))))
 
-(define hl--emacs-mods
-  '(("C" . "CTRL") ("M" . "ALT") ("S" . "SHIFT")
-    ("s" . "SUPER") ("A" . "ALT") ("H" . "MOD3")))
-
-(define hl--emacs-keys
-  '(("RET" . "Return") ("SPC" . "space") ("ESC" . "Escape")
-    ("TAB" . "Tab") ("DEL" . "Delete") ("LFD" . "Return")))
-
-;; emacs mouse events → hyprland mouse:CODE
-;; emacs mouse-1=left, mouse-2=middle, mouse-3=right
-;; hyprland: 272=left, 273=right, 274=middle
-
-(define hl--emacs-mouse
-  '(("<down-mouse-1>" . "mouse:272") ("<mouse-1>" . "mouse:272")
-    ("<down-mouse-2>" . "mouse:274") ("<mouse-2>" . "mouse:274")
-    ("<down-mouse-3>" . "mouse:273") ("<mouse-3>" . "mouse:273")
-    ("<mouse-4>" . "mouse:275") ("<mouse-5>" . "mouse:276")))
-
-(define (hl--emacs-key name)
-  ;; translate an emacs key name to the xkb/hyprland name
-  (let ((mapped (or (assoc name hl--emacs-keys) (assoc name hl--emacs-mouse))))
-    (if mapped
-        (cdr mapped)
-        ;; bracketed keyboard keysym: <f1> → F1, <left> → Left, <kp-1> → KP_1
-        (if (and (> (string-length name) 2)
-                 (char=? (string-ref name 0) #\<)
-                 (char=? (string-ref name (- (string-length name) 1)) #\>))
-            (let* ((inner (substring name 1 (- (string-length name) 1)))
-                   (n (string-length inner)))
-              (let build ((i 0) (acc '()))
-                (if (= i n)
-                    (list->string (reverse acc))
-                    (let ((c (string-ref inner i)))
-                      (build (+ i 1)
-                             (cons (if (char=? c #\-) #\_ c) acc))))))
-            name))))
-
-(define (hl-kbd spec) "Parse an emacs-style key specification string
-into a LIST of key tokens: \"C-M-a\" → (\"CTRL\" \"ALT\" \"a\"),
-\"<f1>\" → (\"F1\"). The LAST token is the key, even when it spells
-like a modifier letter (\"s-M\" → (\"SUPER\" \"M\") — Super+M the
-key, not Super+Alt). A TRAILING DASH makes it a pure modifier list:
-\"C-M-\" → (\"CTRL\" \"ALT\")."
-  (let loop ((str spec) (acc '()))
-    (let ((dash (string-index str #\-)))
-      (if (and dash (> dash 0))
-          (let ((prefix (substring str 0 dash)))
-            (if (assoc prefix hl--emacs-mods)
-                ;; a spec ending in the dash ("C-M-") is a pure modifier list
-                (let ((rest (substring str (+ dash 1) (string-length str))))
-                  (if (= 0 (string-length rest))
-                      (reverse (cons (cdr (assoc prefix hl--emacs-mods)) acc))
-                      (loop rest (cons (cdr (assoc prefix hl--emacs-mods)) acc))))
-                (reverse (cons (hl--emacs-key str) acc))))
-          (reverse (cons (hl--emacs-key str) acc))))))
-
-(define (hl-key spec) "Parse a hyprland-style key specification string
-into a LIST of key tokens: \"SUPER+SHIFT+Q\" →
-(\"SUPER\" \"SHIFT\" \"Q\")."
-  (map string-trim-both (string-split spec #\+)))
-
 (define (hl-after ms thunk) "Run THUNK once after MS milliseconds.
 Returns an hl-timer handle for later control
 (hl-timer-enabled-set!, hl-timer-set-timeout, hl-timer-cancel!); a
@@ -257,6 +196,22 @@ one-shot releases its own record lock when it completes."
   (if (and (> (string-length s) 8) (string=? (substring s 0 8) "special:"))
       (substring s 8 (string-length s))
       s))
+
+(define (hl--hyprland-name s)
+  ;; A Scheme identifier as the compositor spells it: '-' becomes '_'. Scheme
+  ;; names use dashes and the compositor's registries use underscores
+  ;; ("border-color" vs "border_color"), so every name compared against one of
+  ;; those tables goes through here first — in Scheme, where the dispatch
+  ;; happens, as well as in C++ where the lookup does.
+  ;;
+  ;; Only '-' changes, so a name already written with underscores passes
+  ;; through untouched and both spellings keep working.
+  (let ((n (string-length s)))
+    (let loop ((i 0) (acc '()))
+      (if (= i n)
+          (list->string (reverse acc))
+          (let ((c (string-ref s i)))
+            (loop (+ i 1) (cons (if (char=? c #\-) #\_ c) acc)))))))
 
 (define (hl--push-val v)
   (cond ((number? v)

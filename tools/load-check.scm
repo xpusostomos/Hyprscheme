@@ -106,7 +106,8 @@
                                 (list "kernel" "core" "bind" "config" "event" "exec"
                                       "gesture" "group" "layer" "monitor"
                                       "notification" "query" "rule" "timer"
-                                      "window" "workspace" "extras"))))))
+                                      "window" "workspace" "extras"
+                                      "emacs-keymaps"))))))
   ;; THE HOST'S ACTUAL SEQUENCE (Host.cpp buildGeneration), which is now short:
   ;;   1. the machinery directory on %load-path and %load-compiled-path
   ;;   2. create the kernel module and register the gsubrs into it — the stubs
@@ -138,7 +139,7 @@
   (for-each (lambda (m) (module-use! gen (resolve-interface (list 'hyprscheme (string->symbol m)))))
             (list "core" "bind" "config" "event" "exec" "gesture" "group" "layer"
                   "monitor" "notification" "query" "rule" "timer" "window"
-                  "workspace" "extras"))
+                  "workspace" "extras" "emacs-keymaps"))
   ;; module-variable, not module-ref: the host's lookup (scm_c_lookup) DOES see
   ;; imported bindings, and module-ref does not
   (format #t "hl--ready: ~a~%" (variable-ref (module-variable gen 'hl--ready)))

@@ -5,10 +5,10 @@
 ;; Loaded into the generation by the test (the kernel shadows `load` so a load
 ;; lands in the generation, which is where a config runs). Then:
 ;;
-;;   (run-snippet-thunk "/tmp/block.scm" "s-X")
+;;   (run-snippet-thunk "/tmp/block.scm" "s-x")
 ;;
 ;; reads the block, evaluates its *definitions* (so a snippet's helpers exist),
-;; finds the `hl-bind-add!` whose key is "s-X", evaluates its thunk, calls it,
+;; finds the `hl-bind-add!` whose key is "s-x", evaluates its thunk, calls it,
 ;; and returns #t. #f when the block has no such bind.
 ;;
 ;; Definitions are evaluated, the REGISTERING calls are not: registering again
@@ -24,7 +24,7 @@
 
 (define (callback-arg? x)
   (or (and (pair? x) (eq? (car x) 'lambda))          ; an inline lambda
-      ;; a procedure passed by name: `(hl-bind-add! (hl-kbd "s-Z") zoom)`
+      ;; a procedure passed by name: `(hl-bind-add! (hl-kbd "s-z") zoom)`
       (and (symbol? x) (module-variable (current-module) x)
            (procedure? (variable-ref (module-variable (current-module) x))))))
 

@@ -101,7 +101,8 @@ namespace Config::Scheme {
     static int hlRuleMatch(const char* prop, const char* value) {
         if (!g_up)
             return -1;
-        const auto p = Desktop::Rule::matchPropFromString(prop ? prop : "");
+        // Scheme identifiers use '-', the compositor's registries use '_'
+        const auto p = Desktop::Rule::matchPropFromString(hyprlandName(prop ? prop : ""));
         if (!p) {
             g_configError = std::string("unknown match property '") + (prop ? prop : "") + "'";
             return -1;
@@ -120,7 +121,7 @@ namespace Config::Scheme {
     static int hlWindowRuleEffect(const char* effect, const char* value) {
         if (!g_up || !g_curWindowRule)
             return -1;
-        const auto e = Desktop::Rule::windowEffects()->get(std::string_view(effect ? effect : ""));
+        const auto e = Desktop::Rule::windowEffects()->get(hyprlandName(effect ? effect : ""));
         if (!e) {
             g_configError = std::string("unknown effect '") + (effect ? effect : "") + "'";
             return -1;
@@ -136,7 +137,7 @@ namespace Config::Scheme {
     static int hlLayerRuleEffect(const char* effect, const char* value) {
         if (!g_up || !g_curLayerRule)
             return -1;
-        const auto e = Desktop::Rule::layerEffects()->get(std::string_view(effect ? effect : ""));
+        const auto e = Desktop::Rule::layerEffects()->get(hyprlandName(effect ? effect : ""));
         if (!e) {
             g_configError = std::string("unknown layer effect '") + (effect ? effect : "") + "'";
             return -1;
@@ -200,7 +201,7 @@ namespace Config::Scheme {
     static int hlWorkspaceRuleStr(const char* field, const char* v) {
         if (!g_up || !g_curWorkspaceRule)
             return -1;
-        const std::string f = field ? field : "";
+        const std::string f = hyprlandName(field ? field : "");
         auto&             r = *g_curWorkspaceRule;
         if (f == "monitor")
             r.m_monitor = v ? v : "";
@@ -222,7 +223,7 @@ namespace Config::Scheme {
     static int hlWorkspaceRuleNum(const char* field, double v) {
         if (!g_up || !g_curWorkspaceRule)
             return -1;
-        const std::string f = field ? field : "";
+        const std::string f = hyprlandName(field ? field : "");
         if (f == "border_size")
             g_curWorkspaceRule->m_borderSize = sc<int64_t>(v);
         else {
@@ -235,7 +236,7 @@ namespace Config::Scheme {
     static int hlWorkspaceRuleBool(const char* field, int v) {
         if (!g_up || !g_curWorkspaceRule)
             return -1;
-        const std::string f = field ? field : "";
+        const std::string f = hyprlandName(field ? field : "");
         auto&             r = *g_curWorkspaceRule;
         if (f == "default")
             r.m_isDefault = (v != 0);
@@ -259,7 +260,7 @@ namespace Config::Scheme {
     static int hlWorkspaceRuleGap(const char* field) {
         if (!g_up || !g_curWorkspaceRule)
             return -1;
-        const std::string f = field ? field : "";
+        const std::string f = hyprlandName(field ? field : "");
         Config::Lua::CLuaConfigCssGap gap(0);
         const auto                    err = gap.parse(configScratch());
         lua_settop(configScratch(), 0);
@@ -285,7 +286,7 @@ namespace Config::Scheme {
     static int hlWorkspaceRuleLayoutOpt(const char* k, const char* v) {
         if (!g_up || !g_curWorkspaceRule)
             return -1;
-        g_curWorkspaceRule->m_layoutopts[k ? k : ""] = v ? v : "";
+        g_curWorkspaceRule->m_layoutopts[hyprlandName(k ? k : "")] = v ? v : "";
         return 0;
     }
 
