@@ -34,13 +34,9 @@ namespace hl {
     // a blank module to hold a generation, or #f if it could not be created
     SCM makeFreshModule();
 
-    // load a file that DEFINES A MODULE, restoring the current module after it
-    // (a `define-module` file switches it as a side effect)
-    bool loadModule(const char* path);
-    // resolve a module by name, or #f
-    SCM  resolveModule(const char* name);
     // create a module if it does not exist, so bindings can go into it before
-    // its file is read; #f on failure
+    // its file is read; #f on failure. NOTE it also LOADS the file if the name
+    // is findable on %load-path (resolve autoloads) — see Host.cpp.
     SCM  makeModule(const char* name);
     // prepend DIR to %load-path (the modules resolve each other by name)
     bool addLoadPath(const char* dir);
@@ -50,13 +46,8 @@ namespace hl {
     bool addLoadCompiledPath(const char* dir);
     // set a variable in a named module, contained
     bool setModuleVariable(SCM module, const char* name, SCM value);
-    // export every local binding of a module (the kernel, after registration)
-    bool exportAll(SCM module);
-    // make GEN import another module's public interface
-    bool useModule(SCM gen, const char* name);
 
     // contained calls: the result, or #f when the call raised
-    SCM call0(SCM fn);
     SCM call1(SCM fn, SCM a1);
     SCM call2(SCM fn, SCM a1, SCM a2);
     SCM call3(SCM fn, SCM a1, SCM a2, SCM a3);

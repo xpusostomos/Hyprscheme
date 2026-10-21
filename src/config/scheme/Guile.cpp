@@ -15,8 +15,6 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <cstring>
-#include <sstream>
-#include <vector>
 
 namespace hl {
 
@@ -116,41 +114,28 @@ namespace hl {
         return scm_is_true(ok);
     }
 
-    bool loadModule(const char* path) {
-        // A file whose first form is `define-module` needs that MACRO available
-        // where the form is expanded — and it is expanded in whatever module is
-        // current. So the load happens from a base module that certainly has it,
-        // never from one of the machinery's own modules (which import only what
-        // they were told to, and may not carry `define-module`'s expander).
-        //
-        // `define-module` then creates or reuses the module the file names and
-        // makes it current, so a module the host pre-populated — the kernel,
-        // which takes the gsubrs before its file is read — keeps those bindings.
-        const SCM prev = scm_current_module();
-        SCM       base = scm_c_catch(SCM_BOOL_T,
-                                     [](void*) -> SCM { return scm_c_resolve_module("guile-user"); }, NULL,
-                                     [](void*, SCM, SCM) -> SCM { return SCM_BOOL_F; }, NULL, NULL, NULL);
-        if (!scm_is_false(base))
-            scm_set_current_module(base);
-        const bool ok = evalFile(path);
-        scm_set_current_module(prev);
-        return ok;
-    }
-
     SCM makeModule(const char* name) {
-        // create the module if it does not exist yet, so bindings can be
-        // defined into it BEFORE its file is read (the file's define-module
-        // then reuses it). #:ensure is what makes it create rather than fail.
+        // Make sure a module exists under NAME so bindings can be defined into
+        // it before its file is read (the file's `define-module` then reuses
+        // it), and return it.
+        //
+        // TWO things about scm_c_resolve_module worth knowing, both verified:
+        //
+        //   - it CREATES on a miss rather than failing, which is what makes it
+        //     usable here at all (this is not `#:ensure`: that is a Scheme-level
+        //     keyword and this is the C entry point, which has no such argument
+        //     — an older comment here claimed otherwise);
+        //   - it AUTOLOADS. If NAME is findable on %load-path the file is
+        //     READ, right here. So `makeModule("hyprscheme kernel")` in
+        //     buildGeneration loads kernel.scm BEFORE registerAllBindings()
+        //     runs. That works because `#:export` makes the gsubr names
+        //     unassigned placeholders when the module is defined, so the file
+        //     reads and registration fills them in — but it means the kernel's
+        //     TOP-LEVEL forms run with the gsubrs unbound. See Host.cpp.
         return scm_c_catch(SCM_BOOL_T,
                            [](void* d) -> SCM {
                                return scm_c_resolve_module((const char*)d);
                            }, (void*)name,
-                           [](void*, SCM, SCM) -> SCM { return SCM_BOOL_F; }, NULL, NULL, NULL);
-    }
-
-    SCM resolveModule(const char* name) {
-        return scm_c_catch(SCM_BOOL_T,
-                           [](void* d) -> SCM { return scm_c_resolve_module((const char*)d); }, (void*)name,
                            [](void*, SCM, SCM) -> SCM { return SCM_BOOL_F; }, NULL, NULL, NULL);
     }
 
@@ -246,16 +231,11 @@ namespace hl {
         SCM fn, a1, a2, a3, a4;
     };
 
-    static SCM callThunk0(void* d) { return scm_call_0(((CallArgs*)d)->fn); }
     static SCM callThunk1(void* d) { return scm_call_1(((CallArgs*)d)->fn, ((CallArgs*)d)->a1); }
     static SCM callThunk2(void* d) { return scm_call_2(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2); }
     static SCM callThunk3(void* d) { return scm_call_3(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2, ((CallArgs*)d)->a3); }
     static SCM callThunk4(void* d) { return scm_call_4(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2, ((CallArgs*)d)->a3, ((CallArgs*)d)->a4); }
 
-    SCM call0(SCM fn) {
-        CallArgs a{fn, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED};
-        return scm_c_catch(SCM_BOOL_T, callThunk0, &a, callHandler, NULL, NULL, NULL);
-    }
     SCM call1(SCM fn, SCM a1) {
         CallArgs a{fn, a1, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED};
         return scm_c_catch(SCM_BOOL_T, callThunk1, &a, callHandler, NULL, NULL, NULL);
@@ -271,46 +251,6 @@ namespace hl {
     SCM call4(SCM fn, SCM a1, SCM a2, SCM a3, SCM a4) {
         CallArgs a{fn, a1, a2, a3, a4};
         return scm_c_catch(SCM_BOOL_T, callThunk4, &a, callHandler, NULL, NULL, NULL);
-    }
-
-    struct ModuleCall {
-        const char* proc;
-        SCM         a, b;
-    };
-
-    static SCM moduleCall1Thunk(void* d) {
-        auto* m = (ModuleCall*)d;
-        return scm_call_1(scm_c_public_ref("guile", m->proc), m->a);
-    }
-
-    static SCM moduleCall2Thunk(void* d) {
-        auto* m = (ModuleCall*)d;
-        return scm_call_2(scm_c_public_ref("guile", m->proc), m->a, m->b);
-    }
-
-    bool exportAll(SCM module) {
-        ModuleCall m{"module-export-all!", module, SCM_UNDEFINED};
-        return scm_is_true(scm_c_catch(SCM_BOOL_T, moduleCall1Thunk, &m, callHandler, NULL, NULL, NULL));
-    }
-
-    bool useModule(SCM gen, const char* name) {
-        // (module-use! gen (resolve-interface '(hyprscheme api)))
-        SCM parts = SCM_EOL, cur = SCM_EOL;
-        std::string tok;
-        std::istringstream in(name);
-        std::vector<std::string> toks;
-        while (in >> tok)
-            toks.push_back(tok);
-        for (auto it = toks.rbegin(); it != toks.rend(); ++it)
-            parts = scm_cons(scm_from_utf8_symbol(it->c_str()), parts);
-
-        ModuleCall r{"resolve-interface", parts, SCM_UNDEFINED};
-        SCM        iface = scm_c_catch(SCM_BOOL_T, moduleCall1Thunk, &r, callHandler, NULL, NULL, NULL);
-        if (scm_is_false(iface))
-            return false;
-
-        ModuleCall u{"module-use!", gen, iface};
-        return scm_is_true(scm_c_catch(SCM_BOOL_T, moduleCall2Thunk, &u, callHandler, NULL, NULL, NULL));
     }
 
     void lock(SCM v) {

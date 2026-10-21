@@ -23,7 +23,7 @@
 ;;
 ;;   1. Dependency order. A module that imports another fails with "no code for
 ;;      module" unless that dependency is ALREADY compiled, so the order is
-;;      kernel, core, the families, extras, umbrella — not the file listing.
+;;      kernel, core, the families, extras — not the file listing.
 ;;   2. A GENERATED STUB KERNEL. The real kernel's export list names all ~308
 ;;      `hl--c-*` gsubrs, which do not exist until the compositor registers
 ;;      them, so the real kernel cannot be compiled outside the compositor.
@@ -63,17 +63,17 @@
 (define scm-dir (string-append repo "/src/config/scheme"))
 
 ;; the load order. Kernel first (its stub), then core, then the families, then
-;; the two composers (extras, emacs-keymaps), then the umbrella — which imports
-;; the composers, so they must already be compiled.
+;; the two composers (extras, emacs-keymaps) — which import the families, so
+;; those must already be compiled. There is no umbrella to compile after them.
 (define families
   '("core" "bind" "config" "event" "exec" "gesture" "group" "layer" "monitor"
     "notification" "query" "rule" "timer" "window" "workspace" "extras"
     "emacs-keymaps"))
 
 (define (machinery-files)
+  ;; no umbrella file: the modules ARE the machinery (see init.scm)
   (cons (string-append scm-dir "/hyprscheme/kernel.scm")
-        (append (map (lambda (m) (string-append scm-dir "/hyprscheme/" m ".scm")) families)
-                (list (string-append scm-dir "/hyprscheme.scm")))))
+        (map (lambda (m) (string-append scm-dir "/hyprscheme/" m ".scm")) families)))
 
 ;; ---- the stub kernel --------------------------------------------------------
 
@@ -173,8 +173,6 @@
    (compile-one (string-append scm-dir "/hyprscheme/" m ".scm")
                 (string-append tmp "/hyprscheme/" m ".go")))
  families)
-
-(compile-one (string-append scm-dir "/hyprscheme.scm") (string-append tmp "/hyprscheme.go"))
 
 ;; 3. any extra files named on the command line — a user's config, examples, a
 ;;    wiki block. These compile into an environment that IMPORTS THE API, the

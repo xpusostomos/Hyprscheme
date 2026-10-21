@@ -43,15 +43,15 @@ LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 # prelude (error plumbing, watchdog, fire trampolines, layout entry
 # points) and the bootstrap (the API). The Chez-only defun machinery is
 # frozen in chez/.
-# the machinery as MODULES (the file paths are the module names: (hyprscheme)
-# resolves to hyprscheme.scm, (hyprscheme kernel) to hyprscheme/kernel.scm).
+# the machinery as MODULES (the file paths are the module names: (hyprscheme
+# kernel) resolves to hyprscheme/kernel.scm).
 #
 # init.scm is the ENTRY POINT — the one file the host loads; it loads everything
 # else by name. It must be first in this list, and its presence is what
-# schemeDir() probes for.
+# schemeDir() probes for. There is no umbrella file: the public API is derived
+# by introspecting the modules, not read from a list.
 SCM_ENTRY = src/config/scheme/init.scm
 SCM_FILES = $(SCM_ENTRY) \
-            src/config/scheme/hyprscheme.scm \
             $(wildcard src/config/scheme/hyprscheme/*.scm)
 
 # the compiled forms, built beside the .scm by `make scm-compile` and shipped by
@@ -152,8 +152,6 @@ scm-compile:
 	    guild compile -o $(SCM_DIR)/hyprscheme/$$m.go $(SCM_DIR)/hyprscheme/$$m.scm || exit 1; \
 	done
 	@GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
-	  guild compile -o $(SCM_DIR)/hyprscheme.go $(SCM_DIR)/hyprscheme.scm
-	@GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
 	  guild compile -o $(SCM_DIR)/init.go $(SCM_DIR)/init.scm
 	@echo "compiled $(words $(SCM_GO)) machinery files"
 
@@ -224,10 +222,8 @@ HYPRSCHEME_SCM  := $(HYPRSCHEME_DATA)/hyprscheme/scm
 hyprpm-machinery: scm-compile
 	@install -d $(HYPRSCHEME_SCM)/hyprscheme
 	@install -m 644 src/config/scheme/init.scm $(HYPRSCHEME_SCM)/
-	@install -m 644 src/config/scheme/hyprscheme.scm $(HYPRSCHEME_SCM)/
 	@install -m 644 src/config/scheme/hyprscheme/*.scm $(HYPRSCHEME_SCM)/hyprscheme/
 	@install -m 644 src/config/scheme/init.go $(HYPRSCHEME_SCM)/
-	@install -m 644 src/config/scheme/hyprscheme.go $(HYPRSCHEME_SCM)/
 	@install -m 644 src/config/scheme/hyprscheme/*.go $(HYPRSCHEME_SCM)/hyprscheme/
 	@echo "machinery installed to $(HYPRSCHEME_SCM)"
 	@echo "(the plugin finds it automatically when nothing is beside the .so)"
@@ -256,10 +252,8 @@ install: $(TARGET) scm-compile
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 src/config/scheme/init.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-	install -m 644 src/config/scheme/hyprscheme.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 src/config/scheme/hyprscheme/*.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
 	install -m 644 src/config/scheme/init.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-	install -m 644 src/config/scheme/hyprscheme.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/
 	install -m 644 src/config/scheme/hyprscheme/*.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(HYPRLAND_SRC)/build/Hyprland $(DESTDIR)$(PREFIX)/bin/Hyprscheme

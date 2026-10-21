@@ -138,7 +138,17 @@ can fix should be fixed before a piece of work is complete.
   - `tools/bind-audit.py` — every `hl--c-*` the machinery calls is
     registered, none twice, none dead — and nothing is left undefined in
     the built `.so` (how a family object missing from `COMMON_OBJS` shows
-    up: it links fine and fails only when the compositor loads it).
+    up: it links fine and fails only when the compositor loads it). It also
+    reports a **declared-but-never-called helper in `Guile.hpp`**: five had
+    accumulated (`useModule`, `resolveModule`, `loadModule`, `exportAll`,
+    `call0`) and nothing could see them — this tool only looked at
+    `hl--c-*`, the compiler only warns about unused *static* functions, and a
+    non-static definition links happily whether or not anyone calls it. The
+    test is an `hl::`-QUALIFIED mention elsewhere, which is exact: every
+    definition sits inside `namespace hl {` so it is written unqualified,
+    while a call from another file must qualify it. A bare-name search would
+    match same-named members all over the tree (there is an `init`, a `lock`,
+    a `clear` …) and the check would be switched off as noisy.
   - `tools/doc-audit.py` — every `hl-*` name the WIKI uses exists (in a
     code block or in prose). Textual, which is the point: a name inside a
     `lambda` is never looked up by evaluating the block, which is how five
@@ -300,16 +310,30 @@ load-check cannot see that (not loading something is not a load failure).
 4. `hyprscheme/extras.scm` → `(hyprscheme extras)` — the few conveniences
    that need several calls to compose (e.g. setting a special workspace
    *on/off* when the compositor only offers a *toggle*).
-5. `hyprscheme.scm` → `(hyprscheme)` — the **public API**: a curated
-   `#:re-export` list over all of them. **This list is the single source of
-   truth for "what is public"** (`t-coverage` reads it). The generation a
-   config runs in does NOT import it — it imports the families, core and the
-   kernel directly, so internals stay reachable. **The umbrella is therefore
-   LOADED but not IMPORTED** (`init.scm`'s last form does the load half of the
-   macro by hand). It must still be loaded and reloaded every generation, or a
-   module nothing loads is a module nothing checks; but importing it would make
-   a config's environment depend on the re-export list, so a public name added
-   to a family but not yet to the umbrella would go MISSING from configs.
+5. **THERE IS NO UMBRELLA.** `hyprscheme.scm` → `(hyprscheme)` used to be the
+   **public API**: a curated `#:re-export` list over everything, and "the single
+   source of truth for what is public". It is **deleted**, and the reason is the
+   same lesson as the `Host.cpp` list: a hand-kept list of what is public drifts
+   from what is public. That one had — it listed `hl-bind-thunk` and
+   `hl-bind-tokens`, two internal record accessors that no config should see,
+   and they were the ONLY two names it had that the modules did not.
+
+   **The public set is DERIVED, by asking Guile.** `tools/api-names.scm` loads
+   the machinery the way the host does and then reads each module's
+   `module-public-interface` — which cannot disagree with the code. What counts
+   as API: every module `init.scm` names, **except the kernel** (the C++
+   boundary: 368 exports, 313 of them `hl--c-*` gsubrs). **Extras and
+   emacs-keymaps ARE API** — extended API rather than base, but a config calls
+   `hl-kbd` and `hl-gesture-add!` directly and they follow the same testing
+   rule. Internals are excluded by the convention the tree already keeps:
+   `hl--*` internal, `*-rtd` a record type C++ resolves by name, `make-hl-*` a
+   record constructor. **A name that is none of those and starts with `hl-` is
+   API — if it should not be, rename it, don't filter it.** (That is what
+   happened to the leaked pair: `hl-bind-thunk`/`hl-bind-tokens` became
+   `hl--bind-thunk`/`hl--bind-tokens`.)
+
+   The generation still imports the families, core and the kernel directly, so
+   internals stay reachable in a config.
 
 **The structural rule, checked by `tools/module-audit.py`:** a family imports
 `(hyprscheme kernel)` and `(hyprscheme core)` and **nothing else of ours** —
@@ -325,8 +349,8 @@ Things that bit us and are worth not rediscovering:
 - **`#:export` must be explicit.** `module-export-all!` makes bindings
   visible to `module-variable` but does NOT reach a module that later
   `use-modules`/`#:re-export`s the module.
-- **`#:re-export` re-exports what the module has already imported** — the
-  umbrella needs `#:use-module (hyprscheme api)` (and the kernel) first.
+- **`#:re-export` re-exports what the module has already imported** — it does
+  not go looking for the names, so the `#:use-module` must come first.
 - **A module's bindings must exist before its file is read**, because its
   `#:export` names them. `#:export` is what makes this work: a name in the
   export list is an unassigned placeholder from the moment the module is
@@ -347,9 +371,15 @@ Things that bit us and are worth not rediscovering:
   config keeps the environment it always had.
 - The **kernel must not depend on a family** (families import the kernel).
   The record types and their accessors therefore live in the kernel.
-- **`loadModule` loads from a base module**, not from whatever is current:
-  `define-module` is expanded in the current module, and one of the
-  machinery's own modules need not carry its expander.
+- **`define-module` is expanded in the CURRENT module**, so a file whose first
+  form is one must be loaded from a base module that certainly carries the
+  expander — never from one of the machinery's own modules, which import only
+  what they were told to. `hl::loadModule` existed for this and is now dead
+  (init.scm loads by name), but the insight is live: it is what
+  `tools/load-check.scm` implements when it evaluates each file with
+  `(guile-user)` current, and why a file loaded form-by-form needs
+  `set-current-module` afterwards — evaluating `define-module` does NOT switch
+  modules the way the loader's own handling does.
 - `add-to-load-path` is a **syntax transformer**, not a procedure — the host
   sets `%load-path` as a variable.
 - An **exception escaping into C++ corrupts the compositor heap**
@@ -574,7 +604,7 @@ the custom-layout entry points. `Handles.*` is the object model,
   a lint must never resolve — let alone read or run — the real config. This is
   the same rule as never touching `~/.config/`, one level down: a tool that
   inherits the ambient environment is a tool that pokes the user's config.
-- `tests/run.sh` — the 15-file suite against a nested compositor, 15/15
+- `tests/run.sh` — the 17-file suite against a nested compositor, 17/17
   green is the bar. It tests the **tree, pre-install**: the compositor is
   `../Hyprland/build/Hyprland` (never an installed one — testing what is
   installed is a different question), the plugin is this directory's
@@ -656,7 +686,7 @@ in the wiki's building-the-plugin page.
   exist. The Chez artifact is not built by this tree at all (frozen in
   `chez/`).
   STEP 3 DONE: SUITE 12/12 ON GUILE (chez 12/12 unchanged — 12 files then;
-  the suite is 14 now, see Testing). The
+  the suite is 17 now, see Testing). The
   gotcha list lives in GUILE-CONVERSION.txt step 3 — headline items:
   boot-9's error template-wraps messages ("~A" + irritants — display
   code must render them); srfi-9 constructor/accessors are syntax

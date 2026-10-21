@@ -30,6 +30,26 @@ ideas, what would make it more Scheme-like / Guile-friendly / Emacs-like
 the repo was changed for this file. The `chez/` tree was not reviewed
 (deprecated, frozen).
 
+> **SUPERSEDED IN PART (annotated 2026-10-22).** This document is a
+> point-in-time review and is left as written — a record of what was true
+> on 2026-09-26, not a description of the tree today. Two structures it
+> describes have since been REMOVED, and anyone reading it for the current
+> layout should know that first:
+>
+> - **the umbrella module `(hyprscheme)` / `hyprscheme.scm` is GONE**
+>   (§4.6 Step F's `guild compile` line, §10's file tree, and the
+>   `hyprscheme.scm` row in the ledger's module table). There is no
+>   curated public list any more: the API is DERIVED by introspecting the
+>   modules (`module-public-interface`), so it cannot drift from the code.
+>   See CLAUDE.md, "How the plugin loads Scheme".
+> - **`hyprscheme/api.scm` / `(hyprscheme api)` never existed** — the row
+>   naming it in the ledger's table is stale even for its own date, and the
+>   same phantom was copied into `Host.cpp` and CLAUDE.md and has now been
+>   removed from both.
+>
+> The module LIST itself (`init.scm`) and the one-module-per-family split
+> this document proposed are unchanged and still correct.
+
 Everything here is a finding or a *proposal*. Per the house rules
 (CLAUDE.md), none of it is to be acted on without an agreed plan; the
 plans below are written so each can be lifted out and agreed on its
@@ -907,6 +927,13 @@ generator (§7.4) and `,apropos`.
   Unbound-variable warnings **fail the build** — that is the lint that
   catches `hl-monitor=?` disappearing, a wiki example calling
   `hl-window-resize`, a renamed helper, a typo in a rarely-run branch.
+
+  *[SUPERSEDED 2026-10-22: this is what `tools/compile-lint.scm` became, and
+  it compiles the modules rather than one umbrella file — `hyprscheme.scm` no
+  longer exists. It also goes further than the sketch: it generates a STUB
+  KERNEL from the real kernel's `#:export` list, because the ~313 `hl--c-*`
+  gsubrs do not exist outside the compositor. The principle above is intact and
+  is the reason the tool exists.]*
 - The plugin loads `.go` via `load-compiled` with the `.scm` as fallback
   (dev override via `HYPRSCHEME_SCM_DIR` as now).
 - Same tool over the wiki blocks and `examples/hyprland.scm` (with the
@@ -1301,6 +1328,9 @@ exist.
 src/
   hyprscheme/            ; Scheme, one module per family, compiled to .go
     hyprscheme.scm       ; (define-module (hyprscheme) …) re-exports
+                         ;   [REMOVED 2026-10-22 — no umbrella; the API is
+                         ;    derived by introspection. init.scm names the
+                         ;    modules and each one's #:export is the API.]
     core.scm             ; guards, watchdog, reporting, generations
     window.scm workspace.scm monitor.scm group.scm layer.scm
     bind.scm keys.scm event.scm timer.scm rule.scm config.scm

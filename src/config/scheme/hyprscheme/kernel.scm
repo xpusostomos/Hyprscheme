@@ -173,7 +173,7 @@
            hl--timer-fire hl--timer-interval hl--timer-thunk
            hl--watchdog-ms hl--wd-aborted hl--wd-alarm hl--wd-enter
            hl--wd-exit hl--wd-handler hl--wd-handler-set hl--wd-rearm
-           hl--wd-stack hl-bind-rtd hl-bind-thunk hl-bind-tokens
+           hl--wd-stack hl-bind-rtd hl--bind-thunk hl--bind-tokens
            hl-event-rtd hl-rule-rtd hl-timer-rtd load))
 
 (use-modules (ice-9 exceptions)   ; guard, make-exception, exception-* accessors
@@ -373,9 +373,12 @@
 
 (define hl-bind-rtd (make-record-type 'hl-bind '(tokens thunk)))
 
-(define (hl-bind-tokens b) (hl--record-field 'hl-bind-tokens hl-bind-rtd 0 b))
+;; INTERNAL record-field accessors, hence hl-- : a bind's tokens and thunk are
+;; how the fire trampoline takes a bind apart, not something a config reads.
+;; They were hl-bind-* and so leaked into the public API list.
+(define (hl--bind-tokens b) (hl--record-field 'hl--bind-tokens hl-bind-rtd 0 b))
 
-(define (hl-bind-thunk b) (hl--record-field 'hl-bind-thunk hl-bind-rtd 1 b))
+(define (hl--bind-thunk b) (hl--record-field 'hl--bind-thunk hl-bind-rtd 1 b))
 
 (define (hl--plist-cdr l)
   ;; (key value rest ...) → (value rest ...); a trailing bare KEY is an error
@@ -432,7 +435,7 @@
 (define (hl--bind-fire-rec b)
   (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
                   (hl--guarded-run "callback"
-                    (lambda () (hl--bind-result ((hl-bind-thunk b))))))))
+                    (lambda () (hl--bind-result ((hl--bind-thunk b))))))))
     (and (not (eq? result hl--wd-aborted)) result)))
 
 (define (hl--event-fire b)

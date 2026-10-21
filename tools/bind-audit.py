@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Audit the C entry points the machinery registers against what Scheme calls.
+"""Audit the C entry points the machinery registers against what Scheme calls,
+and the runtime's own helper declarations against their callers.
 
     tools/bind-audit.py            # exits 1 on a problem
 
@@ -12,7 +13,16 @@ visible in any single file:
   - nothing is registered that Scheme never calls (dead C entry points —
     this is how hl--c-window-float and hl--c-group-lock-active were found).
 
-Run it after any change to the registration list or the bootstrap.
+It also reports a declared-but-never-called helper in Guile.hpp, which is
+the same failure one level up: `hl::useModule` and four others were left
+behind when the module list moved into init.scm, and NOTHING could see them
+— this tool only looked at `hl--c-*`, the compiler only warns about unused
+STATIC functions, and a non-static definition in a translation unit is
+linked happily whether or not anyone calls it. Five dead helpers is enough
+to say the class is real.
+
+Run it after any change to the registration list, the bootstrap, or the
+runtime's declared surface.
 """
 
 import glob
@@ -20,12 +30,49 @@ import re
 import subprocess
 import sys
 
-# the machinery as modules: (hyprscheme) plus the kernel and the API
-SCM_FILES = ['src/config/scheme/hyprscheme.scm'] + sorted(glob.glob('src/config/scheme/hyprscheme/*.scm'))
+# the machinery as modules: the kernel and the API. There is no umbrella file —
+# the public set is derived by introspection, not read from a list.
+SCM_FILES = sorted(glob.glob('src/config/scheme/hyprscheme/*.scm'))
 CPP_FILES = sorted(glob.glob('src/config/scheme/*.cpp'))
+HPP_FILES = sorted(glob.glob('src/config/scheme/*.hpp'))
 PLUGIN = 'scheme-plugin-guile.so'
 
 REG = re.compile(r'hl::bind<([\w:]+)>\("([^"]+)"\)')
+
+# The runtime header, and the shape of a free-function declaration in it: four
+# spaces of indent, a return type, a name, a parameter list, a semicolon — and
+# no body. `virtual`/`explicit`/`inline`/`static`/`template` are excluded
+# because those are members, constructors, or definitions with other rules.
+RUNTIME_HPP = 'src/config/scheme/Guile.hpp'
+DECL = re.compile(r'^    (?!virtual|explicit|inline|static|template)'
+                  r'([A-Za-z_][\w:<>,\*& ]*?)\s+([a-zA-Z_]\w*)\s*\([^;{]*\)\s*;\s*$', re.M)
+
+
+def uncommented(text):
+    """Drop comments, so a name in prose is not read as a call site."""
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    return re.sub(r'//.*$', '', text, flags=re.M)
+
+
+def dead_declarations():
+    """Declarations in Guile.hpp that nothing outside it names.
+
+    The test is an `hl::`-QUALIFIED mention anywhere else. That is exact rather
+    than approximate: every definition sits inside `namespace hl {`, so it is
+    written unqualified, and every call from another file must qualify it. A
+    bare-name search would instead match same-named members and locals all over
+    the tree (there is an `init`, a `lock`, a `clear` …), which is how a check
+    like this earns false positives and gets switched off.
+    """
+    files = CPP_FILES + HPP_FILES
+    texts = {p: uncommented(open(p).read()) for p in files}
+    header = texts[RUNTIME_HPP]
+    out = []
+    for _type, name in DECL.findall(header):
+        pat = r'hl::%s\b' % re.escape(name)
+        if not any(re.search(pat, texts[p]) for p in files if p != RUNTIME_HPP):
+            out.append(name)
+    return sorted(out)
 
 
 def main():
@@ -73,6 +120,9 @@ def main():
     except (OSError, subprocess.CalledProcessError):
         print('note: %s not built or nm unavailable — skipped the link check' % PLUGIN)
 
+    # helpers declared in the runtime header that nothing calls any more
+    dead_hl = dead_declarations()
+
     print('registered: %d across %d translation units' % (len(registered), len(CPP_FILES)))
     print('called by the machinery: %d' % len(called))
     for sym in dangling:
@@ -83,10 +133,15 @@ def main():
         print('UNBOUND:   %s is called by Scheme but nobody registers it' % name)
     for name in dead:
         print('dead:      %s (%s) is registered but never called' % (name, registered[name][0]))
-    print('%s: %d registered, %d called, %d unbound, %d duplicates, %d undefined in the .so'
-          % ('FAIL' if (unbound or duplicates or dangling) else 'ok',
-             len(registered), len(called), len(unbound), len(duplicates), len(dangling)))
-    return 1 if (unbound or duplicates or dangling) else 0
+    for name in dead_hl:
+        print('dead decl: hl::%s (%s) is declared and defined but never called'
+              % (name, RUNTIME_HPP))
+    print('%s: %d registered, %d called, %d unbound, %d duplicates, %d undefined in the .so, '
+          '%d dead helper declarations'
+          % ('FAIL' if (unbound or duplicates or dangling or dead_hl) else 'ok',
+             len(registered), len(called), len(unbound), len(duplicates), len(dangling),
+             len(dead_hl)))
+    return 1 if (unbound or duplicates or dangling or dead_hl) else 0
 
 
 if __name__ == '__main__':

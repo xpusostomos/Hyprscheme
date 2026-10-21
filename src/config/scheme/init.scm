@@ -66,13 +66,16 @@
 ;; after, so every module's body ran TWICE. Verified.
 ;;
 ;; Turning autoload off is still not enough on its own, because a module can be in
-;; the tree with no file behind it. `(hyprscheme)` is the case that matters: it is
-;; the PARENT of every `(hyprscheme X)`, so the tree grows it as a directory module
-;; as soon as the first family is defined — and `reload-module` on one of those
-;; fails outright ("unknown file name for module"), there being no file to read.
-;; Its module-filename stays #f until hyprscheme.scm itself is read, so that is the
-;; test. Verified the hard way: without this check the last line of this file dies
-;; on the first generation.
+;; the tree with no file behind it — and `reload-module` on one of those fails
+;; outright ("unknown file name for module"), there being no file to read. The
+;; case that bit us was `(hyprscheme)`, the umbrella: it was the PARENT of every
+;; `(hyprscheme X)`, so the tree grew it as a directory module as soon as the
+;; first family was defined, while its own file had not been read. Its
+;; module-filename stays #f until that file IS read, so that is the test.
+;;
+;; The umbrella is gone now, but the check stays: the parent of the modules below
+;; is `(hyprscheme)` all the same — it is the directory they live in — so the
+;; same trap is still one edit away.
 ;;
 ;; The kernel is the one module whose file is already behind it — the host read it
 ;; before this file was — so it takes the reload branch, as it must from the second
@@ -146,8 +149,11 @@
 ;;   kernel  — the host has already created it and filled it with the gsubrs
 ;;   core    — the shared plumbing the families build on
 ;;   families— each imports only the kernel and core, never another family
-;;   extras  — the one module that composes families
-;;   umbrella— the public API list, over all of them
+;;   composers (extras, emacs-keymaps) — the only modules that compose families
+;;
+;; THIS LIST IS THE WHOLE SET of what a config can reach. It is the only place
+;; modules are named for LOADING (see the note at the end of this file): the
+;; public API is derived by introspecting these modules, not listed.
 (use-or-reload-modules (hyprscheme kernel)
                       (hyprscheme core))
 
@@ -169,19 +175,13 @@
 (use-or-reload-modules (hyprscheme extras)
                       (hyprscheme emacs-keymaps))
 
-;; THE UMBRELLA IS LOADED, NOT IMPORTED — and that asymmetry is deliberate.
+;; THERE IS NO UMBRELLA. (hyprscheme) used to be a module here — a curated
+;; #:re-export list over everything, and the "single source of truth for what is
+;; public". It is gone: the public set is DERIVED now, by asking Guile what each
+;; module publishes (module-public-interface), which cannot disagree with the
+;; code the way a hand-kept list can. It had already drifted — it listed
+;; hl-bind-thunk and hl-bind-tokens, two internal record accessors that no
+;; config should see.
 ;;
-;; (hyprscheme) is the curated public API list, and the generation must NOT
-;; import it: the generation takes the families and the kernel directly, so the
-;; hl-- internals stay reachable in a config. Importing the umbrella here would
-;; put the public names in the generation a second time and, worse, make the
-;; generation's environment depend on the umbrella's re-export list — a public
-;; name added to a family but not yet to the umbrella would then be MISSING from
-;; a config, which is exactly the coupling the split exists to avoid.
-;;
-;; It still has to be loaded and reloaded every generation, because it is the
-;; list t-coverage reads and a module nothing loads is a module nothing checks.
-;; So this one line does the load half of the macro by hand.
-(if (in? '(hyprscheme))
-    (reload-module (resolve-module '(hyprscheme)))
-    (resolve-module '(hyprscheme)))
+;; So the list of modules above is the whole story: what init.scm names is what
+;; a config can reach, and what each of those modules #:exports is the API.

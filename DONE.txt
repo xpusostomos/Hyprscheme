@@ -86,8 +86,82 @@ and TODO.txt's archived sections.)
   (names all 18 missing modules).
 - tools/load-check.scm mirrors the new order: the generation is made
   before init.scm and is the module init.scm is read in.
+- FIVE dead hl:: helpers removed from Guile.hpp/Guile.cpp, with the
+  private thunks and includes that only they used (callThunk0,
+  moduleCall1Thunk, ModuleCall, <sstream>, <vector>):
+    useModule   — orphaned by this work: the import list moved into
+                  init.scm and no caller was left
+    exportAll   — the kernel exports by #:export now, not module-export-all!
+    resolveModule — a byte-for-byte duplicate of makeModule, which superseded it
+    loadModule  — init.scm loads modules by name
+    call0       — nothing makes a 0-arg contained call
+  The last four were already dead before this work. Kept: the
+  define-module-expands-in-the-CURRENT-module insight, which is live
+  (load-check.scm implements it) and now lives in CLAUDE.md with
+  loadModule marked dead rather than as a claim about live code.
+- tools/bind-audit.py now REPORTS dead helper declarations in Guile.hpp,
+  so this class cannot silently re-accumulate. Verified to fail: adding
+  `SCM nothingCallsThis(const char*)` trips it, exit 1, naming the
+  offender. The check is exact (hl::-qualified mentions only) precisely
+  because a bare-name search matches same-named members across the tree
+  and would be disabled as noisy.
+- makeModule's comment corrected: it claimed `#:ensure` is what makes it
+  create on a miss. It is the C entry point scm_c_resolve_module, which
+  has no such argument — it creates on a miss AND autoloads.
+
+== THE UMBRELLA IS GONE; THE API IS DERIVED ==
+- hyprscheme.scm `(hyprscheme)` is DELETED. It was a curated #:re-export
+  list and "the single source of truth for what is public". Same lesson
+  as the Host.cpp list: a hand-kept list of what is public drifts from
+  what is public, and this one had — it listed hl-bind-thunk and
+  hl-bind-tokens, two internal record accessors, and those were the ONLY
+  two names it had that the modules did not.
+- THE PUBLIC SET IS DERIVED BY ASKING GUILE. tools/api-names.scm loads
+  the machinery as the host does (stub the gsubrs, make a generation
+  current, load init.scm) and reads each module's
+  module-public-interface — which cannot disagree with the code. 323
+  names. No list anywhere.
+- What counts as API: every module init.scm names, EXCEPT the kernel
+  (the C++ boundary — 368 exports, 313 hl--c-* gsubrs). Extras and
+  emacs-keymaps ARE API: extended API rather than base, but a config
+  calls hl-kbd and hl-gesture-add! directly and they follow the same
+  testing rule. Internals are excluded by the convention the tree
+  already keeps: hl--* internal, *-rtd a record type C++ resolves by
+  name, make-hl-* a record constructor. A name that is none of those
+  and starts with hl- IS API — if it should not be, RENAME it, do not
+  filter it. That is what happened to the leaked pair:
+  hl-bind-thunk/hl-bind-tokens -> hl--bind-thunk/hl--bind-tokens.
+- t-coverage.sh now derives from api-names.scm instead of sed-scraping
+  the umbrella. Both guards verified to fail: an injected untested API
+  name is reported by name, and an empty derivation trips the 200-name
+  vacuity floor (which matters more now — a failed load yields an empty
+  list rather than an error).
+- Consumers rewired: doc-audit.py (glob the modules), doc-exercise.scm
+  (shadow registrars across the modules, not one interface),
+  module-audit.py (the PUBLIC: check was "every public name reaches the
+  umbrella" — vacuous without it, so it now derives the set and keeps a
+  size floor; the ENTRY: check stays), load-check.scm, compile-lint.scm,
+  bind-audit.py, Makefile (SCM_FILES, install, scm-compile).
+- Docs: CLAUDE.md's umbrella section rewritten as "THERE IS NO UMBRELLA"
+  with the derivation rule; the stale `hyprscheme/api.scm` /
+  `(hyprscheme api)` references in Host.cpp and CLAUDE.md removed (that
+  module never existed); the wiki's building-the-plugin layout updated.
+  FABLE.md / FABLE-DONE.md deliberately NOT touched — they are the
+  historical design record and describe the state at a point in time.
 
 == TESTS + TOOLING ==
+- hl-load-config (in extras): load another config file by name.
+  Looks under $XDG_CONFIG_HOME/hypr/ then $HOME/.config/hypr/, appending
+  .scm unless the name already ends in it, and loads it INTO THE CURRENT
+  GENERATION via hl--load (the kernel's `load` shadow) so what it
+  defines is reachable and is discarded on reload like everything else.
+  Returns the path, or #f having raised a notification when the file is
+  absent — a missing optional file is a normal condition, not a fault.
+  An unset/empty/relative XDG_CONFIG_HOME is invalid per the spec and
+  skipped, but $HOME/.config is tried either way.
+  Tests in t-api.sh, each VERIFIED TO FAIL by breaking the thing it
+  asserts: removing the notification, skipping the load, and dropping
+  the .scm suffix each trip the matching assertion.
 - tests/run.sh: 17-file suite, 17/17 green against a nested
   compositor; t-coverage fails if a public API lacks a test.
 - tests/soak.sh [SECONDS]: sustained-load soak (live window pool,

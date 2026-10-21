@@ -10,11 +10,15 @@ The machinery is modules, and the split is only worth having if it stays true:
   - (hyprscheme core) is shared plumbing: it imports the kernel only;
   - (hyprscheme extras) and (hyprscheme emacs-keymaps) are the modules allowed
     to compose the raw API, so they may import families;
-  - (hyprscheme) is the public umbrella: it imports everything and re-exports;
   - nothing calls a name a FAMILY owns from outside a family, except extras;
-  - every top-level define in a module file is in that module's own `#:export`,
-    and every public name the families and core export reaches the umbrella's
-    `#:re-export`.
+  - every top-level define in a module file is in that module's own `#:export`;
+  - every module is named in init.scm, the one file the host loads.
+
+There is no umbrella module any more. `(hyprscheme)` used to be a curated
+`#:re-export` list and this tool checked that every public name reached it; the
+public set is DERIVED now — "what a module #:exports, minus the internals" — and
+tests/t-coverage.sh derives it by INTROSPECTION, which is the only source that
+cannot disagree with the running code.
 
 It also checks the things that have bitten us: an `hl--c-*` referenced but never
 registered (bind-audit.py owns that), and a family that calls another family's
@@ -41,9 +45,6 @@ KERNEL = 'kernel'
 CORE = 'core'
 EXTRAS = 'extras'
 EMACS_KEYMAPS = 'emacs-keymaps'
-UMBRELLA = 'hyprscheme'
-# the umbrella is not in DIR: it is the file the directory is named after
-UMBRELLA_PATH = 'src/config/scheme/hyprscheme.scm'
 # the ENTRY POINT: the one file the host loads, which loads everything else by
 # name. Every module must be named here or it is never loaded at all.
 ENTRY_PATH = 'src/config/scheme/init.scm'
@@ -157,20 +158,29 @@ def main():
                   % (name, c))
             bad = 1
 
-    # The public surface: everything the families and core export that is API
-    # must be re-exported by the umbrella, or the API simply cannot be called.
-    # The kernel is not part of that surface — it is the gsubr boundary, and
-    # the generation imports it DIRECTLY (Host.cpp buildGeneration), which is
-    # how a config's (load "x.scm") reaches the kernel's generation-targeting
-    # shadow of load/eval. Re-exporting those through the umbrella would be
-    # wrong, not merely unnecessary.
-    umbrella = read(UMBRELLA_PATH)
+    # THE PUBLIC SURFACE IS DERIVED, not read from a list. There used to be an
+    # umbrella module `(hyprscheme)` — a curated #:re-export list, and a check
+    # here that every public name reached it. Both are gone: the API is now
+    # "what each module #:exports, minus the internals", which is what
+    # `is_public` above encodes, and what a config actually sees because
+    # init.scm imports those modules directly.
+    #
+    # The check that replaces it lives in tests/t-coverage.sh, which derives the
+    # same set BY INTROSPECTION (module-public-interface over the loaded
+    # modules) and demands a test for each name. Introspection is the better
+    # source: the old list had already drifted, listing hl-bind-thunk and
+    # hl-bind-tokens, two internal record accessors no config should see.
+    #
+    # What is worth keeping here is the shape of the set, since a name that is
+    # public by accident is invisible otherwise: a family export starting with
+    # `hl-` and not matching the internal patterns IS the API.
     public = set()
     for name, path in fams.items():
         if name not in (KERNEL, EXTRAS):
             public |= {n for n in exports_of(read(path)) if is_public(n)}
-    for n in sorted(public - exports_of(umbrella, '#:re-export')):
-        print('PUBLIC:  %s is exported but does not reach (hyprscheme)' % n)
+    if len(public) < 200:
+        print('PUBLIC:  only %d public names derived — the derivation is broken, '
+              'not the API' % len(public))
         bad = 1
 
     # EVERY module must be named in init.scm. That file is the only thing the
@@ -180,15 +190,14 @@ def main():
     # loading something is not a load failure. (It is the module-tree analogue
     # of the family-import rule this tool exists for: silent decay.)
     entry = read(ENTRY_PATH)
-    # `(hyprscheme x)` names module x; a bare `(hyprscheme)` names the umbrella
+    # `(hyprscheme x)` names module x. There is no bare `(hyprscheme)` to check
+    # for any more — the umbrella is gone, so init.scm's list of `(hyprscheme X)`
+    # names IS the whole set of what loads.
     named = {m.group(1) for m in re.finditer(r"\(hyprscheme ([a-z-]+)\)", entry)}
     for name in sorted(fams):
         if name not in named:
             print('ENTRY:   %s is never loaded — init.scm does not name it' % name)
             bad = 1
-    if not re.search(r"\(hyprscheme\)", entry):
-        print('ENTRY:   (hyprscheme) is never loaded — init.scm does not name it')
-        bad = 1
 
     print('%s: %d modules — %d families, plus %s'
           % ('FAIL' if bad else 'ok', len(fams), len(fams) - len(FREE),

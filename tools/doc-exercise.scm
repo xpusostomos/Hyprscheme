@@ -143,7 +143,6 @@ these for the same reason."
     (stub-c-entry-points (cons kernel api))
     (load-silently kernel)
     (for-each load-silently api)
-    (load-silently (string-append dir "/hyprscheme.scm"))
     (module-set! (resolve-module '(hyprscheme kernel)) 'hl--ready #t)))
 
 ;; the environment a config is given, in ONE module shared by every block
@@ -172,17 +171,26 @@ these for the same reason."
         (memq name '(hl-submap hl-repeat hl-after)))))
 
 (define (shadow-registrars! mod)
-  (module-map
-    (lambda (name _var)
-      (when (registrar? name)
-        (module-define! mod name
-          (lambda args
-            (for-each (lambda (a)
-                        (walk-procedures a (lambda (proc)
-                                             (set! captured (cons (cons proc label) captured)))))
-                      args)
-            #t))))
-    (resolve-interface '(hyprscheme))))
+  ;; The names to shadow come from the modules the HARNESS imports — the
+  ;; families, core, extras and emacs-keymaps — NOT from a single interface.
+  ;; There used to be an umbrella module `(hyprscheme)` whose interface listed
+  ;; them all; it is gone, so each module is asked directly. That is the same
+  ;; derivation tests/t-coverage.sh uses (tools/api-names.scm).
+  (for-each
+    (lambda (iface)
+      (module-map
+        (lambda (name _var)
+          (when (registrar? name)
+            (module-define! mod name
+              (lambda args
+                (for-each (lambda (a)
+                            (walk-procedures a (lambda (proc)
+                                                 (set! captured (cons (cons proc label) captured)))))
+                          args)
+                #t))))
+        iface))
+    (cons (resolve-interface '(hyprscheme kernel))
+          (map (lambda (m) (resolve-interface (list 'hyprscheme m))) api-modules))))
 
 ;; ---- reporting -------------------------------------------------------------
 

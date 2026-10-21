@@ -111,17 +111,22 @@ using Hyprutils::OS::CFileDescriptor;
     located through the plugin's own load path (dladdr on a known symbol). It is
     a set of MODULES, and the file paths are the module names:
 
-      hyprscheme.scm          (hyprscheme)          the PUBLIC API — a curated
-                                                    #:re-export list, and the
-                                                    single source of truth for
-                                                    what is public
+      init.scm                —                     THE ENTRY POINT: the one
+                                                    file the host loads, and it
+                                                    names every module below
       hyprscheme/kernel.scm   (hyprscheme kernel)   the machinery the host
                                                     reaches: the watchdog, the
                                                     fire trampolines, the layout
                                                     entry points, the record
-                                                    types those read
-      hyprscheme/api.scm      (hyprscheme api)      the API itself, public and
-                                                    internal
+                                                    types those read — and the
+                                                    whole C++ boundary
+      hyprscheme/<family>.scm (hyprscheme <family>) one module per object
+                                                    family: the raw API
+
+    There is no umbrella module: the public API is DERIVED by asking Guile what
+    each module publishes (module-public-interface — see tools/api-names.scm),
+    not read from a list. A curated `(hyprscheme)` re-export list used to sit
+    here and had already drifted from the truth.
 
     THE WHOLE SCHEME SIDE IS REBUILT ON EVERY CONFIG RELOAD (buildGeneration):
     each module is created, its bindings are defined into it, its file is read,
@@ -762,9 +767,8 @@ namespace Config::Scheme {
                 return std::string(ov);
             }
             // init.scm is the marker: it is the one file the host loads, so a
-            // directory without it is not a machinery directory (hyprscheme.scm
-            // would do as a marker too, but this is the entry point and the
-            // thing whose absence actually matters).
+            // directory without it is not a machinery directory — its absence
+            // is exactly the thing that matters.
             const auto beside = pluginDir();
             if (!beside.empty() && std::filesystem::exists(beside + "/init.scm"))
                 return beside;

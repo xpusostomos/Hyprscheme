@@ -105,15 +105,14 @@
        (kernel (string-append dir "/hyprscheme/kernel.scm"))
        (entry  (string-append dir "/init.scm"))
        ;; every .scm the machinery is made of, for the stub scan: the entry
-       ;; point, the umbrella, and the modules under hyprscheme/
+       ;; point and the modules under hyprscheme/ (no umbrella file any more)
        (all    (cons entry
-                     (cons (string-append dir "/hyprscheme.scm")
-                           (map (lambda (m) (string-append dir "/hyprscheme/" m ".scm"))
-                                (list "kernel" "core" "bind" "config" "event" "exec"
-                                      "gesture" "group" "layer" "monitor"
-                                      "notification" "query" "rule" "timer"
-                                      "window" "workspace" "extras"
-                                      "emacs-keymaps"))))))
+                     (map (lambda (m) (string-append dir "/hyprscheme/" m ".scm"))
+                          (list "kernel" "core" "bind" "config" "event" "exec"
+                                "gesture" "group" "layer" "monitor"
+                                "notification" "query" "rule" "timer"
+                                "window" "workspace" "extras"
+                                "emacs-keymaps")))))
   ;; THE HOST'S ACTUAL SEQUENCE (Host.cpp buildGeneration), in order:
   ;;   1. the machinery directory on %load-path and %load-compiled-path
   ;;   2. create the kernel module and register the gsubrs into it — the stubs

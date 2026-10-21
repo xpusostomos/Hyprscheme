@@ -39,7 +39,6 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WIKI = os.path.normpath(os.path.join(REPO, '..', 'Hyprscheme.wiki'))
 AWK = os.path.join(REPO, 'tests', 'wiki-examples.awk')
-UMBRELLA = os.path.join(REPO, 'src/config/scheme/hyprscheme.scm')
 MODULES = os.path.join(REPO, 'src/config/scheme/hyprscheme')
 
 # a maximal run of name characters, so hl-group is NOT pulled out of
@@ -64,14 +63,15 @@ ALLOWED = {
 
 
 def visible_names():
-    """Every hl-*/hl--* name a config can see: the umbrella's re-exports plus
-    every module's own #:export (the generation imports the families and the
-    kernel directly, so their exports count)."""
+    """Every hl-*/hl--* name a config can see: each module's own #:export (the
+    generation imports the families and the kernel directly, so their exports
+    count). There is no umbrella file to add any more — and there was no need
+    for one here even before, since a name the wiki uses only has to EXIST."""
     names = set()
-    for path in [UMBRELLA] + [os.path.join(MODULES, f)
-                              for f in os.listdir(MODULES) if f.endswith('.scm')]:
-        for body in EXPORT.findall(open(path).read()):
-            names |= set(body.split())
+    for f in os.listdir(MODULES):
+        if f.endswith('.scm'):
+            for body in EXPORT.findall(open(os.path.join(MODULES, f)).read()):
+                names |= set(body.split())
     return {n for n in names if n.startswith('hl-')}
 
 

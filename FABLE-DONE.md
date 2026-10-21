@@ -297,7 +297,8 @@ by re-running `sudo make install`. Tracked in the conversation, not here.
   `petite.boot`, `scheme.boot` and `scheme-plugin.so` (~20 MB) were deleted from
   `~/.local/lib/hyprscheme/` after re-checking that nothing in `~/.config`
   references them. `make install` now puts the module tree
-  (`hyprscheme.scm` + `hyprscheme/`) there, and the superseded pre-module
+  (`hyprscheme.scm` + `hyprscheme/`) there *[2026-10-22: now `init.scm` +
+  `hyprscheme/` — the umbrella is gone]*, and the superseded pre-module
   `hyprscheme-prelude.scm`/`hyprscheme-bootstrap.scm` copies were removed with
   them. The suite is green afterwards.
 
@@ -814,9 +815,18 @@ The machinery is now three Guile modules instead of two flat `.scm` files, and
 
 | file | module | what it is |
 |---|---|---|
-| `hyprscheme.scm` | `(hyprscheme)` | the **public API** — a curated `#:re-export` of **310** names. This list is the single source of truth for "what is public". |
+| `hyprscheme.scm` | `(hyprscheme)` | the **public API** — a curated `#:re-export` of **310** names. This list is the single source of truth for "what is public". *[REMOVED 2026-10-22 — see the note under this table.]* |
 | `hyprscheme/kernel.scm` | `(hyprscheme kernel)` | the machinery, and the layer the **host** reaches: watchdog, fire trampolines, layout entry points, and the record types those trampolines read. 55 exports. |
-| `hyprscheme/api.scm` | `(hyprscheme api)` | the API itself, public and internal. 337 exports. |
+| `hyprscheme/api.scm` | `(hyprscheme api)` | the API itself, public and internal. 337 exports. *[NEVER EXISTED — stale even for its own date; the phantom was copied into `Host.cpp` and CLAUDE.md and removed from both 2026-10-22.]* |
+
+*[SUPERSEDED 2026-10-22: the module split this entry describes is unchanged and
+still correct, but there is no umbrella module any more. `(hyprscheme)` and
+`hyprscheme.scm` are DELETED — a curated public list drifts from what is public,
+and that one had: it listed `hl-bind-thunk` and `hl-bind-tokens`, two internal
+record accessors, and they were the only two names it had that the modules did
+not. The public set is DERIVED now, by asking Guile
+(`module-public-interface` — `tools/api-names.scm`, 323 names), so it cannot
+disagree with the code. `init.scm`'s list of modules is the whole story.]*
 
 The generation a config runs in imports the **API and the kernel directly**, not
 the umbrella — so the `hl--` helpers stay reachable exactly as they were when
@@ -824,6 +834,13 @@ everything was one flat environment. `(hyprscheme)` exists for configs and tools
 that want the public list alone; it exports 310 names and neither the internals
 nor the record representation (`hl--plist-get`, `hl--fire-str-rec`, `hl-bind-rtd`
 are all absent — verified against the interface).
+
+*[SUPERSEDED 2026-10-22: the first sentence is still exactly right, and is now
+the ONLY behaviour — the generation imports the families and the kernel directly.
+The second no longer applies: there is no `(hyprscheme)` for a config to import.
+The "verified against the interface" point was correct when written and is a
+good illustration of the drift that killed the module: two names that should
+never have been in that list were in it.]*
 
 The host (`buildGeneration`) now creates each module, defines its bindings into
 it, reads its file, then assembles the generation. **`%load-path` gets the
@@ -1316,6 +1333,9 @@ Scheme: `hyprscheme/core.scm` (the `hl-box` record + accessors),
 `hyprscheme/kernel.scm` (the `(area placements)` destructuring, the watchdog
 around the layout paths, the stale comment), `hyprscheme/window.scm`,
 `hyprscheme.scm` (the umbrella's re-exports), and the export lists regenerated.
+
+*[2026-10-22: the last item was `hyprscheme.scm` — the umbrella, now deleted.
+The rest of this entry stands; only that file is gone.]*
 
 Tests: `t-api.sh` (boxes, `hl-window-group`, and a driven custom-layout round
 trip that asserts the layout settles — `in` equals `out` — plus a partial

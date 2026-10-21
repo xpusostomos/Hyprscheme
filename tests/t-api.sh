@@ -663,10 +663,13 @@ ok '(let ((b (hl-bind-add! (hl-kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key
 ok '(let ((b (hl-bind-add! (hl-kbd "<f24>") (lambda () #f)))) b (hl-unbind-key! (hl-kbd "<f24>")))'
 
 # ---- bind records: the handle carries the token list and the thunk ----------
+# the accessors are hl--bind-tokens / hl--bind-thunk: INTERNAL (they are how the
+# fire trampoline takes a bind apart), so they are tested here as internals —
+# this file is the API suite, and the point is that the record holds both
 ok '(let ((b (hl-bind-add! (hl-kbd "C-M-a") (lambda () #f))))
      (and (hl-bind? b)
-       (equal? (hl-bind-tokens b) (quote ("CTRL" "ALT" "a")))
-       (procedure? (hl-bind-thunk b))
+       (equal? (hl--bind-tokens b) (quote ("CTRL" "ALT" "a")))
+       (procedure? (hl--bind-thunk b))
        (hl-unbind! b)))'
 # precise unbind: two binds on the SAME key; removing the first must leave
 # the second registrable-and-removable (a coarse unbind would kill both)
@@ -764,6 +767,27 @@ ok '(let ((b (hl-bind-add! (hl-kbd "s-<F27>") (lambda () #t) #:auto-consuming #t
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
 ok '(let ((b (hl-bind-add! (hl-kbd "s-<F28>") (lambda () (error "boom")) #:auto-consuming #t)))
      (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
+
+# ---- hl-load-config: find a config file and load it into the generation -----
+# The search is $XDG_CONFIG_HOME/hypr/, then $HOME/.config/hypr/ — the way the
+# compositor finds its own config. run.sh OWNS $XDG_CONFIG_HOME (a temp dir) so
+# this writes there, never near the user's real config.
+#
+# What it has to prove, in order: a file that exists is FOUND and its forms RUN
+# (not merely that a path was returned); ".scm" is appended to a bare name; and
+# a name with nothing behind it returns #f and raises a notification rather than
+# raising an error — a missing optional file is a normal condition, not a fault.
+CFG="$XDG_CONFIG_HOME/hypr"
+printf '(hl-state-set! (quote loaded-by-name) 42)\n' > "$CFG/api-extra.scm"
+val '(begin (hl-load-config "api-extra") (hl-state-ref (quote loaded-by-name) 0))' '42'
+# the return value is the path it used, and the name is NOT re-suffixed
+val '(hl-load-config "api-extra")' "\"$CFG/api-extra.scm\""
+# a name that already ends in .scm is taken as-is
+ok '(equal? (hl-load-config "api-extra.scm") "'"$CFG"'/api-extra.scm")'
+# missing: #f, and a notification is raised (so the user is TOLD, not ignored)
+ok '(let ((n (length (hl-notifications))))
+       (and (eq? (hl-load-config "no-such-config-anywhere") #f)
+            (> (length (hl-notifications)) n)))'
 
 # ---- bind result protocol (upstream {ok, pass_event, error, request_release}) ----
 # a non-plist truthy value normalizes to ok #t, like upstream's non-table returns
