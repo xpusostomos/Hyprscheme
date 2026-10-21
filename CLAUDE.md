@@ -206,6 +206,21 @@ scm-compile` builds them (in dependency order — a module fails to compile with
 "no code for module" unless its dependency is already a `.go`), and `install`
 ships them **beside** the `.scm`.
 
+**The host names NO module — not even in the generation.** `init.scm` is read
+with the **generation** current, so its `use-modules` ARE the generation's
+environment, and the standard library a config has always had is imported there
+too. `buildGeneration` therefore has no module list at all: kernel (created and
+given the gsubrs), then the generation made current, then one `evalFile`. The
+order is load-bearing — read with the kernel current, as it once was, the
+imports land in the *kernel* and the generation has to be assembled by hand,
+which is how a 23-line list in C++ came to duplicate `init.scm`'s and drift from
+it. **`tests/t-generation.sh` exists for exactly that failure**, because it is
+invisible otherwise: Guile resolves names through a used module's own use-list,
+transitively, so the generation still *reaches* everything and the whole rest of
+the suite passes. The test asserts the generation's own **use-list**, not that a
+call works. Verified to fail by restoring the old order (it names all 18 missing
+modules).
+
 **The `.scm` always ship too, and that is not redundancy.** The wipe reloads by
 `reload-module`, which re-reads the SOURCE and cannot work from a `.go` alone
 ("Unable to find file k.scm in load path" — verified). The `.go` is a
@@ -230,10 +245,33 @@ first-load accelerator, never a replacement.
   `init.scm`'s `use-or-reload-module` takes the module name as a `syntax-rules`
   pattern variable and uses it both as a quoted datum (for the `in?` and
   `resolve-module` lookups) and as the literal name `use-modules` needs. That is
-  why the module list is one line per module rather than three. And the
-  "already loaded?" test must use `resolve-module` with `#:ensure #f`: plain
-  `resolve-module` CREATES an empty module for a name it cannot find, so a naive
-  probe always says yes.
+  why the module list is one line per module rather than three.
+- **`#:ensure #f` IS NOT A PROBE — `resolve-module` autoloads.** It has two
+  separate switches: the **second positional argument** is `autoload`
+  (default `#t`), and `#:ensure` only says whether to invent an empty module
+  when the search comes up empty. `(resolve-module name #:ensure #f)` therefore
+  still LOADS the file it was asked about, and answers "already in" for a module
+  that had never been loaded — the old `in?` did exactly that, so on the first
+  generation it loaded each module and the branch below reloaded it, running
+  every module's body **twice**. The real probe is
+  `(resolve-module name #f #:ensure #f)`: autoload off, nothing created, only
+  what is already in the tree.
+- **...and "in the tree" is still not the question — `reload-module` needs a
+  FILE.** A module can exist with none behind it. `(hyprscheme)` is the case
+  that bites: it is the PARENT of every `(hyprscheme X)`, so the tree grows it
+  as a directory module the moment the first family is defined, and
+  `reload-module` on it fails outright ("unknown file name for module") — there
+  is nothing to re-read. Its `module-filename` stays `#f` until
+  `hyprscheme.scm` itself is read, so `in?` tests that too. Without the check,
+  the last line of `init.scm` dies on the first generation.
+- **`reload-module` does not IMPORT.** It re-reads a module into the existing
+  object; the current module's use-list is untouched. So the macro must reload
+  *and then* `use-modules` unconditionally — otherwise the second generation on
+  imports nothing. (The old macro's `use-modules` branch was dead, which hid
+  this: with autoloading `in?`, the reload branch was always the one taken.)
+- **Guile's own modules must NOT go through `reload-module`.** It is an error,
+  not a refresh — there is nothing of ours to re-read. The five stdlib modules
+  therefore use plain `use-modules` in `init.scm`.
 
 `tools/module-audit.py` checks that every module is named in `init.scm` — a
 module missing from it is simply never loaded, with no error anywhere, and
@@ -266,7 +304,12 @@ load-check cannot see that (not loading something is not a load failure).
    `#:re-export` list over all of them. **This list is the single source of
    truth for "what is public"** (`t-coverage` reads it). The generation a
    config runs in does NOT import it — it imports the families, core and the
-   kernel directly, so internals stay reachable.
+   kernel directly, so internals stay reachable. **The umbrella is therefore
+   LOADED but not IMPORTED** (`init.scm`'s last form does the load half of the
+   macro by hand). It must still be loaded and reloaded every generation, or a
+   module nothing loads is a module nothing checks; but importing it would make
+   a config's environment depend on the re-export list, so a public name added
+   to a family but not yet to the umbrella would go MISSING from configs.
 
 **The structural rule, checked by `tools/module-audit.py`:** a family imports
 `(hyprscheme kernel)` and `(hyprscheme core)` and **nothing else of ours** —
@@ -285,8 +328,17 @@ Things that bit us and are worth not rediscovering:
 - **`#:re-export` re-exports what the module has already imported** — the
   umbrella needs `#:use-module (hyprscheme api)` (and the kernel) first.
 - **A module's bindings must exist before its file is read**, because its
-  `#:export` names them. The host defines the kernel's two gsubrs
-  (`hl--c-generation`, `hl--c-run-finalizers`) before reading `kernel.scm`.
+  `#:export` names them. `#:export` is what makes this work: a name in the
+  export list is an unassigned placeholder from the moment the module is
+  defined, so the file reads and the gsubrs are assigned into those
+  placeholders afterwards.
+- **`hl::makeModule` READS THE FILE.** It resolves the name and resolve
+  AUTOLOADS, so `kernel.scm` is read *before* `registerAllBindings()` runs —
+  not after, as its comment claimed. Verified with a C probe. The
+  consequence to know: **the kernel's top-level forms run with the gsubrs
+  unbound**, so a gsubr called at kernel load time fails. Keep the kernel's
+  top level to `define`s. (Nothing in the tree does this today; it is a trap
+  for the next person who adds a top-level call there.)
 - **Guile hoists top-level defines**, so `(define hl--base-load load)` in a
   module file captures that file's own `load` shadow — use `(@ (guile) load)`.
 - A module that shadows `load`/`eval` needs **`#:declarative? #f`**.

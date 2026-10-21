@@ -50,8 +50,45 @@ and TODO.txt's archived sections.)
   list ((hl-kbd "C-M-")).
 - Exec: single (hl-exec! cmd . rules); no shell/raw split, no execvp.
 
+== THE LOADER (init.scm owns the module list) ==
+- init.scm is the ONLY list of modules, and the ONLY thing the host
+  loads. Host.cpp names no module at all: it creates the kernel and
+  registers the gsubrs, makes the generation, makes it CURRENT, then
+  one evalFile(init.scm) — so init.scm's `use-modules` ARE the
+  generation's environment, stdlib included. The 23-line useModule()
+  list that duplicated init.scm's and could drift from it is GONE.
+- init.scm's `in?` was a load masquerading as a probe. `resolve-module`'s
+  second POSITIONAL arg is `autoload` (default #t) and `#:ensure` is a
+  separate switch, so `(resolve-module name #:ensure #f)` still LOADED
+  the file and answered "already in" for a module never loaded. Every
+  module's body therefore ran TWICE on generation 1, and the macro's
+  `use-modules` branch was dead code that never once executed.
+- The probe is now `(resolve-module name #f #:ensure #f)` AND a
+  `module-filename` check. Autoload off is not enough on its own: a
+  module can exist with no file behind it. `(hyprscheme)` is the parent
+  of every `(hyprscheme X)`, so the tree grows it as a directory module
+  as soon as the first family is defined, and `reload-module` on it
+  fails ("unknown file name for module"). Verified the hard way —
+  without the check, the last line of init.scm dies on gen 1.
+- The macro reloads if present and then ALWAYS imports: `reload-module`
+  does not import, so gen 2+ would otherwise get nothing. Guile's own
+  modules (the five stdlib ones) use plain `use-modules` — `reload-module`
+  on one is an error, not a refresh.
+- The umbrella is LOADED but not IMPORTED, deliberately: importing it
+  would make a config's environment depend on the re-export list, so a
+  public name added to a family but not yet to the umbrella would go
+  missing from configs.
+- tests/t-generation.sh pins it, asserting the generation's own USE-LIST
+  rather than that a call works. Guile resolves names through a used
+  module's use-list transitively, so with the old order the generation
+  still REACHES everything and the whole rest of the suite passes — only
+  the use-list shows it. Verified to fail by restoring the old order
+  (names all 18 missing modules).
+- tools/load-check.scm mirrors the new order: the generation is made
+  before init.scm and is the module init.scm is read in.
+
 == TESTS + TOOLING ==
-- tests/run.sh: 12-file suite, 12/12 green against a nested
+- tests/run.sh: 17-file suite, 17/17 green against a nested
   compositor; t-coverage fails if a public API lacks a test.
 - tests/soak.sh [SECONDS]: sustained-load soak (live window pool,
   custom layout under load, event/timer/bind/gesture churn); SOAK_TRACE

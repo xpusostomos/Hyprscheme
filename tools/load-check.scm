@@ -64,12 +64,18 @@
 
 ;; load a file form by form so a failure names the offending form, and restore
 ;; the module afterwards (a define-module file switches it as a side effect)
-(define (load-reporting path)
+;;
+;; BASE is the module the forms are evaluated in, and it is NOT incidental:
+;; `use-modules` imports into whatever module is current, so a file that is all
+;; `use-modules` — init.scm — puts its imports wherever this points. Default
+;; `(guile-user)`, which is right for a file whose first form is `define-module`
+;; (`define-module` is expanded in the current module, and one of the machinery's
+;; own modules need not carry its expander). init.scm has no `define-module` and
+;; must be read with the GENERATION current, so the host passes it explicitly.
+(define* (load-reporting path #:optional (base '(guile-user)))
   (format #t "~a: " path)
-  ;; start from a base module: `define-module` is expanded in whatever module is
-  ;; current, and one of the machinery's own modules need not carry it
   (let ((prev (current-module)))
-    (set-current-module (resolve-module '(guile-user)))
+    (set-current-module (if (pair? base) (resolve-module base) base))
     (call-with-input-file path
       (lambda (port)
         (let loop ((n 0))
@@ -108,7 +114,7 @@
                                       "notification" "query" "rule" "timer"
                                       "window" "workspace" "extras"
                                       "emacs-keymaps"))))))
-  ;; THE HOST'S ACTUAL SEQUENCE (Host.cpp buildGeneration), which is now short:
+  ;; THE HOST'S ACTUAL SEQUENCE (Host.cpp buildGeneration), in order:
   ;;   1. the machinery directory on %load-path and %load-compiled-path
   ;;   2. create the kernel module and register the gsubrs into it — the stubs
   ;;      go in the KERNEL, where the host puts the real ones, and BEFORE the
@@ -116,11 +122,16 @@
   ;;      the kernel's own hl--c-* placeholders stay unassigned and every call
   ;;      through one is an unbound variable — a class of error this check then
   ;;      could not see.
-  ;;   3. load init.scm, which `use-modules`es everything else by name.
+  ;;   3. make the GENERATION and make it CURRENT, then load init.scm INTO it.
+  ;;      The generation is current so init.scm's `use-modules` land in the
+  ;;      generation, which is what makes init.scm the generation's environment
+  ;;      and leaves the host no module list of its own to keep in step.
   ;;
   ;; This used to reimplement steps 2-3 by loading all nineteen files itself,
   ;; which meant it could not catch a fault in init.scm — the file the host
-  ;; actually loads. Now it loads the same file the host does.
+  ;; actually loads. Now it loads the same file the host does, in the same
+  ;; module, which is the part that matters: importing init.scm's names
+  ;; somewhere else would let this pass while the generation had nothing.
   (set! %load-path (cons dir %load-path))
   (set! %load-compiled-path (cons dir %load-compiled-path))
 
@@ -129,17 +140,11 @@
   (module-define! (current-module) 'hl--c-generation (lambda () #f))
   (stub-c-entry-points all)
 
-  (load-reporting entry)
+  ;; a generation, as the host builds one, BEFORE init.scm — see step 3 above
+  (define gen (make-fresh-user-module))
+  (load-reporting entry gen)
   ;; the host sets this once every module is in (see Host.cpp)
   (module-set! (resolve-module '(hyprscheme kernel)) 'hl--ready #t)
-
-  ;; a generation, as the host builds one: the API and the kernel, directly
-  (define gen (make-fresh-user-module))
-  (module-use! gen (resolve-interface '(hyprscheme kernel)))
-  (for-each (lambda (m) (module-use! gen (resolve-interface (list 'hyprscheme (string->symbol m)))))
-            (list "core" "bind" "config" "event" "exec" "gesture" "group" "layer"
-                  "monitor" "notification" "query" "rule" "timer" "window"
-                  "workspace" "extras" "emacs-keymaps"))
   ;; module-variable, not module-ref: the host's lookup (scm_c_lookup) DOES see
   ;; imported bindings, and module-ref does not
   (format #t "hl--ready: ~a~%" (variable-ref (module-variable gen 'hl--ready)))

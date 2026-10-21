@@ -823,11 +823,22 @@ namespace Config::Scheme {
         if (!hl::addLoadCompiledPath(scmDir.c_str()))
             LOG(Log::ERR, "[scheme] could not put the machinery on %load-compiled-path");
 
-        // 1. the KERNEL: created first and given the whole C++ surface, then
-        //    left for init.scm to load BY NAME. `use-modules` loads a module
-        //    that already exists rather than replacing it, so the gsubrs
-        //    registered here survive the load — which is what lets the kernel's
-        //    own file, whose #:export names them, be read at all.
+        // 1. the KERNEL: created first, then given the whole C++ surface.
+        //    init.scm reaches the file by name; `use-modules` and
+        //    `reload-module` both reuse a module that already exists rather
+        //    than replacing it, so the gsubrs registered here survive every
+        //    generation.
+        //
+        //    NOTE what `makeModule` actually does: it resolves the name, and
+        //    resolve AUTOLOADS, so the kernel's FILE IS READ HERE — before
+        //    registerAllBindings() below, not after. It works, and the reason
+        //    is `#:export`: a name in the export list exists as an unassigned
+        //    placeholder from the moment the module is defined, so the file
+        //    reads fine and the gsubrs are assigned into those placeholders
+        //    afterwards. The consequence to know is that the kernel's
+        //    top-level forms run with the gsubrs NOT yet bound — a gsubr
+        //    called at kernel load time is unbound (verified). Keep the
+        //    kernel's top level to defines.
         const SCM kernel = hl::makeModule("hyprscheme kernel");
         if (scm_is_false(kernel)) {
             LOG(Log::ERR, "[scheme] could not create the kernel module");
@@ -839,11 +850,32 @@ namespace Config::Scheme {
         scm_set_current_module(kernel);
         registerAllBindings();
 
-        // 2. ONE FILE loads everything else. init.scm `use-modules`es the kernel,
-        //    core, the families, extras and the umbrella, so each module is
-        //    loaded exactly once, by name, in dependency order — and, being
-        //    loaded by name rather than by path, through Guile's own loader,
-        //    which finds a shipped .go or compiles and caches one.
+        // 2. the generation a config runs in: made FIRST, and made CURRENT, so
+        //    that init.scm's imports land in it. It imports the families, core
+        //    and the kernel DIRECTLY (not the umbrella), so the hl-- helpers stay
+        //    reachable — exactly the surface a config had when everything was one
+        //    module.
+        //
+        //    THE ORDER HERE IS THE POINT. Read with the generation current,
+        //    init.scm's `use-modules` ARE the generation's environment, and the
+        //    host needs no module list of its own. Read with the kernel current —
+        //    which is what this did — they land in the kernel instead, and the
+        //    generation then has to be assembled by hand, which is how a 23-line
+        //    list in C++ came to duplicate the list in init.scm and drift from it.
+        const SCM gen = hl::makeFreshModule();
+        if (scm_is_false(gen)) {
+            LOG(Log::ERR, "[scheme] could not create the generation module");
+            scm_set_current_module(prevModule);
+            return false;
+        }
+        scm_set_current_module(gen);
+
+        // 3. ONE FILE loads everything else — the kernel, core, the families,
+        //    extras, the umbrella, and the standard library a config has always
+        //    had. Each module is loaded exactly once, by name, in dependency
+        //    order, and, being loaded by name rather than by path, through
+        //    Guile's own loader, which finds a shipped .go or compiles and
+        //    caches one.
         //
         //    The host used to enumerate all nineteen files here and load each
         //    through scm_primitive_load: a list in C++ that had to be kept in
@@ -854,32 +886,6 @@ namespace Config::Scheme {
             scm_set_current_module(prevModule);
             return false;
         }
-
-        // 4. the generation a config runs in: imports the API and the kernel
-        //    DIRECTLY (not the umbrella), so the hl-- helpers stay reachable —
-        //    exactly the surface a config had when everything was one module
-        const SCM gen = hl::makeFreshModule();
-        // the standard library the machinery itself imports, so a config has
-        // the environment it has always had (a config may use call-with-string-
-        // output-port, exists/for-all, filter, keyword arguments …)
-        if (scm_is_false(gen) ||
-            !hl::useModule(gen, "rnrs io ports") || !hl::useModule(gen, "rnrs lists") ||
-            !hl::useModule(gen, "srfi srfi-1") || !hl::useModule(gen, "ice-9 optargs") ||
-            !hl::useModule(gen, "ice-9 exceptions") || !hl::useModule(gen, "hyprscheme kernel") ||
-            !hl::useModule(gen, "hyprscheme core") || !hl::useModule(gen, "hyprscheme bind") ||
-            !hl::useModule(gen, "hyprscheme config") || !hl::useModule(gen, "hyprscheme event") ||
-            !hl::useModule(gen, "hyprscheme exec") || !hl::useModule(gen, "hyprscheme gesture") ||
-            !hl::useModule(gen, "hyprscheme group") || !hl::useModule(gen, "hyprscheme layer") ||
-            !hl::useModule(gen, "hyprscheme monitor") || !hl::useModule(gen, "hyprscheme notification") ||
-            !hl::useModule(gen, "hyprscheme query") || !hl::useModule(gen, "hyprscheme rule") ||
-            !hl::useModule(gen, "hyprscheme timer") || !hl::useModule(gen, "hyprscheme window") ||
-            !hl::useModule(gen, "hyprscheme workspace") || !hl::useModule(gen, "hyprscheme extras") ||
-            !hl::useModule(gen, "hyprscheme emacs-keymaps")) {
-            LOG(Log::ERR, "[scheme] could not assemble the generation");
-            scm_set_current_module(prevModule);
-            return false;
-        }
-        scm_set_current_module(gen);
 
         // the machinery is in; say so. The flag lives in the kernel (so the
         // generation can read it through its import) and the host sets it,
