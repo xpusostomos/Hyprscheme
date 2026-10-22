@@ -1,5 +1,8 @@
+corner-enum
 define-enum-values
 define-key!
+direction-enum
+direction-or-none-enum
 enum-symbol
 enum-value
 enum-values->enum
@@ -230,9 +233,6 @@ hl-window-fullscreen-sync!
 hl-window-group
 hl-window-group-lock-set!
 hl-window-group-lock?
-hl-window-group-move-in!
-hl-window-group-move-in-or-create!
-hl-window-group-move-out!
 hl-window-group-set!
 hl-window-group?
 hl-window-hidden?
@@ -247,7 +247,10 @@ hl-window-maximized?
 hl-window-minimize-notification-add!
 hl-window-monitor
 hl-window-monitor-set!
-hl-window-move-direction!
+hl-window-move!
+hl-window-move-into-group!
+hl-window-move-into-or-create-group!
+hl-window-move-out-of-group!
 hl-window-move-to-workspace-notification-add!
 hl-window-open-early-notification-add!
 hl-window-open-notification-add!
@@ -272,7 +275,7 @@ hl-window-size-set!
 hl-window-stable-id
 hl-window-swallow-toggle!
 hl-window-swallowing
-hl-window-swap-direction!
+hl-window-swap!
 hl-window-swap-next!
 hl-window-swap-with!
 hl-window-tag-add!
@@ -330,4 +333,5 @@ hl-workspace-windows
 hl-workspace=?
 hl-workspace?
 hl-workspaces
+key-state-enum
 make-enum-values

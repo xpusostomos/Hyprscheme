@@ -312,6 +312,88 @@ and TODO.txt's archived sections.)
   allowed-error list gained the error t-api now provokes on purpose.
 - Wiki (scheme-utilities.md) and the docstrings say both cases.
 
+== SENT KEYS WERE RESOLVED AS KEYSYMS, NOT KEYCODES (the C-f bug, found) ==
+- THE BUG Chris reported as "the key bindings that are mapped to work in
+  the browser don't work": hlSchemeSendShortcut and hlSchemeSendKeyState
+  resolved the key with xkb_keysym_from_name and handed the KEYSYM to
+  Config::Actions::pass. pass() forwards its key straight to
+  sendKeyboardKey as `key - 8` — an XKB/evdev KEYCODE, the units of the
+  keybind manager's m_lastCode. The two numberings are unrelated, so
+  every sent key was the wrong number: "f" sent 94 (not f), and the
+  NAMED keys — Right/Left/Next/Prior, i.e. the payload of every chord
+  Chris named (C-f, C-b, C-v, M-v) — resolved to ~0xff00, far outside
+  the keycode range, and were DROPPED silently. Nothing raised because
+  pass() never validates its keycode: actionResult answered 0 and the
+  wrappers answered #t.
+- WHY IT SURVIVED THE SUITE, the lesson worth keeping: t-crashdir
+  asserted that (hl-window-send-shortcut! ...) ANSWERS #t. It did, while
+  sending garbage. An assertion on a RETURN VALUE cannot see a wrong
+  PAYLOAD. This bug was three weeks old (git blame: 685c20b, 2026-09-26)
+  and every lint was green throughout.
+- THE FIX: both gsubrs resolve through Keybinds::resolver()->
+  resolveKeycode(), exactly as the scripting API's own dispatchers do
+  (LuaBindingsDispatchers dsp_sendShortcut/dsp_sendKeyState). It is a
+  conversion, not a policy — the boundary is the one place allowed to
+  know both spellings. Two side effects: Hyprland's own tokens
+  ("code:28", "mouse:272") now work where they were previously refused,
+  and a keysym that is not on the LOADED KEYMAP (Cyrillic_a, Arabic_alef
+  under `us`) is refused with an error instead of being sent as
+  nonsense.
+- Query.cpp:142 looks identical but is CORRECT and was left alone:
+  isKeysymDown() genuinely takes an xkb_keysym_t.
+- TESTS: new tests/t-keydeliver.sh, VERIFIED TO FAIL on the old code
+  (7 failures, naming the bug). What it asserts, and why, is measured
+  rather than assumed: it CANNOT assert delivered bytes, because pass()
+  stamps the event with state()->m_timeLastMs, which only a REAL key
+  event sets — under the harness a correct, explicitly-keycoded send
+  still delivers 0 bytes to a focused `cat`, with a keyboard present and
+  no error. So it pins the RESOLUTION, the half the bug was in and the
+  half a harness can see: keycode tokens accepted (only the resolver
+  knows them) and off-keymap keysyms refused (only the resolver checks).
+  Deliberately NOT asserted: a junk NAME like "notakey", where
+  resolveKeycode NoSymbol-matches the first unmapped keycode — upstream
+  behaviour, not this bug, and pinning it would encode a quirk.
+- Not asserted anywhere and worth saying plainly: END-TO-END DELIVERY to
+  a focused app is only observable in a live session. This fix was NOT
+  confirmed by pressing C-f in Firefox — that is Chris's check to make.
+
+== WINDOW/GROUP MOVE RENAMES + ENUMS (the pass that led to the above) ==
+- Five functions renamed to the hl-TYPE-first convention, and the
+  direction argument turned into an enum. All five old names are gone:
+  hl-window-move-direction! -> hl-window-move!; hl-window-swap-direction!
+  -> hl-window-swap!; hl-window-group-move-in! -> hl-window-move-into-
+  group!; hl-window-group-move-in-or-create! -> hl-window-move-into-or-
+  create-group!; hl-window-group-move-out! -> hl-window-move-out-of-
+  group!. A stale config fails loudly (Unbound variable), not silently.
+- Direction is now a direction-enum ('up 'right 'down 'left) and, for
+  move-out-of-group, a direction-or-none-enum whose extra 'none is the
+  DEFAULT (the compositor's own directionless form, guarded by
+  CGroup::remove's `if (dir != DIRECTION_DEFAULT)`). corner-enum and
+  key-state-enum likewise; all four live in the new leaf module
+  (hyprscheme values), because a set shared by more than one family has
+  nowhere else to go (a family imports only kernel/core/enums/values).
+- THE CRASH THIS ALSO CLOSED: a bad direction string used to reach
+  Math::fromChar, which reads the FIRST CHARACTER only, so ""/"north"/"z"
+  all became DIRECTION_DEFAULT; dirToString turned that back into "",
+  and CLayoutManager::moveInDirection called .at(0) on it —
+  std::out_of_range, out through the gsubr trampoline (which catches no
+  C++ exceptions) into terminate: SIGABRT, whole session. That really
+  happened to Chris's live session. actionDir now takes an int, so no
+  string exists to be empty. tests/t-crashdir.sh pins it, including the
+  exact input that killed the session.
+- Both crash and renames are why the keysym bug above went unnoticed for
+  a while: the config's own send-shortcut had ALSO been calling the old
+  signature, so two independent faults were stacked. Fixing the
+  signature revealed this one.
+- Wiki: dispatchers.md gained a Renamed table naming all five old names
+  (and doc-audit.py's ALLOWED list gained them with a reason, so the
+  table can be spelled at all); windows.md's stale `dir`-is-a-string
+  note replaced; binds.md documents that code:/mouse: tokens resolve and
+  off-keymap names are refused.
+- API.snapshot rebaselined: 9 additions (4 enums + hl-window-move!,
+  -swap!, -move-into-group!, -move-into-or-create-group!,
+  -move-out-of-group!) and the 5 removals above, all named in the wiki.
+
 == TESTS + TOOLING ==
 - hl-load-config (in extras): load another config file by name.
   Looks under $XDG_CONFIG_HOME/hypr/ then $HOME/.config/hypr/, appending

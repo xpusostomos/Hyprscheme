@@ -59,6 +59,20 @@ ALLOWED = {
         'named deliberately, as one of the functions it was replaced by',
     'hl-monitor-info':
         'named deliberately, as one of the functions it was replaced by',
+    # the window/group move renames (dispatchers.md): named deliberately in the
+    # "Renamed" table, which exists so a config breaking on reload can find out
+    # what the name became. A retired name has to be spellable in the docs for
+    # that to work — removing these entries would mean deleting the table.
+    'hl-window-move-direction!':
+        'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
+    'hl-window-swap-direction!':
+        'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
+    'hl-window-group-move-in!':
+        'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
+    'hl-window-group-move-in-or-create!':
+        'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
+    'hl-window-group-move-out!':
+        'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
 }
 
 

@@ -21,6 +21,7 @@
 
 #include <src/helpers/math/Direction.hpp>
 #include <src/keybinds/Manager.hpp>
+#include <src/keybinds/Resolver.hpp>
 #include <src/desktop/view/window/Window.hpp>
 #include <src/desktop/rule/Rule.hpp>
 
@@ -117,6 +118,29 @@ namespace Config::Scheme {
         return actionResult("pass", Config::Actions::pass(actionWindow(id)));
     }
 
+    // A key NAME ("f", "Right", "code:28", "mouse:272") -> the XKB KEYCODE that
+    // Actions::pass/sendKeyState actually take. NOT a keysym: pass() forwards
+    // its key straight to sendKeyboardKey as `key - 8`, i.e. an evdev/XKB
+    // keycode (the same units as state()->m_lastCode, set from KEYCODE in
+    // KeybindManager). The two numberings are unrelated, so a keysym handed to
+    // pass() silently sends the WRONG key — and for a named key like Right it
+    // sends a number far outside the keycode range, which is dropped without a
+    // word. The scripting API resolves at exactly this point
+    // (LuaBindingsDispatchers dsp_sendShortcut/dsp_sendKeyState call
+    // Keybinds::resolver()->resolveKeycode), and so do we.
+    //
+    // This is a conversion, not a policy: the caller says "f", the compositor
+    // wants a keycode, and the boundary is the one place that is allowed to
+    // know both. Returns std::nullopt for a name the keymap does not have.
+    static std::optional<uint32_t> keycodeFromName(const char* key) {
+        const auto code = Keybinds::resolver()->resolveKeycode(key ? key : "");
+        if (!code) {
+            LOG(Log::ERR, "[scheme] no such key: {}", code.error());
+            return std::nullopt;
+        }
+        return *code;
+    }
+
     // mods arrive as a LIST of modifier tokens (as built by hl-kbd/hl-key),
     // the same shape every mods-taking API takes; only the key is resolved
     // from its string name here
@@ -126,10 +150,10 @@ namespace Config::Scheme {
         const auto mask = modsMaskFromTokens(mods);
         if (!mask)
             return -1;
-        const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
-        if (sym == 0)
+        const auto code = keycodeFromName(key);
+        if (!code)
             return -1;
-        return actionResult("send-shortcut", Config::Actions::pass(*mask, sc<uint32_t>(sym), actionWindow(id)));
+        return actionResult("send-shortcut", Config::Actions::pass(*mask, *code, actionWindow(id)));
     }
 
     // STATE is the compositor's own key-state integer (0 up, 1 down, 2 repeat),
@@ -143,10 +167,10 @@ namespace Config::Scheme {
         const auto mask = modsMaskFromTokens(mods);
         if (!mask)
             return -1;
-        const auto sym = xkb_keysym_from_name(key ? key : "", XKB_KEYSYM_CASE_INSENSITIVE);
-        if (sym == 0)
+        const auto code = keycodeFromName(key);
+        if (!code)
             return -1;
-        return actionResult("send-key-state", Config::Actions::sendKeyState(*mask, sc<uint32_t>(sym), sc<uint32_t>(state), actionWindow(id)));
+        return actionResult("send-key-state", Config::Actions::sendKeyState(*mask, *code, sc<uint32_t>(state), actionWindow(id)));
     }
 
     static int hlSchemeMouse(const char* action) {

@@ -317,12 +317,20 @@ load-check cannot see that (not loading something is not a load failure).
 2. `hyprscheme/core.scm` → `(hyprscheme core)` — shared plumbing: argument
    coercion, the plist convention, key-spec parsing (`hl-kbd`/`hl-key`), the
    handle predicates, the cross-reload state accessors, the listen helpers.
-3. `hyprscheme/enums.scm` → `(hyprscheme enums)` — **a NAME for a set of
-   values** (`<enum-values>`, `make-enum-values`, `define-enum-values`,
-   `enum-value`, `enum-symbol`, `enum-values->enum`), plus the two enums the
-   API ships (`fullscreen-mode`, `fullscreen-handler`). A **leaf** like core —
-   it imports the kernel only and holds no compositor knowledge, which is why
-   every family may import it. See "Enums" under API conventions.
+3. `hyprscheme/enums.scm` → `(hyprscheme enums)` — **the MACHINERY for naming
+   a set of values** (`<enum-values>`, `make-enum-values`,
+   `define-enum-values`, `enum-value`, `enum-symbol`, `enum-values?`,
+   `enum-values->enum`), and nothing else. It defines no concrete enum. A
+   **leaf** like core — it imports the kernel only and holds no compositor
+   knowledge, which is why every family may import it. See "Enums" under API
+   conventions.
+   - `hyprscheme/values.scm` → `(hyprscheme values)` — the place for a
+     concrete enum shared by MORE THAN ONE family: `direction-enum`,
+     `direction-or-none-enum`, `corner-enum`, `key-state-enum`. Also a leaf
+     (imports kernel + enums). It exists because a family may not import
+     another family, so a set two of them need has nowhere else to live that
+     both can reach. A set used by ONE family stays in that family
+     (`fullscreen-mode` is in `window.scm`).
 4. **One module per object family** — `window.scm`, `monitor.scm`,
    `workspace.scm`, `group.scm`, `layer.scm`, `bind.scm`, `event.scm`,
    `timer.scm`, `rule.scm`, `config.scm`, `notification.scm`, `gesture.scm`,
@@ -568,6 +576,30 @@ has two fields, so there are `hl--c-window-fullscreen-mode` and `-client`; the
 setter mirrors `setFullscreenMode`, which **sets** — so the Scheme decides the
 target mode and the gsubr assigns it.
 
+**A gsubr must convert to the units the C++ actually takes, and the units are
+not always the obvious ones.** The one that cost a session: the send-shortcut
+and send-key-state gsubrs took a key NAME and resolved it with
+`xkb_keysym_from_name`, handing the **keysym** to `Config::Actions::pass`. But
+`pass` passes its key straight to `sendKeyboardKey` as `key - 8` — an
+XKB/evdev **keycode**, the units of the keybind manager's `m_lastCode`. The two
+numberings are unrelated, so every sent key was the wrong number: `"f"` sent 94
+(some other key) and the NAMED keys (`Right`, `Next`, `Prior` — the payload of
+every chord reported broken, C-f/C-b/C-v/M-v) resolved to ~`0xff00`, far outside
+the keycode range, so the press was **dropped in silence**. Nothing raised,
+because `pass()` never validates its keycode — the action answered OK while
+doing nothing. The fix is `Keybinds::resolver()->resolveKeycode()`, which is
+what the scripting API's own dispatchers
+(`LuaBindingsDispatchers dsp_sendShortcut`/`dsp_sendKeyState`) call at exactly
+that point. Two things to carry forward:
+
+- **check the units where the value is CONSUMED, not where it is named.** The
+  header said `pass(ModifierMask, uint32_t key, …)` and told you nothing; the
+  body's `key - 8` told you everything.
+- **when a value must be validated, validate with the compositor's own
+  resolver** rather than a lookalike (`xkb_keysym_from_name` accepts Cyrillic
+  and Arabic keysyms, so it "validates" names that are on no loaded keymap;
+  `resolveKeycode` checks the keymap).
+
 ### ERRORS — plain `(error …)`, and the function names itself
 
 **There is no `hl--error` and no `hl--record-field`.** Both were helpers for jobs
@@ -633,11 +665,24 @@ Two things about the design that are easy to get wrong:
 - **the error names the set in the caller's own currency** — a bad symbol is
   answered with the symbols, a bad integer with the integers.
 
-Existing enums: `fullscreen-mode` (`keep none maximized fullscreen`) and
-`fullscreen-handler` (`none default layout scrolling`). Add a new one where the
-set is shared; a set used by ONE family may live in that family, but a family
-may not import another family, so a shared set belongs in
-`(hyprscheme enums)`.
+Where a concrete enum GOES, which is the thing to get right when adding one —
+`(hyprscheme enums)` holds the machinery only and defines no enum of its own:
+
+- **used by ONE family** → that family. `fullscreen-mode`
+  (`keep none maximized fullscreen`) is defined in `window.scm`.
+- **used by MORE THAN ONE family** → `(hyprscheme values)`. A family may not
+  import another family, so a shared set has nowhere else both can reach.
+  `direction-enum` (`up right down left`), `direction-or-none-enum` (the same
+  plus `none`, which is `-1` — the compositor's `DIRECTION_DEFAULT`, the
+  directionless form `CGroup::remove` guards on), `corner-enum`
+  (`bottom-left bottom-right top-right top-left` — NOT reading order; it
+  mirrors `Actions::moveCursorToCorner`'s switch) and `key-state-enum`
+  (`up down repeat` → `0 1 2`, the integers
+  `Actions::sendKeyState` takes) all live there.
+
+(This note previously claimed both of those lived in `(hyprscheme enums)`, and
+that `fullscreen-handler` was one of them. Neither was true:
+`fullscreen-handler` is not an enum in this tree at all.)
 - **A workspace or monitor argument is a handle, a number, or a selector
   string** — one shape, accepted by every function that takes one
   (`workspaceArg`/`monitorArg` in the C++). A **handle is used directly**;
@@ -762,6 +807,19 @@ may not import another family, so a shared set belongs in
   real data; two were found that way in one pass. Verified to fail by injecting
   a window-open callback that closes its window with a stray argument: every
   other tier passed it, and the log check named the error.
+  `t-keydeliver.sh` exists because the opposite blind spot kept a real bug
+  alive for three weeks: **an assertion on a RETURN VALUE cannot see a wrong
+  PAYLOAD.** t-crashdir asserted `(hl-window-send-shortcut! …)` answers `#t`,
+  which it did — while sending a nonsense keycode (see the keysym note under
+  API conventions). Every lint was green throughout. What a harness can and
+  cannot see is worth measuring before writing the test rather than after:
+  delivered bytes are NOT observable here, because `pass()` stamps the event
+  with `state()->m_timeLastMs`, which only a real keypress sets — a correct,
+  explicitly-keycoded send still delivers 0 bytes to a focused `cat` in a
+  nested compositor, with a keyboard present and no error. So this file pins
+  the RESOLUTION (keycode tokens accepted, off-keymap keysyms refused — the two
+  rows where the two implementations differ) and leaves delivery to a live
+  session. It was verified to fail on the old code: 7 failures naming the bug.
   `t-zzz-configpath.sh` is the one test that **launches its own compositors**,
   because the config path is resolved once at plugin load and the suite's
   compositor cannot be reconfigured for it. It unsets `HYPRSCHEME_CONFIG`
