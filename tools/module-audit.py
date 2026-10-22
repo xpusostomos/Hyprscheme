@@ -47,18 +47,20 @@ DIR = 'src/config/scheme/hyprscheme'
 KERNEL = 'kernel'
 CORE = 'core'
 ENUMS = 'enums'
+VALUES = 'values'
 EXTRAS = 'extras'
 EMACS_KEYMAPS = 'emacs-keymaps'
 # the ENTRY POINT: the one file the host loads, which loads everything else by
 # name. Every module must be named here or it is never loaded at all.
 ENTRY_PATH = 'src/config/scheme/init.scm'
 # the LEAF modules every family may import: the kernel (the C++ boundary), core
-# (shared plumbing) and enums (named sets of values). They hold no compositor
-# knowledge of their own, which is what separates them from a family.
-SHARED = {KERNEL, CORE, ENUMS}
+# (shared plumbing), enums (the enum MACHINERY) and values (the concrete enums
+# more than one family speaks). They hold no compositor knowledge of their own,
+# which is what separates them from a family.
+SHARED = {KERNEL, CORE, ENUMS, VALUES}
 # the modules that are NOT families — the count in the summary, and the ones
 # exempt from the family-only rules below
-FREE = {KERNEL, CORE, ENUMS, EXTRAS, EMACS_KEYMAPS}
+FREE = {KERNEL, CORE, ENUMS, VALUES, EXTRAS, EMACS_KEYMAPS}
 
 
 def read(path):
@@ -132,10 +134,12 @@ def main():
             return own | exports_of(read(fams[KERNEL]))
         if name == ENUMS:
             return own | exports_of(read(fams[KERNEL]))
+        if name == VALUES:
+            return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[ENUMS]))
         if name in (EXTRAS, EMACS_KEYMAPS):
             return own | {n for p in fams.values() for n in exports_of(read(p))}
         return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[CORE])) \
-                   | exports_of(read(fams[ENUMS]))
+                   | exports_of(read(fams[ENUMS])) | exports_of(read(fams[VALUES]))
 
     bad = 0
     for name, path in sorted(fams.items()):

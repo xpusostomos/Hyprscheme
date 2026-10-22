@@ -28,7 +28,10 @@ namespace Config::Scheme {
 
     using namespace Internals;
 
-    static int hlSchemeFocusDirection(const char* dir) {
+    // DIR is the compositor's own integer (Math::eDirection) — the Scheme side
+    // holds a direction-enum and converts it, so nothing here can be a string
+    // the compositor would have to parse. See actionDir in SchemeInternals.hpp.
+    static int hlSchemeFocusDirection(int dir) {
         if (!g_up)
             return -1;
         return actionResult("focus-direction", Config::Actions::moveFocus(actionDir(dir)));
@@ -129,6 +132,11 @@ namespace Config::Scheme {
         return actionResult("send-shortcut", Config::Actions::pass(*mask, sc<uint32_t>(sym), actionWindow(id)));
     }
 
+    // STATE is the compositor's own key-state integer (0 up, 1 down, 2 repeat),
+    // arrived at from a key-state-enum on the Scheme side — the same split the
+    // scripting API makes, where its dispatcher maps "down"/"up"/"repeat" to
+    // these numbers before calling the action. The gsubr mirrors
+    // Actions::sendKeyState's parameter and makes no decision of its own.
     static int hlSchemeSendKeyState(SCM mods, const char* key, int state, SCM id) {
         if (!g_up)
             return -1;

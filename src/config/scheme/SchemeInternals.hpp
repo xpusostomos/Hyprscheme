@@ -165,8 +165,27 @@ namespace Config::Scheme {
         return -2;
     }
 
-    inline Math::eDirection actionDir(const char* s) {
-        return Math::fromChar(s && *s ? s[0] : 'x');
+    // A DIRECTION, converted at the boundary: the Scheme side has already
+    // decided the value (it is an enum there, so it cannot be anything else),
+    // and this is only the SCM-to-int hop.
+    //
+    // This used to take a const char* and run it through Math::fromChar, and
+    // THAT was how a compositor crash was reachable. fromChar reads the FIRST
+    // CHARACTER only and answers DIRECTION_DEFAULT (= -1) for anything it does
+    // not recognise, so "" / "north" / "z" all became "no direction", and
+    // Actions::moveInDirection then turned that into the empty string via
+    // dirToString and handed it to CLayoutManager::moveInDirection, which calls
+    // .at(0) on it — std::out_of_range, thrown out through the gsubr trampoline
+    // (which catches nothing) into terminate. An abort of the whole session,
+    // from a bad direction string.
+    //
+    // Taking the integer means the value is already one of the four (or, for
+    // the one caller that has a directionless form, DIRECTION_DEFAULT's -1 on
+    // purpose). No string exists to be empty, so the throwing path is
+    // unreachable rather than merely guarded. `sc` is a plain cast — the
+    // validation happened in Scheme, where the enum is.
+    inline Math::eDirection actionDir(int n) {
+        return sc<Math::eDirection>(n);
     }
 
     // the window an action applies to: the handle, or nullopt. #f means "the

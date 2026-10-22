@@ -232,8 +232,21 @@ ok '(hl-window-pseudo-set! w)'
 ok '(hl-window-pseudo-set! w #:on? #f)'
 ok '(boolean? (hl-window-pseudo? w))'
 ok '(boolean? (hl-window-maximized? w))'
-ok '(hl-window-move-direction! w "r")'
-ok '(boolean? (hl-window-swap-direction! w "r"))'
+ok '(hl-window-move! w #:direction (quote right))'
+ok '(boolean? (hl-window-swap! w #:direction (quote right)))'
+# the window positional is OPTIONAL — absent (or #f) means the focused window,
+# which is the convention every other window function follows
+ok '(hl-window-move! #:direction (quote down))'
+ok '(hl-window-move! w)'   ; #:direction defaults to 'right
+# a direction outside the set is REFUSED, naming the set — and this is the check
+# that matters most: before the enum, a bad direction string reached
+# CLayoutManager::moveInDirection, which asked the derived word for its first
+# character ("" -> a throw from .at(0)) and ABORTED the entire compositor.
+bad_dir=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-move! w #:direction (quote sideways)))) )')
+[[ "$bad_dir" == *"not a value of this enum"* ]] || { echo "FAIL: a bad direction was accepted => [$bad_dir]"; FAILED=1; }
+# and the OLD string spelling is refused too, rather than meaning something
+bad_dir2=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-move! w #:direction "r"))))')
+[[ "$bad_dir2" == *"expected a symbol or an integer"* ]] || { echo "FAIL: the string \"r\" was accepted as a direction => [$bad_dir2]"; FAILED=1; }
 ok '(hl-window-swap-next! w)'
 ok '(hl-window-swap-with! w w2)'
 ok '(boolean? (hl-window-center! w))'
@@ -251,9 +264,14 @@ ok '(hl-window-float-set! w #:on? #f)'
 ok '(hl-window-prop-set! w "opacity" "0.9")'
 ok '(hl-window-prop-set! w (quote opacity) "0.7")   ; props accept symbols too'
 ok '(hl-window-deny-from-group-set! w)'
-ok '(hl-window-group-move-in! w "r")'
-ok '(boolean? (hl-window-group-move-out! w "r"))'
-ok '(hl-window-group-move-in-or-create! w "r")'
+ok '(hl-window-move-into-group! w #:direction (quote right))'
+# 'none is the DEFAULT here and is a real value, not a fallback: it releases the
+# window from the group without aiming it anywhere, which is the compositor's
+# own directionless form (CGroup::remove tests for it explicitly)
+ok '(boolean? (hl-window-move-out-of-group! w))'
+ok '(boolean? (hl-window-move-out-of-group! w #:direction (quote none)))'
+ok '(boolean? (hl-window-move-out-of-group! w #:direction (quote right)))'
+ok '(hl-window-move-into-or-create-group! w #:direction (quote right))'
 ok '(boolean? (hl-window-deny-from-group? w))'
 ok '(hl-window-prop-set! w "opacity" "0.5")'
 ok '(let ((v (hl-window-prop w "opacity"))) (or (number? v) (eq? v #f)))'
@@ -300,7 +318,7 @@ ok '(hl-window-group-lock-set! w #:on? #t)'
 ok '(boolean? (hl-window-group-lock? w))'
 ok '(hl-window-group-lock-set! w #:on? #f)'
 ok '(boolean? (not (hl-window-group-lock? w)))'
-ok '(begin (hl-window-group-move-in! w2 "r") #t)'
+ok '(begin (hl-window-move-into-group! w2 #:direction (quote right)) #t)'
 ok '(hl-groups-lock-set! #:on? #t)'
 ok '(boolean? (hl-groups-locked?))'
 ok '(hl-window-group-set! w #:on? #f)'
@@ -471,7 +489,16 @@ bad_device=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (h
 # ---- cursor -----------------------------------------------------------------
 noerr '(hl-cursor-pos)'
 ok '(hl-cursor-move! 40 40)'
-ok '(hl-cursor-move-to-corner! w 0)'
+ok '(hl-cursor-move-to-corner! w #:corner (quote top-left))'
+# the positional window is optional (the focused window when absent), and the
+# corner defaults to 'top-left
+ok '(hl-cursor-move-to-corner!)'
+# the four corner names, and a bad one refused rather than read as a corner
+ok '(hl-cursor-move-to-corner! w #:corner (quote bottom-left))'
+ok '(hl-cursor-move-to-corner! w #:corner (quote bottom-right))'
+ok '(hl-cursor-move-to-corner! w #:corner (quote top-right))'
+bad_corner=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-cursor-move-to-corner! w #:corner (quote middle)))))')
+[[ "$bad_corner" == *"not a value of this enum"* ]] || { echo "FAIL: a bad corner was accepted => [$bad_corner]"; FAILED=1; }
 
 # ---- exec (one function: (hl-exec! cmd . effects) → pid) ---------------------
 ok '(> (hl-exec! "true") 0)'
@@ -550,13 +577,37 @@ ok '(list? (hl-loaded-plugins))'
 ok '(string? (hl-version))'
 ok '(list? (hl-layers))'
 ok '(boolean? (hl-window-pass-shortcut! w))'
-ok '(boolean? (hl-window-send-shortcut! (hl-key "SUPER") "F10" w))'
-ok '(boolean? (hl-window-send-key-state! (hl-key "SUPER") "F10" 1 w))'
-ok '(boolean? (hl-window-send-shortcut! (quote ()) "F10" w))'
-bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-send-shortcut! "SUPER" "F10" w))))')
-[[ "$bad_ss" == *"list of modifier tokens"* ]] || { echo "FAIL: string mods not rejected by send-shortcut => [$bad_ss]"; FAILED=1; }
-bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-send-shortcut! 64 "F10" w))))')
-[[ "$bad_ss" == *"list of modifier tokens"* ]] || { echo "FAIL: mask-int mods not rejected by send-shortcut => [$bad_ss]"; FAILED=1; }
+ok '(boolean? (hl-window-send-shortcut! w #:keys (hl-key "SUPER+F10")))'
+# KEYS is ONE CHORD — the token list hl-kbd/hl-key returns, mods first and the
+# key last — and the split into mods mask and keysym happens in core
+# (hl--chord-mods/hl--chord-key), not at each call site.
+ok '(boolean? (hl-window-send-shortcut! w #:keys (hl-kbd "C-l")))'
+ok '(boolean? (hl-window-send-shortcut! #:keys (hl-kbd "C-l")))   ; window optional'
+ok '(boolean? (hl-window-send-shortcut! w #:keys (quote ("SUPER" "F10"))))'
+# STATE is a key-state-enum: 'down (the default), 'up, 'repeat. This test used
+# to pass the integer 1, which the old `int state` parameter accepted — so the
+# suite stayed green while the real API spelling raised, and every translated
+# chord in a config (which is what this function is FOR) did nothing.
+ok '(boolean? (hl-window-send-key-state! w #:keys (hl-key "SUPER+F10") #:state (quote down)))'
+ok '(boolean? (hl-window-send-key-state! w #:keys (hl-key "SUPER+F10") #:state (quote up)))'
+ok '(boolean? (hl-window-send-key-state! w #:keys (hl-key "SUPER+F10") #:state (quote repeat)))'
+ok '(boolean? (hl-window-send-key-state! w #:keys (hl-key "SUPER+F10")))   ; #:state defaults to (quote down)'
+# 'repeat is a SECOND PRESS, not a flag: the compositor runs pass() twice for it
+ok '(boolean? (hl-window-send-key-state! #:keys (hl-kbd "C-f") #:state (quote repeat)))'
+# a state outside the set is REFUSED, naming the set — and it fails at the CALL
+# rather than reaching the compositor, which is the whole point of the enum
+bad_ks=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-send-key-state! w #:keys (hl-key "SUPER+F10") #:state (quote sideways)))))')
+[[ "$bad_ks" == *"not a value of this enum"* ]] || { echo "FAIL: a bad key state was accepted => [$bad_ks]"; FAILED=1; }
+
+# a KEYS that is not a chord is refused, rather than reaching the boundary
+bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-send-shortcut! w #:keys "SUPER+F10"))))')
+[[ "$bad_ss" == *"#:keys must be a chord"* ]] || { echo "FAIL: a bare string was accepted as #:keys => [$bad_ss]"; FAILED=1; }
+bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-send-shortcut! w))))')
+[[ "$bad_ss" == *"#:keys must be a chord"* ]] || { echo "FAIL: a missing #:keys was accepted => [$bad_ss]"; FAILED=1; }
+# a modifier-only chord has no key to send: (hl-kbd "C-M-") is ("CTRL" "ALT"),
+# and sending the last token would send ALT as if it were a keypress
+bad_ss=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-send-shortcut! w #:keys (hl-kbd "C-M-")))))')
+[[ "$bad_ss" == *"needs a key, not only modifiers"* ]] || { echo "FAIL: a modifier-only chord was accepted as #:keys => [$bad_ss]"; FAILED=1; }
 ok '(boolean? (hl-event! "apicoverage"))'
 ok '(boolean? (hl-force-idle! 0))'
 ok '(boolean? (hl-force-renderer-reload!))'
@@ -590,7 +641,12 @@ ok '(integer? (hl-workspace-number (hl-workspace-from (hl-workspace-name aw))))'
 ok '(or (not (hl-workspace-from "no-such-workspace-xyz")) #t)'
 noerr '(hl-workspace-name-set! (hl-workspace-from (hl-workspace-name aw)) "api-named-set")'
 noerr '(hl-monitor-power-set! (hl-active-monitor) #:on? #t)' 
-ok '(hl-focus-direction-set! "r")'
+ok '(hl-focus-direction-set! (quote right))'
+# positional, unlike the window takers: this dispatcher has no optional window
+# (the scripting API's focus has no window field), so there is nothing for
+# keywords to follow. A bad direction is still refused.
+bad_focus=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-focus-direction-set! "r"))))')
+[[ "$bad_focus" == *"expected a symbol or an integer"* ]] || { echo "FAIL: a string was accepted as a direction => [$bad_focus]"; FAILED=1; }
 ok '(hl-focus-last!)'
 ok '(hl-focus-urgent!)'
 

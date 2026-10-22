@@ -87,9 +87,25 @@ these for the same reason."
 
 ;; ---- the machinery, as the host builds it ----------------------------------
 
+;; READ FROM init.scm, not repeated here. This was a hand-kept list, and it
+;; drifted the moment a module was added: `values` was named in init.scm (so the
+;; host loaded it and module-audit was satisfied) while this tool built a tree
+;; without it, and every module importing it died on "no code for module". The
+;; kernel is excluded — its gsubrs are stubbed below instead, since they do not
+;; exist outside the compositor.
+(define (named-modules)
+  ;; (use-or-reload-modules (hyprscheme a) (hyprscheme b) ...), in file order
+  (call-with-input-file (string-append (machinery-dir) "/init.scm")
+    (lambda (port)
+      (let loop ((acc '()))
+        (let ((form (read port)))
+          (cond ((eof-object? form) (reverse acc))
+                ((and (pair? form) (eq? (car form) 'use-or-reload-modules))
+                 (loop (append (reverse (map cadr (cdr form))) acc)))
+                (else (loop acc))))))))
+
 (define api-modules
-  '(enums core bind config event exec gesture group layer monitor
-    notification query rule timer window workspace extras emacs-keymaps))
+  (remove (lambda (m) (eq? m 'kernel)) (named-modules)))
 
 (define (stub-c-entry-points files)
   (for-each

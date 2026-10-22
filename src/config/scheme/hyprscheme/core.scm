@@ -7,7 +7,9 @@
 
 (define-module (hyprscheme core)
   #:export (
-           hl--bind-flags hl--bool-act hl--gesture-mode
+           hl--bind-flags hl--bool-act hl--chord-key hl--chord-mods
+           hl--modifier-token? hl--modifier-tokens
+           hl--gesture-mode
            hl--mon-arg hl--monitor-listen hl--notif-act hl--plist-fold
            hl--plist-map hl--push-val hl--rule-kind
            hl--hyprland-name hl--rule-name hl--rule-spec-value
@@ -119,6 +121,55 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
         acc
         (let ((tail (hl--plist-cdr l)))
           (loop (cdr tail) (f (car l) (car tail) acc))))))
+
+;; ---- key chords: the one mods/key split -------------------------------------
+;; A key spec is ONE FLAT TOKEN LIST, modifiers first and the key last —
+;; ("CTRL" "ALT" "a"), or ("F10") for a modless key (still a list). hl-kbd and
+;; hl-key build them, and every function that takes a chord takes that list.
+;;
+;; Splitting it is therefore the same job every time, and it lives here so that
+;; it is done in ONE place: (hyprscheme bind) splits it for hl-bind-add!, the
+;; senders split it for the compositor, and a config that wants the two halves
+;; calls these rather than writing its own (car (reverse ...)) pair — which is
+;; what bind.scm and the example configs used to do.
+;;
+;; THE SPLIT IS POSITIONAL, NOT A MODIFIER TABLE. The last token is the key even
+;; when it spells like a modifier ("s-M" is Super+M the key, per hl-kbd's own
+;; docstring), so a table lookup would be wrong here — and a token list that is
+;; all modifiers (hl-kbd's trailing-dash form) has no key at all, which is why
+;; hl--chord-key is the one that can raise.
+
+;; THE MODIFIER TOKEN NAMES — what hl-kbd emits for a modifier, and the list
+;; that tells a modifier from a key. It lives here rather than in
+;; (hyprscheme emacs-keymaps) because the chord split below needs it and a
+;; family may not import emacs-keymaps; core is a leaf every family may import.
+;; emacs-keymaps imports it from here for the same reason.
+(define hl--modifier-tokens
+  '("CTRL" "ALT" "SHIFT" "SUPER" "MOD2" "MOD3" "MOD5" "CAPS"))
+
+(define (hl--modifier-token? tok)
+  "Is TOK a modifier token rather than a key?"
+  (and (string? tok) (member tok hl--modifier-tokens) #t))
+
+(define (hl--chord-mods tokens)
+  "The modifier tokens of TOKENS — the chord minus its key. #f (or '()) has
+   none, so this answers '() rather than raising."
+  (if (null? tokens) '() (reverse (cdr (reverse tokens)))))
+
+(define (hl--chord-key tokens)
+  "The KEY token of TOKENS: the last one. Raises when there is no key to
+   return — an empty list, or a PURE MODIFIER list.
+
+   That second case is the one worth naming: hl-kbd's trailing-dash form is a
+   modifier list with no key at all, so (hl-kbd \"C-M-\") is
+   (\"CTRL\" \"ALT\") — and taking `car (reverse ...)` there would hand back
+   \"ALT\" and send a modifier as if it were a keypress. The last token being a
+   modifier is therefore an error, not the key."
+  (cond ((null? tokens)
+         (error "hl--chord-key: a chord needs a key, but the token list is empty"))
+        ((hl--modifier-token? (car (reverse tokens)))
+         (error "hl--chord-key: a chord needs a key, not only modifiers — got:" tokens))
+        (else (car (reverse tokens)))))
 
 ;; map (k v ...) → (k (f k v) ...), consing a fresh plist
 

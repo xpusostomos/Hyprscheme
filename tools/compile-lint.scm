@@ -21,9 +21,10 @@
 ;;
 ;; HOW IT COMPILES THE MACHINERY, which is the whole difficulty:
 ;;
-;;   1. Dependency order. A module that imports another fails with "no code for
-;;      module" unless that dependency is ALREADY compiled, so the order is
-;;      kernel, core, the families, extras — not the file listing.
+;;   1. Dependency order, READ FROM init.scm (the one list of modules). A module
+;;      that imports another fails with "no code for module" unless that
+;;      dependency is ALREADY compiled, so init.scm's order — kernel, the leaves
+;;      (enums, values, core), the families, extras — is what this follows.
 ;;   2. A GENERATED STUB KERNEL. The real kernel's export list names all ~308
 ;;      `hl--c-*` gsubrs, which do not exist until the compositor registers
 ;;      them, so the real kernel cannot be compiled outside the compositor.
@@ -62,20 +63,40 @@
 
 (define scm-dir (string-append repo "/src/config/scheme"))
 
-;; the load order. Kernel first (its stub), then core, then the families, then
-;; the two composers (extras, emacs-keymaps) — which import the families, so
-;; those must already be compiled. There is no umbrella to compile after them.
-(define families
-  ;; order is dependency order: the two leaves (enums and core — each imports
-  ;; the kernel only) before the families that import them
-  '("enums" "core" "bind" "config" "event" "exec" "gesture" "group" "layer"
-    "monitor" "notification" "query" "rule" "timer" "window" "workspace"
-    "extras" "emacs-keymaps"))
+;; The load order is READ FROM init.scm, not repeated here.
+;;
+;; It used to be a hand-kept list in this file, and it drifted the moment a
+;; module was added: `values` was named in init.scm, so the host loaded it and
+;; module-audit was happy, while this tool compiled a family that imports it
+;; against a tree where it had never been built — "no code for module", reported
+;; as an opaque COMPILE FAILED with no file mentioned. That is the same failure
+;; the kernel's #:export list exists to prevent, one level up: a hand-kept list
+;; of modules drifts from the module tree, and the drift shows up as a confusing
+;; error far from its cause. init.scm is the ONE list; read it.
+;;
+;; Order comes from init.scm too, and it is dependency order — a module fails to
+;; compile with "no code for module" unless what it imports is already a .go.
+;; The kernel is NOT compiled from this list: it gets the generated stub below,
+;; because its exports name gsubrs that only exist inside the compositor.
+(define (named-modules)
+  ;; (use-or-reload-modules (hyprscheme a) (hyprscheme b) ...), in file order
+  (call-with-input-file (string-append scm-dir "/init.scm")
+    (lambda (port)
+      (let loop ((acc '()))
+        (let ((form (read port)))
+          (cond ((eof-object? form) (reverse acc))
+                ((and (pair? form) (eq? (car form) 'use-or-reload-modules))
+                 (loop (append (reverse (map cadr (cdr form))) acc)))
+                (else (loop acc))))))))
+
+;; everything init.scm names, minus the kernel (the stub stands in for it)
+(define modules (remove (lambda (m) (eq? m 'kernel)) (named-modules)))
 
 (define (machinery-files)
   ;; no umbrella file: the modules ARE the machinery (see init.scm)
   (cons (string-append scm-dir "/hyprscheme/kernel.scm")
-        (map (lambda (m) (string-append scm-dir "/hyprscheme/" m ".scm")) families)))
+        (map (lambda (m) (string-append scm-dir "/hyprscheme/" (symbol->string m) ".scm"))
+             modules)))
 
 ;; ---- the stub kernel --------------------------------------------------------
 
@@ -166,15 +187,14 @@
 (compile-one (string-append tmp "/hyprscheme/kernel.scm")
              (string-append tmp "/hyprscheme/kernel.go"))
 
-(let* ((core-src (string-append scm-dir "/hyprscheme/core.scm"))
-       (core-dst (string-append tmp "/hyprscheme/core.go")))
-  (compile-one core-src core-dst))
-
+;; every module init.scm names, in its order — kernel excluded, since the stub
+;; above stands in for it. `core` is in the list, so it is not compiled
+;; separately here.
 (for-each
  (lambda (m)
-   (compile-one (string-append scm-dir "/hyprscheme/" m ".scm")
-                (string-append tmp "/hyprscheme/" m ".go")))
- families)
+   (compile-one (string-append scm-dir "/hyprscheme/" (symbol->string m) ".scm")
+                (string-append tmp "/hyprscheme/" (symbol->string m) ".go")))
+ modules)
 
 ;; 3. any extra files named on the command line — a user's config, examples, a
 ;;    wiki block. These compile into an environment that IMPORTS THE API, the
@@ -188,9 +208,9 @@
     (module-use! gen (resolve-interface '(hyprscheme kernel)))
     (for-each (lambda (m)
                 (catch #t
-                  (lambda () (module-use! gen (resolve-interface (list 'hyprscheme (string->symbol m)))))
+                  (lambda () (module-use! gen (resolve-interface (list 'hyprscheme m))))
                   (lambda _ #f)))
-              families)
+              modules)
     ;; The standard library the HOST gives the generation (Host.cpp), so this
     ;; environment matches the one a config is really evaluated in. Without it
     ;; an extra file using, say, srfi-1's `find` warns falsely — the import is

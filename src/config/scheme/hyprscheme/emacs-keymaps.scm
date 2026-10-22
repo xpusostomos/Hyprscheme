@@ -167,11 +167,9 @@ returns for a multi-key spec — renders space-separated."
   '(("C" . "CTRL") ("M" . "ALT") ("S" . "SHIFT")
     ("s" . "SUPER") ("A" . "ALT") ("H" . "MOD3")))
 
-;; the modifier token names, for telling a modifier from a key: hl-kbd emits a
-;; pure modifier list for a trailing-dash spec, and that must not be run through
-;; the logical -> physical conversion (it has no key to convert)
-(define hl--modifier-tokens
-  '("CTRL" "ALT" "SHIFT" "SUPER" "MOD2" "MOD3" "MOD5" "CAPS"))
+;; the modifier token names live in (hyprscheme core) — the chord split there
+;; needs the same list, and a family cannot import this module. See
+;; hl--modifier-tokens / hl--modifier-token?.
 
 (define hl--emacs-keys
   '(("RET" . "Return") ("SPC" . "space") ("ESC" . "Escape")

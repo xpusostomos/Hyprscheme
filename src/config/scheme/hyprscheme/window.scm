@@ -11,8 +11,8 @@
            hl-window-close! hl-window-class hl-window-workspace
            hl-window-monitor hl-window-floating? hl-window-size
            hl-window-pid hl-window-focus! hl-window-float-set!
-           hl-window-workspace-set! hl-window-move-direction!
-           hl-window-swap-direction! hl-window-swap-next!
+           hl-window-workspace-set! hl-window-move!
+           hl-window-swap! hl-window-swap-next!
            hl-window-swap-with! hl-window-cycle! hl-window-center!
            hl-window-size-set! hl-window-position-set!
            hl-window-pinned-set! hl-window-pseudo-set! hl-window-kill!
@@ -20,8 +20,8 @@
            hl-window-tag-add! hl-window-tags-clear!
            hl-window-swallow-toggle! hl-window-group-set!
            hl-window-group? hl-window-group hl-window-group-lock-set!
-           hl-window-group-lock? hl-window-group-move-in!
-           hl-window-group-move-out! hl-window-group-move-in-or-create!
+           hl-window-group-lock? hl-window-move-into-group!
+           hl-window-move-out-of-group! hl-window-move-into-or-create-group!
            hl-window-deny-from-group-set! hl-window-pass-shortcut!
            hl-window-send-shortcut! hl-window-send-key-state!
            hl-window-rule-add! hl-window-from hl-urgent-window
@@ -58,6 +58,7 @@
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
 (use-modules (hyprscheme enums))
+(use-modules (hyprscheme values))
 
 (use-modules (ice-9 exceptions)
              (rnrs io ports)
@@ -121,13 +122,23 @@
   "Move the window to workspace WS."
   (= 0 (hl--c-window-move-to-workspace w (hl--ws-arg ws))))
 
-(define (hl-window-move-direction! w dir)
-  "Move WINDOW in direction DIR."
-  (= 0 (hl--c-window-move-direction w dir)))
+(define* (hl-window-move! #:optional w #:key (direction 'right))
+  "Move WINDOW in DIRECTION, a direction-enum: 'up, 'right, 'down or 'left.
+   WINDOW may be omitted or #f for the focused window.
 
-(define (hl-window-swap-direction! w dir)
-  "Swap WINDOW with the window in direction DIR."
-  (= 0 (hl--c-window-swap-direction w dir)))
+   The direction is settled HERE: DIRECTION is an enum, so it can only be one of
+   the four (enum-value refuses anything else, naming the set), and the gsubr is
+   handed the compositor's own integer. Nothing downstream parses a string —
+   which is what makes a bad direction fail at the call rather than reach the
+   compositor, where an unrecognised one used to abort the session."
+  (= 0 (hl--c-window-move-direction (if w w #f)
+                                    (enum-value direction-enum direction))))
+
+(define* (hl-window-swap! #:optional w #:key (direction 'right))
+  "Swap WINDOW with the window in DIRECTION ('up, 'right, 'down or 'left).
+   WINDOW may be omitted or #f for the focused window."
+  (= 0 (hl--c-window-swap-direction (if w w #f)
+                                    (enum-value direction-enum direction))))
 
 (define* (hl-window-swap-next! w #:key (prev #f))
   "Swap WINDOW with the next window in its group; #:prev #t swaps
@@ -234,18 +245,31 @@
   "#t when WINDOW's group is locked."
   (= 1 (hl--c-window-group-locked w)))
 
-(define (hl-window-group-move-in! w dir)
-  "Move WINDOW into the group in direction DIR."
-  (= 0 (hl--c-window-into-group w dir)))
+(define* (hl-window-move-into-group! #:optional w #:key (direction 'right))
+  "Move WINDOW into the group in DIRECTION ('up, 'right, 'down or 'left).
+   WINDOW may be omitted or #f for the focused window."
+  (= 0 (hl--c-window-into-group (if w w #f)
+                                (enum-value direction-enum direction))))
 
-(define (hl-window-group-move-out! w dir)
-  "Move WINDOW out of its group in direction DIR."
-  (= 0 (hl--c-window-out-of-group w dir)))
+(define* (hl-window-move-out-of-group! #:optional w #:key (direction 'none))
+  "Move WINDOW out of its group. WINDOW may be omitted or #f for the focused
+   window.
 
-(define (hl-window-group-move-in-or-create! w dir)
-  "Move WINDOW into the group in direction DIR, creating one when there
-   is none."
-  (= 0 (hl--c-window-into-or-create-group w dir)))
+   DIRECTION is a direction-or-none-enum and defaults to 'none, which releases
+   the window from the group WITHOUT aiming it anywhere — the compositor's own
+   directionless form, not a fallback: the value it stands for is the one
+   CGroup::remove tests for, and the one moveWindowOutOfGroupHelper assumes by
+   default. Give 'up, 'right, 'down or 'left to drop it towards that edge
+   instead."
+  (= 0 (hl--c-window-out-of-group (if w w #f)
+                                  (enum-value direction-or-none-enum direction))))
+
+(define* (hl-window-move-into-or-create-group! #:optional w #:key (direction 'right))
+  "Move WINDOW into the group in DIRECTION ('up, 'right, 'down or 'left),
+   creating a group when there is none. WINDOW may be omitted or #f for the
+   focused window."
+  (= 0 (hl--c-window-into-or-create-group (if w w #f)
+                                          (enum-value direction-enum direction))))
 
 (define* (hl-window-deny-from-group-set! w #:key (on? 'unset))
   "Set whether WINDOW denies being grouped (absent #:on? toggles)."
@@ -257,20 +281,35 @@
   "Pass the currently-pressed keybind through to WINDOW."
   (= 0 (hl--c-pass w)))
 
-(define (hl-window-send-shortcut! mods key . w)
-  "Send a keypress to WINDOW (default: the active window) as if pressed:
-   MODS is a list of modifier tokens, as built by hl-kbd/hl-key (e.g.
-   (hl-key \"SUPER\")), and KEY an xkb keysym name."
-  (unless (and (list? mods) (every (lambda (m) (string? m)) mods))
-    (error "hl-window-send-shortcut!: 'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
-  (= 0 (hl--c-send-shortcut mods key (if (null? w) -1 (car w)))))
+(define* (hl-window-send-shortcut! #:optional w #:key (keys '()))
+  "Send KEYS to WINDOW as if pressed. WINDOW may be omitted or #f for the
+   focused window.
 
-(define (hl-window-send-key-state! mods key state . w)
-  "Like hl-window-send-shortcut!, but STATE selects the key state
-   explicitly (press or release)."
-  (unless (and (list? mods) (every (lambda (m) (string? m)) mods))
-    (error "hl-window-send-key-state!: 'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
-  (= 0 (hl--c-send-key-state mods key state (if (null? w) -1 (car w)))))
+   KEYS is one chord: the flat token list hl-kbd or hl-key returns, modifiers
+   first and the key last — (hl-kbd \"C-l\"), (hl-key \"SUPER+F10\"), or a
+   literal '(\"SUPER\" \"F10\"). It is split here (hl--chord-mods /
+   hl--chord-key) into the mods mask and the keysym the compositor wants."
+  (unless (and (list? keys) (pair? keys) (every string? keys))
+    (error "hl-window-send-shortcut!: #:keys must be a chord — the token list from hl-kbd/hl-key, e.g. (hl-kbd \"C-l\"). Got:" keys))
+  (= 0 (hl--c-send-shortcut (hl--chord-mods keys)
+                            (hl--chord-key keys)
+                            (if w w #f))))
+
+(define* (hl-window-send-key-state! #:optional w #:key (keys '()) (state 'down))
+  "Send KEYS to WINDOW as if pressed, with STATE saying which key state to
+   synthesise: a key-state-enum — 'down (the default), 'up, or 'repeat.
+   WINDOW may be omitted or #f for the focused window.
+
+   'repeat is a second press rather than an autorepeat flag (the compositor
+   runs pass() twice for it), which is how a synthetic autorepeat is spelled.
+
+   KEYS is one chord, exactly as hl-window-send-shortcut! takes it."
+  (unless (and (list? keys) (pair? keys) (every string? keys))
+    (error "hl-window-send-key-state!: #:keys must be a chord — the token list from hl-kbd/hl-key, e.g. (hl-kbd \"C-l\"). Got:" keys))
+  (= 0 (hl--c-send-key-state (hl--chord-mods keys)
+                             (hl--chord-key keys)
+                             (enum-value key-state-enum state)
+                             (if w w #f))))
 
 (define* (hl-window-rule-add! name #:key #:rest fields)
   "Add a window rule and return its rule handle. NAME (#f = anonymous).

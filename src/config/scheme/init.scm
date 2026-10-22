@@ -153,9 +153,11 @@
 
 ;; ORDER IS LOAD-BEARING: a module is loaded after everything it imports.
 ;;   kernel  — the host has already created it and filled it with the gsubrs
-;;   enums   — named sets of values; imports the kernel only
+;;   enums   — the enum MACHINERY; imports the kernel only
+;;   values  — the concrete enums two families share; imports kernel + enums
 ;;   core    — the shared plumbing the families build on
-;;   families— each imports only the kernel, core and enums, never another family
+;;   families— each imports only the kernel, core, enums and values, never
+;;             another family
 ;;   composers (extras, emacs-keymaps) — the only modules that compose families
 ;;
 ;; THIS LIST IS THE WHOLE SET of what a config can reach. It is the only place
@@ -163,6 +165,7 @@
 ;; public API is derived by introspecting these modules, not listed.
 (use-or-reload-modules (hyprscheme kernel)
                       (hyprscheme enums)
+                      (hyprscheme values)
                       (hyprscheme core))
 
 (use-or-reload-modules (hyprscheme bind)

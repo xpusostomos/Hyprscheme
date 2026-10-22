@@ -16,6 +16,8 @@
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
+(use-modules (hyprscheme enums))
+(use-modules (hyprscheme values))
 
 (use-modules (ice-9 exceptions)
              (rnrs io ports)
@@ -25,9 +27,14 @@
 
 (define (hl-event? x) (and (struct? x) (eq? (struct-vtable x) hl-event-rtd)))
 
-(define (hl-focus-direction-set! dir)
-  "Move the focus in direction DIR (left/right/up/down)."
-  (= 0 (hl--c-focus-direction dir)))
+(define (hl-focus-direction-set! direction)
+  "Move the focus in DIRECTION, a direction-enum: 'up, 'right, 'down or 'left.
+
+   Positional, not a keyword: this dispatcher takes no optional window (the
+   scripting API's focus has no window field either), so there is no optional
+   type argument for keywords to follow. It is the one direction-taker that
+   reads this way."
+  (= 0 (hl--c-focus-direction (enum-value direction-enum direction))))
 
 (define (hl-focus-last! )
   "Move the focus to the previously-focused window."
@@ -41,9 +48,17 @@
   "Move the cursor to (X, Y)."
   (= 0 (hl--c-cursor-move (exact->inexact x) (exact->inexact y))))
 
-(define (hl-cursor-move-to-corner! w corner)
-  "Move the cursor to CORNER (0-3) of WINDOW."
-  (= 0 (hl--c-cursor-corner w corner)))
+(define* (hl-cursor-move-to-corner! #:optional w #:key (corner 'top-left))
+  "Move the cursor to CORNER of WINDOW, a corner-enum: 'top-left, 'top-right,
+   'bottom-right or 'bottom-left. WINDOW may be omitted or #f for the focused
+   window.
+
+   The four names are the compositor's (its eRectCorner spells them the same
+   way). Note they are NOT in its integer order — that runs bottom-left,
+   bottom-right, top-right, top-left, which is why the numbers are the enum's
+   business and never the caller's."
+  (= 0 (hl--c-cursor-corner (if w w #f)
+                            (enum-value corner-enum corner))))
 
 (define (hl-exit! )
   "Quit the compositor."

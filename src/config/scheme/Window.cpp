@@ -673,16 +673,19 @@ namespace Config::Scheme {
         return scm_from_int64(hlWindowFocusHistoryId(window));
     }
 
-    static int hlSchemeWindowMoveDirection(SCM id, const char* dir) {
+    // each DIR is a direction-enum from Scheme, already converted to the
+    // compositor's int — see actionDir in SchemeInternals.hpp for why this
+    // parameter is no longer a string
+    static int hlSchemeWindowMoveDirection(SCM id, int dir) {
         if (!g_up)
             return -1;
-        return actionResult("window-move-direction", Config::Actions::moveInDirection(actionDir(dir), actionWindow(id)));
+        return actionResult("window-move", Config::Actions::moveInDirection(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowSwapDirection(SCM id, const char* dir) {
+    static int hlSchemeWindowSwapDirection(SCM id, int dir) {
         if (!g_up)
             return -1;
-        return actionResult("window-swap-direction", Config::Actions::swapInDirection(actionDir(dir), actionWindow(id)));
+        return actionResult("window-swap", Config::Actions::swapInDirection(actionDir(dir), actionWindow(id)));
     }
 
     static int hlSchemeWindowSwapNext(SCM id, bool prev) {
@@ -791,22 +794,28 @@ namespace Config::Scheme {
         return actionResult("toggle-swallow", Config::Actions::toggleSwallow());
     }
 
-    static int hlSchemeWindowIntoGroup(SCM id, const char* dir) {
+    static int hlSchemeWindowIntoGroup(SCM id, int dir) {
         if (!g_up)
             return -1;
-        return actionResult("window-into-group", Config::Actions::moveIntoGroup(actionDir(dir), actionWindow(id)));
+        return actionResult("window-move-into-group", Config::Actions::moveIntoGroup(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowOutOfGroup(SCM id, const char* dir) {
+    // DIR may be DIRECTION_DEFAULT's -1 here, and that is a real value rather
+    // than a mistake: "release the window from its group without aiming it
+    // anywhere" is a form the compositor supports (CGroup::remove tests for
+    // DIRECTION_DEFAULT explicitly, and moveWindowOutOfGroupHelper defaults to
+    // it). It is why this one call takes direction-or-none-enum: the Scheme
+    // side spells that value 'none.
+    static int hlSchemeWindowOutOfGroup(SCM id, int dir) {
         if (!g_up)
             return -1;
-        return actionResult("window-out-of-group", Config::Actions::moveOutOfGroup(actionDir(dir), actionWindow(id)));
+        return actionResult("window-move-out-of-group", Config::Actions::moveOutOfGroup(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowIntoOrCreateGroup(SCM id, const char* dir) {
+    static int hlSchemeWindowIntoOrCreateGroup(SCM id, int dir) {
         if (!g_up)
             return -1;
-        return actionResult("window-into-or-create-group", Config::Actions::moveIntoOrCreateGroup(actionDir(dir), actionWindow(id)));
+        return actionResult("window-move-into-or-create-group", Config::Actions::moveIntoOrCreateGroup(actionDir(dir), actionWindow(id)));
     }
 
     static int hlSchemeWindowDenyFromGroup(SCM id, int act) {

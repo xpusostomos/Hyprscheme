@@ -72,10 +72,51 @@ val '(begin (define-enum-values t-enum (quote ((low . 1) (high . 9))))
             ((enum-set-indexer (enum-values->enum t-enum)) (quote high)))' '1'
 
 # ---- an enum used ACROSS modules --------------------------------------------
-# The concrete enums live with the FAMILY that uses them (fullscreen-mode is in
-# window.scm), not here: this module is the machinery and nothing else. What is
-# asserted here is only that the machinery survives being used from a module
-# that is not this one — the fullscreen enums themselves are exercised through
-# hl-window-fullscreen and friends in t-api.
+# A concrete enum used by ONE family lives with that family (fullscreen-mode is
+# in window.scm) and is not exported, so it needs no entry here: it is exercised
+# through hl-window-fullscreen and friends in t-api.
+#
+# A concrete enum used by TWO families lives in (hyprscheme values) and MUST be
+# exported for both to import it — which makes it reachable API, and this file
+# is where its own values are pinned. The behaviour (that a function refuses a
+# bad value) is asserted in t-api; what is asserted here is the SET: the names,
+# and the integers the compositor actually wants.
+
+# direction-enum: the four directions, at Math::eDirection's own numbers.
+val '(enum-value direction-enum (quote up))'    '0'
+val '(enum-value direction-enum (quote right))' '1'
+val '(enum-value direction-enum (quote down))'  '2'
+val '(enum-value direction-enum (quote left))'  '3'
+ok  '(equal? (enum-set->list (enum-values->enum direction-enum))
+             (quote (up right down left)))'
+# 'none belongs to direction-or-none-enum and NOT to this one — the whole reason
+# the two are separate sets: a function taking a direction must refuse it.
+err '(enum-value direction-enum (quote none))' "not a value of this enum"
+
+# direction-or-none-enum: the same four plus 'none, which IS the compositor's
+# DIRECTION_DEFAULT (-1) — the value CGroup::remove tests for to mean
+# "release the window without aiming it anywhere".
+val '(enum-value direction-or-none-enum (quote none))'  '-1'
+val '(enum-value direction-or-none-enum (quote right))' '1'
+ok  '(equal? (enum-set->list (enum-values->enum direction-or-none-enum))
+             (quote (up right down left none)))'
+
+# corner-enum: named after the compositor's eRectCorner, but numbered after
+# Actions::moveCursorToCorner's switch — where the arms run bottom-left,
+# bottom-right, top-right, top-left, NOT in reading order. Getting this wrong
+# would warp the cursor to the wrong corner, so it is pinned exactly.
+val '(enum-value corner-enum (quote bottom-left))'  '0'
+val '(enum-value corner-enum (quote bottom-right))' '1'
+val '(enum-value corner-enum (quote top-right))'    '2'
+val '(enum-value corner-enum (quote top-left))'     '3'
+err '(enum-value corner-enum (quote middle))' "not a value of this enum"
+
+# key-state-enum: 0 up, 1 down, 2 repeat — the comment beside
+# Actions::sendKeyState's parameter, and what its dispatcher maps
+# "down"/"up"/"repeat" to.
+val '(enum-value key-state-enum (quote up))'     '0'
+val '(enum-value key-state-enum (quote down))'   '1'
+val '(enum-value key-state-enum (quote repeat))' '2'
+err '(enum-value key-state-enum (quote sideways))' "not a value of this enum"
 
 exit $FAILED

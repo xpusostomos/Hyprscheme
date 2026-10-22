@@ -266,7 +266,7 @@ while (( SECONDS < END )); do
       ((3) (hl-window-fullscreen-set! w #:mode (quote maximized))
            (hl-window-fullscreen-set! w #:mode (quote maximized) #:action (quote unset)))
       ((4) (hl-window-workspace-set! w \"8\") (hl-window-workspace-set! w \"9\"))
-      ((5) (hl-window-move-direction! w \"r\") (hl-window-center! w)))
+      ((5) (hl-window-move! w #:direction (quote right)) (hl-window-center! w)))
     (when (hl-window-floating? w)
       (hl-window-position-set! w $((ITER % 7)) $((ITER % 5)) #:relative #t)
       (hl-window-size-set! w 20 10 #:relative #t))
