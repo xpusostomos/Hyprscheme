@@ -876,6 +876,24 @@ ok '(equal? (hl-load-config "api-extra.scm") "'"$CFG"'/api-extra.scm")'
 ok '(let ((n (length (hl-notifications))))
        (and (eq? (hl-load-config "no-such-config-anywhere") #f)
             (> (length (hl-notifications)) n)))'
+# A file that is THERE but RAISES is also a failure, and says so — it used to
+# return its path and look like a success, which is how a config that died
+# partway through left every definition after the error unbound with only a
+# compositor-log line to show for it. The file is left half-applied (the forms
+# before the error DID run), so the notification is the only signal.
+printf '(hl-state-set! (quote broken-ran-first) 1)\n(hl-this-does-not-exist 2)\n' > "$CFG/api-broken.scm"
+val '(begin (hl-load-config "api-broken") #f)' '#f'
+ok '(eq? (hl-state-ref (quote broken-ran-first) 0) 1)'
+# and the notification names the FILE (the path), not just the bare name —
+# `string-suffix?` on the piece after the last /, since the path is absolute
+ok '(let ((txt (map hl-notification-text (hl-notifications))))
+       (and (pair? (filter (lambda (t)
+                             (and (string? t)
+                                  (let ((n (string-length t)))
+                                    (and (>= n 14)
+                                         (string=? (substring t (- n 14) n) "api-broken.scm")))))
+                           txt))
+            #t))'
 
 # ---- bind result protocol (upstream {ok, pass_event, error, request_release}) ----
 # a non-plist truthy value normalizes to ok #t, like upstream's non-table returns

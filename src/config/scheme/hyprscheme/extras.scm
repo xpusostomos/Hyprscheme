@@ -153,7 +153,15 @@
 
 (define (hl-load-config name)
   "Load another config file by NAME, and return its path — or #f, having
-   raised a notification, when there is no such file.
+   raised a notification, when there is no such file OR when the file is
+   there but raised while loading.
+
+   Both failures notify, and they are worth telling apart: a missing file is
+   usually a typo or a file you have not written yet, while a file that RAISES
+   has already defined some of itself — so the config ends up half-applied,
+   which is the state that is hard to diagnose. (It was, until this: a file
+   that died at its 300th form left everything after it unbound, and the only
+   sign was a line in the compositor log.)
 
    NAME is looked up under the config directory the way Hyprland finds its
    own: $XDG_CONFIG_HOME/hypr/NAME.scm, then $HOME/.config/hypr/NAME.scm.
@@ -163,23 +171,29 @@
    The file is loaded INTO THE CURRENT GENERATION, exactly as (load \"…\")
    from a config is (the kernel shadows load for this), so what it defines is
    reachable afterwards and is discarded on the next reload like everything
-   else a config sets up. A file that raises is reported to the compositor log
-   and does not stop the rest of the config — but this returns #f only for a
-   file that is NOT THERE; a file that loaded and then raised still returns its
-   path, because it was found and its forms did run."
+   else a config sets up. An error in it is reported to the compositor log and
+   does not stop the rest of the config — but it IS a failure here, and this
+   returns #f for it."
   (let ((found (find file-exists? (hl--config-candidates name))))
-    (if found
-        ;; hl--load, not `load`: it is the same function the kernel shadows
-        ;; `load` with, but naming it directly says which one is meant and
-        ;; avoids a compile warning about the kernel's `load` overriding the
-        ;; core binding in this module.
-        (begin (hl--load found) found)
-        (begin
-          (hl-notification-add!
-            #:text (format #f "hyprscheme: config not found: ~a" name)
-            #:timeout 5000
-            #:icon "warning")
-          #f))))
+    (cond
+      ((not found)
+       (hl-notification-add!
+         #:text (format #f "hyprscheme: config not found: ~a" name)
+         #:timeout 5000
+         #:icon "warning")
+       #f)
+      ;; hl--load, not `load`: it is the same function the kernel shadows
+      ;; `load` with, but naming it directly says which one is meant and
+      ;; avoids a compile warning about the kernel's `load` overriding the
+      ;; core binding in this module. It answers whether the file LOADED, so a
+      ;; file that raises is reported here rather than looking like a success.
+      ((hl--load found) found)
+      (else
+       (hl-notification-add!
+         #:text (format #f "hyprscheme: config failed to load: ~a" found)
+         #:timeout 5000
+         #:icon "error")
+       #f))))
 
 ;; ---- monitors, curves, animations, permissions ------------------------------
 

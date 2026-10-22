@@ -20,11 +20,15 @@
 #
 # This file sorts last and the compositor is now down, so the log is complete.
 # Errors the tests ASK for are listed; anything else fails the suite. Measuring
-# the list against a green run is the point: it held exactly these three.
+# the list against a green run is the point: it held exactly these three, plus
+# the one t-api now provokes to prove hl-load-config REPORTS a load that raised
+# (api-broken.scm calls a function that does not exist, deliberately).
 log_clean() {
   local log=$WORK/compositor.log
   [[ -f $log ]] || { echo "no compositor log to check"; return 1; }
   local intended='watchdog: (eval|layout callback|callback) abandoned|^\[scheme\] error: boom$'
+  # t-api's deliberate broken config: the error IS the thing under test
+  intended="$intended|^\[scheme\] error: .*Unbound variable: hl-this-does-not-exist"
   local unexpected
   unexpected=$(grep '^\[scheme\] error:' "$log" | grep -vE "$intended")
   if [[ -n $unexpected ]]; then

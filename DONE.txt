@@ -293,6 +293,25 @@ and TODO.txt's archived sections.)
   from inside the repo while breaking every config outside it. Three
   times in one session, all lints green each time.
 
+== hl-load-config reports a load that FAILED (not just a missing file) ==
+- hl--load returned #t WHETHER OR NOT the load worked — the guard printed
+  the error and then fell through to #t, so a caller could not tell. That
+  is how "the config loads but set-mark is unbound" was possible: the
+  file died at its 300th form and hl-load-config handed back a path as
+  if it had worked. It now returns #f when the guard fires; `load` itself
+  still returns #t (Guile's own does, and a config calling it is not
+  expected to check).
+- hl-load-config raises a DIFFERENT notification for the two failures,
+  which are worth telling apart: "config not found: NAME" for a file that
+  is not there, and "config failed to load: PATH" for one that raised.
+  A missing file is usually a typo; a file that raised has ALREADY
+  DEFINED SOME OF ITSELF, so the config is half-applied — the state that
+  is hard to diagnose, and the one the notification exists for.
+- Tests in t-api.sh, verified to fail: reverting hl--load to answer #t
+  always makes the notification assertion fail. t-zzzz-exit's
+  allowed-error list gained the error t-api now provokes on purpose.
+- Wiki (scheme-utilities.md) and the docstrings say both cases.
+
 == TESTS + TOOLING ==
 - hl-load-config (in extras): load another config file by name.
   Looks under $XDG_CONFIG_HOME/hypr/ then $HOME/.config/hypr/, appending

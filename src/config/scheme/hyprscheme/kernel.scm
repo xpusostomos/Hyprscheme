@@ -517,17 +517,32 @@
 ;; shadows by the time these run — capturing them would capture the shadow.
 (define hl--base-load (@ (guile) load))
 (define hl--base-eval (@ (guile) eval))
+
+;; Load PATH into the current generation, and RETURN WHAT HAPPENED: #t when it
+;; loaded, #f when it raised. The error is still reported to the log — that is
+;; what the guard is for, since an exception must not escape into C++.
+;;
+;; The return value MATTERS and used to be a lie: this returned #t whether or
+;; not the load worked, so a caller could not tell. hl-load-config handed back a
+;; path for a file that had died halfway through, the failure visible only as a
+;; line in the compositor log — and a config that raised at its 300th form left
+;; every definition after it unbound with nothing to say so.
+;;
+;; `load` itself still returns #t (Guile's own does, and a config calling it is
+;; not expected to check); only the internal one reports, and hl-load-config
+;; builds on that.
 (define (hl--load path)
-  (guard (e (#t (hl--report e)))
-    (let ((gen (hl--c-generation)))
-      (if gen
-          (save-module-excursion
-            (lambda ()
-              (set-current-module gen)
-              (primitive-load path)))
-          (hl--base-load path)))
-    #t))
-(define (load f) (hl--load f))
+  (let ((ok (guard (e (#t (hl--report e) #f))
+              (let ((gen (hl--c-generation)))
+                (if gen
+                    (save-module-excursion
+                      (lambda ()
+                        (set-current-module gen)
+                        (primitive-load path)))
+                    (hl--base-load path)))
+              #t)))
+    (and ok #t)))
+(define (load f) (hl--load f) #t)
 
 ;; (eval x) from a config: into the generation, so it sees the config's own
 ;; definitions — and dies with it, like the next reload's fresh environment.
