@@ -236,6 +236,63 @@ and TODO.txt's archived sections.)
   injecting a paren error, which reports file:line:col and the message.
 - Enums' own errors reworded to put the parameters last.
 
+== THE BOUNDARY: bools, symbols, and one decision that was in the wrong place ==
+- Arg<bool> added to Bindings.hpp: a C++ bool parameter takes a Scheme
+  BOOLEAN by truthiness (scm_is_true). #t is a distinct immediate, not a
+  number, so Arg<int> refused it outright — "argument 3 is not an
+  integer" — and that is why 19 gsubrs had `int` params with call sites
+  writing (if x 1 0). All 19 converted to `bool` + the conversion
+  dropped. TRAP: 0 is TRUTHY, so a site left passing (if x 1 0) would
+  invert.
+- Arg<const char*> takes a SYMBOL as well as a string. A name-ish
+  argument (config key, tag, prop) is what Scheme has as a symbol, and
+  requiring symbol->string at the call site was 40 conversions. Numbers
+  are deliberately NOT accepted — a number means a name only in the
+  workspace/monitor resolvers. hl--str went from 40 call sites to 5
+  consumers; hl--dir deleted.
+- RULE, in CLAUDE.md ("THE BOUNDARY"): a gsubr mirrors the C/C++ call it
+  exposes — same shape, just enough to be a sensible Scheme call. Policy
+  lives in Scheme. Two violations were real:
+  - hl--c-window-fullscreen-toggle hand-rolled an isFullscreen test the
+    compositor's own action already does, and threw away an answer
+    Scheme had already read. Now hl--c-window-fullscreen-set mirrors
+    setFullscreenMode, which SETS.
+  - hlCurveAdd(name, int type, a,b,c,d) invented a type argument
+    Hyprland does not have — it has TWO calls, addBezierWithName and
+    addSpringWithName, and the curve type is WHICH FUNCTION YOU CALL.
+    Split into hl--c-bezier-curve-add / hl--c-spring-curve-add, and the
+    Scheme API into hl-bezier-curve-add! / hl-spring-curve-add! (the
+    variadic . vals and its zero-padding are gone with it).
+
+== THE MAKEFILE: no hand-kept module list ==
+- SCM_FAMILIES IS DELETED. It silently omitted `enums`, so enums.go was
+  never built — in the tree OR in the installed machinery — and nothing
+  failed; the file was simply absent. Third time a hand-kept module list
+  in this tree drifted (the Host.cpp list, the umbrella), same answer:
+  ask the filesystem. scm-compile now globs.
+- The dependency ORDER the list claimed to encode is NOT needed, and its
+  comment was wrong: measured on Guile 3.0.11, a module whose dependency
+  has no .go at all still compiles (only the .scm need be on the load
+  path). The whole tree compiles in reverse dependency order.
+- hyprpm-machinery WIPES $(HYPRSCHEME_SCM) before installing. An
+  add-only install leaves a ghost for every file the tree has renamed or
+  deleted — the deleted umbrella's hyprscheme.scm sat in
+  ~/.local/share/hyprscheme/scm for the whole session, beside a MISSING
+  enums.go, so what `hyprpm update` fetched was neither the old tree nor
+  the new one.
+
+== API-CHANGE DETECTION (the thing that stops the above recurring) ==
+- tools/api-check.sh + API.snapshot: what the PUBLIC API has lost since
+  the baseline. Not in `make check` (a working tree legitimately has
+  removals mid-change); run before a release.
+- The snapshot is tools/api-names.scm's introspection output, not a list
+  to maintain. Removals fail and are NAMED; additions report but pass.
+  Verified both ways: removing hl-key-down?'s export is reported by name
+  with exit 1; adding hl-zz-test-add reports and exits 0.
+- WHY: the suite only tests the names IT uses, so a rename looks clean
+  from inside the repo while breaking every config outside it. Three
+  times in one session, all lints green each time.
+
 == TESTS + TOOLING ==
 - hl-load-config (in extras): load another config file by name.
   Looks under $XDG_CONFIG_HOME/hypr/ then $HOME/.config/hypr/, appending

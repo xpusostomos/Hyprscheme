@@ -149,6 +149,21 @@ can fix should be fixed before a piece of work is complete.
     while a call from another file must qualify it. A bare-name search would
     match same-named members all over the tree (there is an `init`, a `lock`,
     a `clear` …) and the check would be switched off as noisy.
+  - `tools/api-check.sh` — **what the public API has LOST since `API.snapshot`**.
+    NOT part of `make check` (it fails on any removal, and a working tree
+    legitimately has removals mid-change); run it before a release or when a
+    batch of API work is done. The suite only tests the names IT uses, so a
+    rename looks perfectly clean from inside the repo while breaking every
+    config outside it — that happened three times in one session
+    (`hl-layout-msg` → `hl-layout-msg!`, `hl-is-key-down` → `hl-key-down?`, and
+    `hl-curve-add!` split in two), each time with all lints green. The snapshot
+    is not a list to maintain: it is `tools/api-names.scm`'s introspection
+    output, so it is a photograph of the API. Removals fail the check and are
+    named; **additions report but pass** — adding a function cannot break
+    anybody, and failing on it would make the tool annoying enough to ignore.
+    Verified to fail: removing `hl-key-down?`'s export is reported by name,
+    exit 1. `--update` rebaselines (a deliberate act, after saying so in
+    DONE.txt and the wiki).
   - `tools/doc-audit.py` — every `hl-*` name the WIKI uses exists (in a
     code block or in prose). Textual, which is the point: a name inside a
     `lambda` is never looked up by evaluating the block, which is how five

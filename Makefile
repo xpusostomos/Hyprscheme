@@ -47,18 +47,18 @@ LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 # kernel) resolves to hyprscheme/kernel.scm).
 #
 # init.scm is the ENTRY POINT — the one file the host loads; it loads everything
-# else by name. It must be first in this list, and its presence is what
-# schemeDir() probes for. There is no umbrella file: the public API is derived
-# by introspecting the modules, not read from a list.
+# else by name. Its presence is what schemeDir() probes for. There is no
+# umbrella file: the public API is derived by introspecting the modules, not
+# read from a list, and the module SET is a glob (see SCM_ALL, below).
 SCM_ENTRY = src/config/scheme/init.scm
-SCM_FILES = $(SCM_ENTRY) \
+SCM_SRC   = $(wildcard src/config/scheme/*.scm) \
             $(wildcard src/config/scheme/hyprscheme/*.scm)
 
 # the compiled forms, built beside the .scm by `make scm-compile` and shipped by
 # install. They are an ACCELERATOR, never a replacement: `reload-module` (the
 # wipe) re-reads the .scm and cannot work from a .go alone, so the sources
-# always ship too. See the scm-compile target for why the order matters.
-SCM_GO = $(SCM_FILES:.scm=.go)
+# always ship too.
+SCM_GO = $(SCM_SRC:.scm=.go)
 
 # guile-3.0 cflags/libs: Guile.cpp, Handles.* and Bindings.hpp include
 # libguile headers
@@ -139,21 +139,32 @@ src/plugin-main.o: plugin-main.cpp
 # never installed and hyprpm still reported success (it checks only that the
 # declared output exists, never a step's exit status).
 SCM_DIR     = $(CURDIR)/src/config/scheme
-SCM_FAMILIES = core bind config event exec gesture group layer monitor \
-               notification query rule timer window workspace extras \
-               emacs-keymaps
+
+# THE FILE LIST IS A GLOB, from the filesystem, not a hand-kept list. There was
+# one (`SCM_FAMILIES`) and it silently omitted a module: `enums` was added and
+# never listed, so `enums.go` was never built — here OR in the installed
+# machinery — and nothing failed, the file was simply absent. That is the third
+# time a hand-kept module list in this tree drifted (the Host.cpp list, the
+# umbrella), and the third time the answer is the same: ask the filesystem.
+#
+# The dependency ORDER the old list claimed to encode is not needed. Measured on
+# Guile 3.0.11: a module whose dependency has NO .go at all still compiles (only
+# the .scm need be on the load path), so the list's order bought nothing and its
+# comment saying otherwise was wrong. The kernel keeps its own step only because
+# it is genuinely special — the host seeds it with the gsubrs before its file is
+# read — not because of ordering.
+SCM_ALL = $(wildcard $(SCM_DIR)/hyprscheme/*.scm) $(SCM_DIR)/init.scm
 
 .PHONY: scm-compile
 scm-compile:
 	@GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
 	  guild compile -o $(SCM_DIR)/hyprscheme/kernel.go $(SCM_DIR)/hyprscheme/kernel.scm
-	@for m in $(SCM_FAMILIES); do \
+	@for f in $(SCM_ALL); do \
+	  case $$f in */kernel.scm) continue;; esac; \
 	  GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
-	    guild compile -o $(SCM_DIR)/hyprscheme/$$m.go $(SCM_DIR)/hyprscheme/$$m.scm || exit 1; \
+	    guild compile -o $${f%.scm}.go $$f || exit 1; \
 	done
-	@GUILE_LOAD_PATH=$(SCM_DIR) GUILE_LOAD_COMPILED_PATH=$(SCM_DIR) \
-	  guild compile -o $(SCM_DIR)/init.go $(SCM_DIR)/init.scm
-	@echo "compiled $(words $(SCM_GO)) machinery files"
+	@echo "compiled $(words $(SCM_ALL)) machinery files"
 
 # ---- hyprpm ----------------------------------------------------------------
 #
@@ -218,8 +229,16 @@ hyprpm-plugin: hyprpm-clean
 HYPRSCHEME_DATA ?= $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)
 HYPRSCHEME_SCM  := $(HYPRSCHEME_DATA)/hyprscheme/scm
 
+# WIPE FIRST, then install. An install that only ADDS leaves a ghost for every
+# file the tree has since renamed or deleted — the machinery file for `enums`
+# would arrive but the DELETED umbrella's would stay, and the loader would go on
+# finding it. (It did: `hyprscheme.scm` sat in the installed tree after the
+# umbrella was removed and `enums.go` was missing beside it, so what `hyprpm
+# update` fetched was neither the old tree nor the new one.) The directory is
+# ours — this target creates it — so clearing it is the target's own business.
 .PHONY: hyprpm-machinery
 hyprpm-machinery: scm-compile
+	@rm -rf $(HYPRSCHEME_SCM)
 	@install -d $(HYPRSCHEME_SCM)/hyprscheme
 	@install -m 644 src/config/scheme/init.scm $(HYPRSCHEME_SCM)/
 	@install -m 644 src/config/scheme/hyprscheme/*.scm $(HYPRSCHEME_SCM)/hyprscheme/
@@ -335,7 +354,7 @@ install-local:
 #                 none dead — and nothing is left UNDEFINED IN THE BUILT .so,
 #                 which is how a family object missing from COMMON_OBJS shows up
 #                 (it links fine and fails only when the compositor loads it)
-SCM_SRC = $(wildcard src/config/scheme/*.scm src/config/scheme/hyprscheme/*.scm)
+# (SCM_SRC is defined at the top, beside the compile rules — same glob.)
 
 .PHONY: check
 check: $(TARGET)
