@@ -108,7 +108,7 @@
        ;; point and the modules under hyprscheme/ (no umbrella file any more)
        (all    (cons entry
                      (map (lambda (m) (string-append dir "/hyprscheme/" m ".scm"))
-                          (list "kernel" "core" "bind" "config" "event" "exec"
+                          (list "kernel" "enums" "core" "bind" "config" "event" "exec"
                                 "gesture" "group" "layer" "monitor"
                                 "notification" "query" "rule" "timer"
                                 "window" "workspace" "extras"

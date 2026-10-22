@@ -380,41 +380,59 @@ namespace Config::Scheme {
     // mirroring the toggle logic in Lua's dsp_fullscreenWindowWithAction
     // true set: 0 = none, 1 = maximized, 2 = fullscreen — regardless of the
     // current state (the toggle above exits when already in the mode)
-    static int hlSchemeWindowFullscreenSet(SCM id, int modeRaw) {
-        if (!g_up)
-            return -1;
-        const auto window = actionWindow(id).value_or(nullptr);
-        if (!window)
-            return -1;
-        const auto mode = sc<Fullscreen::eFullscreenMode>(modeRaw);
-        return Config::Actions::fullscreenWindow(mode, false, window) ? 0 : -2;
-    }
-
-    static int hlSchemeWindowFullscreenToggle(SCM id, int modeRaw) {
+    // SET the window's fullscreen mode. A thin mirror of the compositor's own
+    // setter, Fullscreen::controller()->setFullscreenMode: it assigns the mode
+    // and does nothing else.
+    //
+    // NOT Config::Actions::fullscreenWindow, which is the tempting call and the
+    // wrong one: that wrapper TOGGLES (it tests isFullscreen, then sets NONE or
+    // MODE). A toggle is a DECISION, and the Scheme side has already read the
+    // current mode to make it — re-deciding here would throw that answer away
+    // and pay for the test a second time.
+    //
+    // LAYOUTAWARE is the dispatcher's `layout_aware`; the compositor's action
+    // takes it and defaults to TRUE (it was hardcoded false here once, so our
+    // call could not be layout-aware at all while the Lua one can).
+    static int hlSchemeWindowFullscreenSet(SCM id, int modeRaw, bool layoutAware) {
         if (!g_up)
             return -1;
 
         const auto window = actionWindow(id);
         if (!window)
             return -1;
-        const PHLWINDOW w = *window;
 
-        const auto mode = sc<Fullscreen::eFullscreenMode>(modeRaw);
-        if (Fullscreen::controller()->isFullscreen(w, mode))
-            return Config::Actions::fullscreenWindow(Fullscreen::FSMODE_NONE, false, w) ? 0 : -2;
-
-        return Config::Actions::fullscreenWindow(mode, false, w) ? 0 : -2;
+        Fullscreen::controller()->setFullscreenMode(*window,
+                                                    sc<Fullscreen::eFullscreenMode>(modeRaw),
+                                                    std::nullopt,
+                                                    layoutAware);
+        return 0;
     }
 
+    // The window's fullscreen modes: INTERNAL is what the compositor is doing,
+    // CLIENT is what the app has been told. Two gsubrs rather than one returning
+    // a pair, because the Scheme side wants each on its own and a Scheme record
+    // for it would only be taken apart again. `windowOrFocused`, so #f means the
+    // focused window — the same argument rule as every other window query.
     static int hlSchemeWindowFullscreenMode(SCM id) {
         if (!g_up)
             return -1;
 
-        const auto window = hl::windowOf(id);
+        const auto window = windowOrFocused(id);
         if (!window)
             return -1;
 
         return sc<int>(Fullscreen::controller()->getFullscreenModes(window).internal);
+    }
+
+    static int hlSchemeWindowFullscreenClient(SCM id) {
+        if (!g_up)
+            return -1;
+
+        const auto window = windowOrFocused(id);
+        if (!window)
+            return -1;
+
+        return sc<int>(Fullscreen::controller()->getFullscreenModes(window).client);
     }
 
     static int hlSchemeWindowHidden(SCM id) {
@@ -667,7 +685,7 @@ namespace Config::Scheme {
         return actionResult("window-swap-direction", Config::Actions::swapInDirection(actionDir(dir), actionWindow(id)));
     }
 
-    static int hlSchemeWindowSwapNext(SCM id, int prev) {
+    static int hlSchemeWindowSwapNext(SCM id, bool prev) {
         if (!g_up)
             return -1;
         return actionResult("window-swap-next", Config::Actions::swapNext(prev == 0, actionWindow(id)));
@@ -683,7 +701,7 @@ namespace Config::Scheme {
     }
 
     // filter: 0 = all, 1 = tiled only, 2 = floating only
-    static int hlSchemeWindowCycle(SCM id, int next, int filter) {
+    static int hlSchemeWindowCycle(SCM id, bool next, int filter) {
         if (!g_up)
             return -1;
         std::optional<bool> tiled, floating;
@@ -691,7 +709,7 @@ namespace Config::Scheme {
             tiled = true;
         else if (filter == 2)
             floating = true;
-        return actionResult("window-cycle", Config::Actions::cycleNext(next != 0, tiled, floating, actionWindow(id)));
+        return actionResult("window-cycle", Config::Actions::cycleNext(next, tiled, floating, actionWindow(id)));
     }
 
     static int hlSchemeWindowCenter(SCM id) {
@@ -700,13 +718,13 @@ namespace Config::Scheme {
         return actionResult("window-center", Config::Actions::center(actionWindow(id)));
     }
 
-    static int hlSchemeWindowResizePx(SCM id, double w, double h, int relative) {
+    static int hlSchemeWindowResizePx(SCM id, double w, double h, bool relative) {
         if (!g_up)
             return -1;
         return actionResult("window-resize", Config::Actions::resize(Vector2D{w, h}, relative != 0, actionWindow(id)));
     }
 
-    static int hlSchemeWindowMovePx(SCM id, double x, double y, int relative) {
+    static int hlSchemeWindowMovePx(SCM id, double x, double y, bool relative) {
         if (!g_up)
             return -1;
         return actionResult("window-move", Config::Actions::move(Vector2D{x, y}, relative != 0, actionWindow(id)));
@@ -798,24 +816,27 @@ namespace Config::Scheme {
     }
 
     // explicit fullscreen: internal and client modes, layout-aware flag
-    static int hlSchemeWindowFullscreenState(SCM id, int internalMode, int clientMode, int layoutAware) {
+    static int hlSchemeWindowFullscreenState(SCM id, int internalMode, int clientMode, bool layoutAware) {
         if (!g_up)
             return -1;
         const auto w = actionWindow(id);
         if (!scm_is_false(id) && !w)
             return -1;
         return actionResult("window-fullscreen-state",
-            Config::Actions::fullscreenWindow(sc<Fullscreen::eFullscreenMode>(internalMode), sc<Fullscreen::eFullscreenMode>(clientMode), layoutAware != 0, w));
+            Config::Actions::fullscreenWindow(sc<Fullscreen::eFullscreenMode>(internalMode), sc<Fullscreen::eFullscreenMode>(clientMode), layoutAware, w));
     }
 
     static SCM hlWindowFullscreenHandler(SCM id) {
         if (!g_up)
             return SCM_BOOL_F;
-        const auto window = hl::windowOf(id);
+        const auto window = windowOrFocused(id);
         if (!window)
             return SCM_BOOL_F;
+        // The compositor's own NAME, straight to a Scheme symbol — the handler
+        // vocabulary is Hyprland's, so ours to not duplicate. A new handler name
+        // needs no change here, and no int->name table can drift from theirs.
         const auto name = Fullscreen::controller()->getFullscreenHandlerNameAsString(window);
-        return scm_from_utf8_stringn(name.c_str(), name.size());
+        return scm_from_utf8_symboln(name.c_str(), name.size());
     }
 
     static SCM hlSchemeWindowInitialClass(SCM id) {
@@ -896,8 +917,8 @@ namespace Config::Scheme {
         hl::bind<hlSchemeWindowFocus>("hl--c-window-focus");
         hl::bind<hlSchemeWindowMoveToWorkspace>("hl--c-window-move-to-workspace");
         hl::bind<hlSchemeWindowFullscreenSet>("hl--c-window-fullscreen-set");
-        hl::bind<hlSchemeWindowFullscreenToggle>("hl--c-window-fullscreen-toggle");
         hl::bind<hlSchemeWindowFullscreenMode>("hl--c-window-fullscreen-mode");
+        hl::bind<hlSchemeWindowFullscreenClient>("hl--c-window-fullscreen-client");
         hl::bind<hlSchemeWindowHidden>("hl--c-window-hidden");
         hl::bind<hlSchemeWindowPinned>("hl--c-window-pinned");
         hl::bind<hlSchemeWindowPseudoQuery>("hl--c-window-pseudo-query");

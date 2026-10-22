@@ -10,8 +10,9 @@ okv() { out=$($SCHEME "$1" 2>&1); [[ "$out" == "$2" ]] || { echo "$3: got [$out]
 okv '(hl-config-add! "binds:drag_threshold" 10)' '#t' 'int option write'
 okv '(hl-config-add! "decoration:rounding" 12)' '#t' 'int option 2'
 
-# regression: exact padding zeros broke spring curves (foreign double slots)
-okv '(hl-curve-add! "cfg-spring" (quote spring) 250 25 1)' '#t' 'spring curve'
+# regression: spring params given as EXACT integers must reach the compositor's
+# doubles intact — the boundary converts (scm_to_double), the caller does not
+okv '(hl-spring-curve-add! "cfg-spring" 250 25 1)' '#t' 'spring curve'
 
 # workspace-rule gap fields accept scalars and per-side plists
 okv '(hl-workspace-rule-add! "cfg-gaps" #:gaps_out 0 #:gaps_in 8)' '#t' 'ws-rule scalar gaps'

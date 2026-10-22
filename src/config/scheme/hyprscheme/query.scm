@@ -8,7 +8,7 @@
 (define-module (hyprscheme query)
   #:export (
            hl-active-title hl-active-monitor hl-active-special-workspace
-           hl-is-key-down hl-loaded-plugins hl-version))
+           hl-key-down? hl-loaded-plugins hl-version))
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
@@ -31,7 +31,7 @@ window has focus."
   "The currently open special workspace, as a handle, or #f."
   (hl--c-active-special-workspace))
 
-(define (hl-is-key-down key)
+(define (hl-key-down? key)
   "#t when the key named by the xkb keysym KEY (e.g. \"Return\") is
    currently pressed."
   (= 1 (hl--c-is-key-down key)))

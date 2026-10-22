@@ -24,8 +24,8 @@ ok '(string? (hl-config-get "input:kb_options"))'
 
 # the master-stack layout is live on the active workspace: its layout-msg
 # callback must see the example's "wider"/"narrower" messages
-ok '(hl-layout-msg "wider")'
-ok '(hl-layout-msg "narrower")'
+ok '(hl-layout-msg! "wider")'
+ok '(hl-layout-msg! "narrower")'
 
 # done poking — give the workspaces their normal tiled layout back
 $SCHEME '(hl-config-add! "general:layout" "dwindle")' >/dev/null

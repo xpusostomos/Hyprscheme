@@ -136,25 +136,33 @@
 ;; exists/for-all, filter, keyword arguments …), imported here rather than by the
 ;; host so that THIS file alone says what a config's environment is.
 ;;
-;; These five go through plain `use-modules`, never the macro above: they are
-;; Guile's own modules, and `reload-module` on one of those is an error, not a
-;; refresh — there is nothing of ours to re-read.
+;; (rnrs enums) is here because the enum machinery (hyprscheme enums) hands back
+;; a real rnrs enum, and "you also have the whole (rnrs enums) toolkit" is only
+;; true if a config can actually reach it — enum-set-member?, enum-set-union,
+;; enum-set-indexer. Without this the enum it returns is inert.
+;;
+;; These go through plain `use-modules`, never the macro above: they are Guile's
+;; own modules, and `reload-module` on one of those is an error, not a refresh —
+;; there is nothing of ours to re-read.
 (use-modules (rnrs io ports))
 (use-modules (rnrs lists))
+(use-modules (rnrs enums))
 (use-modules (srfi srfi-1))
 (use-modules (ice-9 optargs))
 (use-modules (ice-9 exceptions))
 
 ;; ORDER IS LOAD-BEARING: a module is loaded after everything it imports.
 ;;   kernel  — the host has already created it and filled it with the gsubrs
+;;   enums   — named sets of values; imports the kernel only
 ;;   core    — the shared plumbing the families build on
-;;   families— each imports only the kernel and core, never another family
+;;   families— each imports only the kernel, core and enums, never another family
 ;;   composers (extras, emacs-keymaps) — the only modules that compose families
 ;;
 ;; THIS LIST IS THE WHOLE SET of what a config can reach. It is the only place
 ;; modules are named for LOADING (see the note at the end of this file): the
 ;; public API is derived by introspecting these modules, not listed.
 (use-or-reload-modules (hyprscheme kernel)
+                      (hyprscheme enums)
                       (hyprscheme core))
 
 (use-or-reload-modules (hyprscheme bind)

@@ -7,7 +7,7 @@
 
 (define-module (hyprscheme timer)
   #:export (
-           hl-timer? hl-timer-enabled? hl-timer-set-timeout
+           hl-timer? hl-timer-enabled? hl-timer-set-timeout!
            hl-timer-cancel!))
 
 (use-modules (hyprscheme kernel))
@@ -25,11 +25,11 @@
   "#t when the timer T is enabled."
   (= 1 (hl--c-timer-enabled t)))
 
-(define (hl-timer-set-timeout t ms)
+(define (hl-timer-set-timeout! t ms)
   "Re-tune the timer T's timeout to MS (>= 1)."
   (if (= 0 (hl--c-timer-set-timeout t (exact->inexact ms)))
       #t
-      (hl--error 'hl-timer-set-timeout "timeout must be >= 1ms")))
+      (error "hl-timer-set-timeout!: timeout must be >= 1ms")))
 
 (define (hl-timer-cancel! t)
   "Cancel a repeating timer before reload (beyond-upstream extension).

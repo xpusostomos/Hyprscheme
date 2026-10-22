@@ -65,22 +65,22 @@
 (define* (hl-rule-enabled-set! rule #:key (on? 'unset))
   "Enable, disable or toggle RULE: absent #:on? toggles, #t/#f set."
   (if (= 0 (hl--c-rule-set-enabled rule
-                            (if (if (eq? on? 'unset) (not (hl-rule-enabled? rule)) on?) 1 0)))
+                            (if (eq? on? 'unset) (not (hl-rule-enabled? rule)) on?)))
       #t
-      (hl--error 'hl-rule-enabled-set! "unknown rule")))
+      (error "hl-rule-enabled-set!: unknown rule")))
 
 (define* (hl-notification-paused-set! n #:key (on? 'unset))
   "Pause or resume the notification's timeout timer: absent #:on? toggles,
    #t/#f set."
   (= 0 (hl--c-notification-paused-set n
-         (if (if (eq? on? 'unset) (not (eq? (hl-notification-paused? n) #t)) (eq? on? #t)) 1 0))))
+         (if (eq? on? 'unset) (not (eq? (hl-notification-paused? n) #t)) (eq? on? #t)))))
 
 (define* (hl-timer-enabled-set! t #:key (on? 'unset))
   "Enable, disable or toggle the timer T: absent #:on? toggles, #t/#f set."
   (if (= 0 (hl--c-timer-set-enabled t
-                                   (if (if (eq? on? 'unset) (not (hl-timer-enabled? t)) on?) 1 0)))
+                                   (if (eq? on? 'unset) (not (hl-timer-enabled? t)) on?)))
       #t
-      (hl--error 'hl-timer-enabled-set! "unknown timer")))
+      (error "hl-timer-enabled-set!: unknown timer")))
 
 (define* (hl-gesture-add! #:key fingers direction action (mods '()) (scale 1.0) (disable-inhibit #f))
   "Register a gesture: (hl-gesture-add! #:fingers N #:direction \"dir\"
@@ -95,25 +95,25 @@
    removal matches on the registration spec, never on the action."
   (let ()
     (cond ((not fingers)
-           (hl--error 'hl-gesture-add! "field 'fingers' is required"))
+           (error "hl-gesture-add!: field 'fingers' is required"))
           ((not (and (integer? fingers) (exact? fingers) (>= fingers 2)))
-           (hl--error 'hl-gesture-add! "field 'fingers' must be an integer >= 2"))
+           (error "hl-gesture-add!: field 'fingers' must be an integer >= 2"))
           ((not direction)
-           (hl--error 'hl-gesture-add! "field 'direction' is required"))
+           (error "hl-gesture-add!: field 'direction' is required"))
           ((not (string? direction))
-           (hl--error 'hl-gesture-add! "field 'direction' must be a string"))
+           (error "hl-gesture-add!: field 'direction' must be a string"))
           ((not action)
-           (hl--error 'hl-gesture-add! "an action is required — #:action (hl-make-...-gesture ...)"))
+           (error "hl-gesture-add!: an action is required — #:action (hl-make-...-gesture ...)"))
           ((not (hl-gesture-action? action))
-           (hl--error 'hl-gesture-add! "field 'action' must be an hl-gesture-action (see the hl-make-*-gesture constructors)"))
+           (error "hl-gesture-add!: field 'action' must be an hl-gesture-action (see the hl-make-*-gesture constructors)"))
           ((not (and (list? mods) (every (lambda (m) (string? m)) mods)))
-           (hl--error 'hl-gesture-add! "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\") or '(\"SUPER\" \"SHIFT\")"))
+           (error "hl-gesture-add!: 'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\") or '(\"SUPER\" \"SHIFT\")"))
           ((not (or (<= -10.0 scale -0.1) (<= 0.1 scale 10.0)))
-           (hl--error 'hl-gesture-add! "field 'scale' must be between -10 and -0.1 or between 0.1 and 10 - it is currently: ~a" scale))
+           (error "hl-gesture-add!: field 'scale' must be between -10 and -0.1 or between 0.1 and 10 - it is currently:" scale))
           (else
-           (let ((rc (hl--c-gesture action fingers (hl--str direction) mods (exact->inexact scale) (if disable-inhibit 1 0))))
+           (let ((rc (hl--c-gesture action fingers direction mods (exact->inexact scale) disable-inhibit)))
              (cond ((not (= 0 rc))
-                    (hl--error 'hl-gesture-add! "~a" (hl--c-config-last-error)))
+                    (error "hl-gesture-add!:" (hl--c-config-last-error)))
                    (else
                     ;; the handle is the exact registration spec — the manager
                     ;; matches removal on it, so remove! always hits our gesture
@@ -123,12 +123,12 @@
   "Remove a registered gesture: #t when removed, #f when nothing is
    registered under that spec, error otherwise."
   (unless (hl-gesture? g)
-    (hl--error 'hl-gesture-remove! "not an hl-gesture handle"))
+    (error "hl-gesture-remove!: not an hl-gesture handle"))
   (let ((rc (hl--c-gesture-remove (car g) (cadr g) (caddr g) (exact->inexact (cadddr g))
-                                 (if (list-ref g 4) 1 0))))
+                                 (list-ref g 4))))
     (cond ((= rc 0) #t)
           ((= rc 1) #f)
-          (else (hl--error 'hl-gesture-remove! "~a" (hl--c-config-last-error))))))
+          (else (error "hl-gesture-remove!:" (hl--c-config-last-error))))))
 
 ;; ---- loading other config files ---------------------------------------------
 

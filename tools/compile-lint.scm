@@ -66,9 +66,11 @@
 ;; the two composers (extras, emacs-keymaps) — which import the families, so
 ;; those must already be compiled. There is no umbrella to compile after them.
 (define families
-  '("core" "bind" "config" "event" "exec" "gesture" "group" "layer" "monitor"
-    "notification" "query" "rule" "timer" "window" "workspace" "extras"
-    "emacs-keymaps"))
+  ;; order is dependency order: the two leaves (enums and core — each imports
+  ;; the kernel only) before the families that import them
+  '("enums" "core" "bind" "config" "event" "exec" "gesture" "group" "layer"
+    "monitor" "notification" "query" "rule" "timer" "window" "workspace"
+    "extras" "emacs-keymaps"))
 
 (define (machinery-files)
   ;; no umbrella file: the modules ARE the machinery (see init.scm)

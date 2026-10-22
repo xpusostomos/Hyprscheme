@@ -158,7 +158,7 @@ BASE_EVENTS=$($SCHEME '(length (hl-notifications))' 2>/dev/null); BASE_EVENTS=${
 eval_scheme fixture "(begin (define soak-rule (hl-window-rule-add! \"soak-rule\" #:match (quote (class \"^soak-churn\")) #:opacity \"0.9\")) (define soak-rule2 (hl-window-rule-add! \"soak-rule2\" #:match (quote (class \"^soak-churn\")) #:float #t)) #t)"
 
 # the custom layout: a shifting master/stack whose ratio wobbles via
-# hl-layout-msg; recalc errors fall back to the default grid (that path
+# hl-layout-msg!; recalc errors fall back to the default grid (that path
 # is part of what we are exercising)
 eval_scheme fixture "(let ((mfact (vector 0.5)) (opens (vector 0)) (closes (vector 0)))
   (hl-layout-add! \"soak-layout\"
@@ -262,15 +262,16 @@ while (( SECONDS < END )); do
     (case (modulo $ITER 6)
       ((0) (hl-window-float-set! w))
       ((1) (hl-window-float-set! w #:on? #f))
-      ((2) (hl-window-fullscreen-set! w) (hl-window-fullscreen-set! w #:on? #f))
-      ((3) (hl-window-maximized-set! w) (hl-window-maximized-set! w #:on? #f))
+      ((2) (hl-window-fullscreen-set! w) (hl-window-fullscreen-set! w #:action (quote unset)))
+      ((3) (hl-window-fullscreen-set! w #:mode (quote maximized))
+           (hl-window-fullscreen-set! w #:mode (quote maximized) #:action (quote unset)))
       ((4) (hl-window-workspace-set! w \"8\") (hl-window-workspace-set! w \"9\"))
       ((5) (hl-window-move-direction! w \"r\") (hl-window-center! w)))
     (when (hl-window-floating? w)
       (hl-window-position-set! w $((ITER % 7)) $((ITER % 5)) #:relative #t)
       (hl-window-size-set! w 20 10 #:relative #t))
-    (hl-layout-msg \"wider\")
-    (hl-layout-msg \"narrower\")
+    (hl-layout-msg! \"wider\")
+    (hl-layout-msg! \"narrower\")
     #t)"
   # pool integrity: all five alive, none lost
   eval_scheme rearrange-check "(length (hl-windows-from \"class:soak-pool-.*\"))"

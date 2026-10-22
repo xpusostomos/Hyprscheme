@@ -79,7 +79,7 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlConfigPushBool(int v) {
+    static int hlConfigPushBool(bool v) {
         if (!g_up)
             return -1;
         lua_pushboolean(configScratch(), v != 0);
@@ -516,7 +516,7 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlMonitorFieldBool(const char* field, int v) {
+    static int hlMonitorFieldBool(const char* field, bool v) {
         if (!g_up || !g_monitorParser)
             return -1;
         const std::string f = hyprlandName(field ? field : "");
@@ -537,33 +537,46 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlCurveAdd(const char* name, int type, double a, double b, double c, double d) {
+    // TWO gsubrs, one per compositor call, because the compositor has two:
+    // CAnimationManager offers addBezierWithName(name, Vector2D, Vector2D) and
+    // addSpringWithName(name, SSpringCurve) — the curve TYPE is WHICH FUNCTION
+    // YOU CALL, not a value. Collapsing them into one gsubr with an `int type`
+    // invented a decision the C++ never makes, and put a switch at the boundary
+    // that belongs in Scheme.
+    //
+    // SSpringCurve also carries valueEpsilon/velocityEpsilon; both keep their
+    // defaults, as they do through the compositor's own scripting API.
+    static int hlBezierCurveAdd(const char* name, double x1, double y1, double x2, double y2) {
         if (!g_up)
             return -1;
         if (!name || !*name) {
-            g_configError = "hl-curve-add!: name required";
+            g_configError = "hl-bezier-curve-add!: name required";
             return -1;
         }
-        if (type == 0)
-            Animation::mgr()->addBezierWithName(name, Vector2D{a, b}, Vector2D{c, d});
-        else if (type == 1) {
-            if (a <= 0.5F || b <= 0.5F || c <= 0.5F) {
-                g_configError = "hl-curve-add!: spring params must be >= 0.5";
-                return -1;
-            }
-            Hyprutils::Animation::SSpringCurve curve;
-            curve.stiffness = sc<float>(a);
-            curve.damping   = sc<float>(b);
-            curve.mass      = sc<float>(c);
-            Animation::mgr()->addSpringWithName(name, curve);
-        } else {
-            g_configError = "hl-curve-add!: unknown type";
-            return -1;
-        }
+        Animation::mgr()->addBezierWithName(name, Vector2D{x1, y1}, Vector2D{x2, y2});
         return 0;
     }
 
-    static int hlAnimationSet(const char* leaf, int enabled, double speed, const char* curve, const char* style) {
+    static int hlSpringCurveAdd(const char* name, double stiffness, double damping, double mass) {
+        if (!g_up)
+            return -1;
+        if (!name || !*name) {
+            g_configError = "hl-spring-curve-add!: name required";
+            return -1;
+        }
+        if (stiffness <= 0.5 || damping <= 0.5 || mass <= 0.5) {
+            g_configError = "hl-spring-curve-add!: stiffness, damping and mass must all be >= 0.5";
+            return -1;
+        }
+        Hyprutils::Animation::SSpringCurve curve;
+        curve.stiffness = sc<float>(stiffness);
+        curve.damping   = sc<float>(damping);
+        curve.mass      = sc<float>(mass);
+        Animation::mgr()->addSpringWithName(name, curve);
+        return 0;
+    }
+
+    static int hlAnimationSet(const char* leaf, bool enabled, double speed, const char* curve, const char* style) {
         if (!g_up)
             return -1;
         if (!leaf || !*leaf) {
@@ -579,7 +592,7 @@ namespace Config::Scheme {
         const std::string cv = curve ? curve : "";
         const std::string sv = style ? style : "";
         if (!cv.empty() && !Animation::mgr()->bezierExists(cv) && !Animation::mgr()->springExists(cv)) {
-            g_configError = "hl-animation-add!: curve '" + cv + "' is not defined (declare it with hl-curve-add!)";
+            g_configError = "hl-animation-add!: curve '" + cv + "' is not defined (declare it with hl-bezier-curve-add! or hl-spring-curve-add!)";
             return -1;
         }
         if (!sv.empty()) {
@@ -732,7 +745,8 @@ namespace Config::Scheme {
         hl::bind<hlMonitorFieldGap>("hl--c-monitor-field-gap");
         hl::bind<hlMonitorFieldBool>("hl--c-monitor-field-bool");
         hl::bind<hlMonitorCommit>("hl--c-monitor-commit");
-        hl::bind<hlCurveAdd>("hl--c-curve-add");
+        hl::bind<hlBezierCurveAdd>("hl--c-bezier-curve-add");
+        hl::bind<hlSpringCurveAdd>("hl--c-spring-curve-add");
         hl::bind<hlAnimationSet>("hl--c-animation-set");
         hl::bind<hlPermissionAdd>("hl--c-permission-add");
     }

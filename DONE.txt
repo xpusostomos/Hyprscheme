@@ -149,6 +149,93 @@ and TODO.txt's archived sections.)
   FABLE.md / FABLE-DONE.md deliberately NOT touched — they are the
   historical design record and describe the state at a point in time.
 
+== ENUMS: a name for a set of values ==
+- NEW MODULE (hyprscheme enums) — a LEAF like core (imports the kernel
+  only, no compositor knowledge), so every family may import it.
+  module-audit's rule is now stated around a SHARED set (kernel, core,
+  enums) rather than "kernel and core".
+- The machinery: <enum-values> (make-record-type) carrying BOTH an ass
+  list symbol->integer and an rnrs enum over the same symbols.
+  make-enum-values, define-enum-values (sugar), enum-values?,
+  enum-value (takes EITHER spelling, returns the integer — so an API
+  function accepts a symbol or an integer with no conversion code of its
+  own, and a value outside the set is an ERROR naming the set),
+  enum-symbol (the inverse; what a getter returns),
+  enum-values->enum (the rnrs enum, for the whole (rnrs enums) toolkit).
+- The two numberings are INDEPENDENT and both kept: rnrs numbers members
+  0..n-1 in declaration order, the API integers are the compositor's
+  (fullscreen-mode is -1/0/1/2). Pinned by a test ('keep has rnrs index
+  0 but value -1).
+- The error names the set in the CALLER'S OWN CURRENCY: a bad symbol is
+  answered with the symbols, a bad integer with the integers.
+- (rnrs enums) is now imported into the generation (init.scm) — without
+  it enum-values->enum returned an inert object and "you also have the
+  rnrs toolkit" was false.
+- RULE written into CLAUDE.md ("API conventions -> ENUMS"): a function
+  taking or returning one value from a fixed set speaks in symbols and
+  the set is a named enum. No bare integers, no strings.
+- Enums shipped: fullscreen-mode (keep none maximized fullscreen),
+  fullscreen-handler (none default layout scrolling).
+- tests/t-enums.sh. Everything wired into the tools that have their own
+  module lists: compile-lint, load-check, doc-exercise.
+
+== FULLSCREEN: modes as symbols, Lua's three actions ==
+- hl-window-fullscreen and the NEW hl-window-fullscreen-client return a
+  MODE SYMBOL ('none/'maximized/'fullscreen), and
+  hl-window-fullscreen-handler returns a handler symbol. All three take
+  #f for the focused window (the mode getter used windowOf, so it raised
+  on #f while its maximized? partner accepted it).
+- hl-window-fullscreen-set! is now the Lua shape: #:mode
+  ('fullscreen default | 'maximized), #:action ('toggle default | 'set |
+  'unset), #:layout-aware (#t default, the dispatcher's own). 'set and
+  'unset are IDEMPOTENT — no-ops when already as asked — which is what
+  stops "unset fullscreen" on a maximized window from clearing maximized.
+  (The old #:on? #f wrote FSMODE_NONE, wiping whichever mode was set.)
+- hl-window-fullscreen-sync! takes mode SYMBOLS too, 'keep meaning
+  "leave this side alone" — still the only way to set the client side, and
+  now the documented way to fullscreen a window WITHOUT telling the app.
+- hl-window-maximized-set! REMOVED (redundant under #:mode; Lua has no
+  second dispatcher). hl-window-maximized? stays.
+- C++: new gsubr hl--c-window-fullscreen-client; the toggle gsubr gained a
+  layoutAware argument (it hardcoded false, so OUR toggle could not be
+  layout-aware while Lua's can); hl--c-window-fullscreen-set REMOVED — the
+  rewritten setter uses only the toggle, exactly as Lua's does, and
+  bind-audit flagged it dead.
+- CORRECTION to an earlier claim of mine: the client side IS told by
+  default. `syncFullscreen` (a per-window property, DEFINE_PROP default
+  TRUE) makes setFullscreenMode sync client to internal when client is
+  absent — so the 3-arg DOES reach the app unless sync_fullscreen is off.
+  Caught by a test I wrote asserting the opposite; the docstrings and the
+  wiki were wrong and are fixed.
+
+== ERRORS: plain (error ...), and Guile's own record accessors ==
+- hl--error and hl--record-field are GONE, tree-wide. Both were helpers
+  for jobs Guile already does.
+- hl--error -> (error MESSAGE ARGS ...): Guile builds the message by
+  appending one ~S per argument, so the value lands at the end. 94 sites
+  rewritten. The function now NAMES ITSELF in the message ("hl-x: ..."),
+  because no origin field is set any more — same rendered log line.
+  - Arguments are written, so a STRING argument renders quoted.
+  - ~5 messages were reworded so the parameter goes last; ~5 in the
+    hl--*-listen helpers interpolate the CALLER's name with (format ...),
+    which is the one case that genuinely needs it.
+  - TRAP, hit twice in this pass: a ~s written BY HAND inside an error
+    message survives as literal text (Guile's own ~S already consumed the
+    argument) and the value is appended after it. Both fixed; a scan for
+    a leftover directive in any error message is now clean.
+- hl--record-field -> Guile's record-accessor, bound once per field. 16
+  sites. It type-checks and reports "Wrong type argument (want `hl-box'):
+  5" — naming the record type, which is the whole job the wrapper did.
+  It is anonymous, so a public accessor's docstring is attached with
+  set-procedure-property! (procedure-documentation reads it back —
+  verified for hl-box-x/y/w/h and enum-values->enum).
+- hl--print-exception no longer looks for an origin; it formats Guile's
+  ~A-style template with its irritants, which is now the only shape.
+- tools/syntax-check.scm printed exception-message RAW, so a read error
+  came out as "~A: ~S" and named nothing. It formats now — verified by
+  injecting a paren error, which reports file:line:col and the message.
+- Enums' own errors reworded to put the parameters last.
+
 == TESTS + TOOLING ==
 - hl-load-config (in extras): load another config file by name.
   Looks under $XDG_CONFIG_HOME/hypr/ then $HOME/.config/hypr/, appending
@@ -162,7 +249,7 @@ and TODO.txt's archived sections.)
   Tests in t-api.sh, each VERIFIED TO FAIL by breaking the thing it
   asserts: removing the notification, skipping the load, and dropping
   the .scm suffix each trip the matching assertion.
-- tests/run.sh: 17-file suite, 17/17 green against a nested
+- tests/run.sh: 18-file suite, 18/18 green against a nested
   compositor; t-coverage fails if a public API lacks a test.
 - tests/soak.sh [SECONDS]: sustained-load soak (live window pool,
   custom layout under load, event/timer/bind/gesture churn); SOAK_TRACE

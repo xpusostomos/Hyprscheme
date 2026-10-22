@@ -36,7 +36,7 @@ namespace Config::Scheme {
 
     // explicit set: a no-op when the window is already in the requested
     // state (group() is null iff the window is not a member of a group)
-    static int hlSchemeGroupSet(SCM id, int on) {
+    static int hlSchemeGroupSet(SCM id, bool on) {
         if (!g_up)
             return -1;
         const auto w = actionWindow(id).value_or(nullptr);
@@ -47,7 +47,7 @@ namespace Config::Scheme {
         return actionResult("group-set", Config::Actions::toggleGroup(w));
     }
 
-    static int hlSchemeGroupCycle(SCM id, int prev) {
+    static int hlSchemeGroupCycle(SCM id, bool prev) {
         if (!g_up)
             return -1;
         return actionResult("group-cycle", Config::Actions::changeGroupActive(prev == 0, actionWindow(id)));
@@ -59,7 +59,7 @@ namespace Config::Scheme {
         return actionResult("group-index", Config::Actions::setGroupActive(index, actionWindow(id)));
     }
 
-    static int hlSchemeGroupMoveWindow(SCM id, int prev) {
+    static int hlSchemeGroupMoveWindow(SCM id, bool prev) {
         if (!g_up)
             return -1;
         return actionResult("group-move-window", Config::Actions::moveGroupWindow(prev == 0));

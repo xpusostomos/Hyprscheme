@@ -39,7 +39,7 @@
   (let* ((mon  monitor)
          (ns   namespace)
          (monId (if (and mon (hl-monitor? mon)) mon 0))
-         (l (hl--c-layers (or (and (hl-monitor? mon) mon) #f) (and ns (hl--str ns)))))
+         (l (hl--c-layers (or (and (hl-monitor? mon) mon) #f) (and ns ns))))
     (if l l '())))
 
 (define (hl-layer-alive? s)
@@ -98,7 +98,7 @@
   (let ((rec (make-hl-event 'layer-open handler)))
     (if (= 0 (hl--c-layer-listen rec 0))
         rec
-        (hl--error 'hl-layer-open-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-layer-open-notification-add!: listener rejected, see compositor log"))))
 
 (define (hl-layer-close-notification-add! handler)
   "Register a handler that fires when a layer surface closes. The
@@ -106,5 +106,5 @@
   (let ((rec (make-hl-event 'layer-close handler)))
     (if (= 0 (hl--c-layer-listen rec 1))
         rec
-        (hl--error 'hl-layer-close-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-layer-close-notification-add!: listener rejected, see compositor log"))))
 

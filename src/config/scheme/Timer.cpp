@@ -132,7 +132,7 @@ namespace Config::Scheme {
         return it == g_timerIndex.end() ? nullptr : &it->second;
     }
 
-    static int hlTimerSetEnabled(SCM record, int enabled) {
+    static int hlTimerSetEnabled(SCM record, bool enabled) {
         if (!g_up)
             return -1;
         auto* e = timerByRecord(record);

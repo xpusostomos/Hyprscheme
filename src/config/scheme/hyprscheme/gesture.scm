@@ -67,7 +67,7 @@
   "A gesture action that toggles the named special workspace (empty
    string = the default special workspace)."
   (unless (string? name)
-    (hl--error 'hl-make-special-workspace-gesture "workspace name must be a string, got ~a" name))
+    (error "hl-make-special-workspace-gesture: workspace name must be a string, got" name))
   (cons (hl--c-gesture-maker-special) (list 'name name)))
 
 (define* (hl-make-cursor-zoom-gesture zoom #:key (mode 'toggle))
@@ -75,7 +75,7 @@
    optional MODE: 'toggle (default), 'mult, 'live - the numeric argument
    is unused in live mode, so 1 is a good placeholder there."
   (unless (real? zoom)
-    (hl--error 'hl-make-cursor-zoom-gesture "zoom must be a number, got ~a" zoom))
+    (error "hl-make-cursor-zoom-gesture: zoom must be a number, got" zoom))
   (let ((m (hl--gesture-mode 'hl-make-cursor-zoom-gesture mode '(toggle mult live))))
     (cons (hl--c-gesture-maker-cursor-zoom) (list 'zoom (exact->inexact zoom) 'mode m))))
 
@@ -87,10 +87,10 @@
    over a let - wrap the constructor in a function to get fresh state
    per registration."
   (when (and (not start) (not update) (not finish))
-    (hl--error 'hl-make-custom-gesture "at least one of #:start, #:update, #:finish is required"))
+    (error "hl-make-custom-gesture: at least one of #:start, #:update, #:finish is required"))
   (for-each (lambda (k fn)
               (when (and fn (not (procedure? fn)))
-                (hl--error 'hl-make-custom-gesture "field ~a needs a procedure" k)))
+                (error "hl-make-custom-gesture: this field needs a procedure:" k)))
             '(#:start #:update #:finish) (list start update finish))
   (cons (hl--c-gesture-maker-custom)
         (append (if start (list 'start start) '())

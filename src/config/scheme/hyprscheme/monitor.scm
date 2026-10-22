@@ -56,7 +56,7 @@
 (define (hl-monitor-from sel)
   "The monitor matching SELECTOR (a name, or \"desc:DESCRIPTION\"in
    config monitor syntax), as a handle, or #f."
-  (hl--c-monitor-from (hl--str sel)))
+  (hl--c-monitor-from sel))
 
 (define (hl-monitor-at x y)
   "The monitor at layout position (X, Y), as a handle, or #f."
@@ -200,35 +200,35 @@
    accepted too."
   (let ((plist (map (lambda (x) (if (keyword? x) (keyword->symbol x) x)) fields)))
     (if (not (= 0 (hl--c-monitor-begin (hl--mon-arg output))))
-        (hl--error 'hl-monitor-rule-add! "~a" (hl--c-config-last-error))
+        (error "hl-monitor-rule-add!:" (hl--c-config-last-error))
         (let loop ((rest plist))
         (cond ((null? rest)
                (if (= 0 (hl--c-monitor-commit))
                    #t
-                   (hl--error 'hl-monitor-rule-add! "~a" (hl--c-config-last-error))))
+                   (error "hl-monitor-rule-add!:" (hl--c-config-last-error))))
               (else
                (let* ((tail (hl--plist-cdr rest))
-                      (f  (hl--str (car rest)))
+                      (f  (car rest))
                       (v  (car tail)))
                  (cond ((string? v)
                         (if (= 0 (hl--c-monitor-field-str f v))
                             (loop (cdr tail))
-                            (hl--error 'hl-monitor-rule-add! "~a" (hl--c-config-last-error))))
+                            (error "hl-monitor-rule-add!:" (hl--c-config-last-error))))
                        ((number? v)
                         (if (= 0 (hl--c-monitor-field-num f (exact->inexact v)))
                             (loop (cdr tail))
-                            (hl--error 'hl-monitor-rule-add! "~a" (hl--c-config-last-error))))
+                            (error "hl-monitor-rule-add!:" (hl--c-config-last-error))))
                        ((boolean? v)
-                        (if (= 0 (hl--c-monitor-field-bool f (if v 1 0)))
+                        (if (= 0 (hl--c-monitor-field-bool f v))
                             (loop (cdr tail))
-                            (hl--error 'hl-monitor-rule-add! "~a" (hl--c-config-last-error))))
+                            (error "hl-monitor-rule-add!:" (hl--c-config-last-error))))
                        ((pair? v)
                         (hl--c-config-begin)
                         (hl--push-val v)
                         (if (= 0 (hl--c-monitor-field-gap f))
                             (loop (cdr tail))
-                            (hl--error 'hl-monitor-rule-add! "~a" (hl--c-config-last-error))))
-                       (else (hl--error 'hl-monitor-rule-add! "unsupported value for ~a" f))))))))))
+                            (error "hl-monitor-rule-add!:" (hl--c-config-last-error))))
+                       (else (error "hl-monitor-rule-add!: unsupported value for" f))))))))))
 
 (define (hl-monitors )
   "All monitors, as a list of monitor handles."

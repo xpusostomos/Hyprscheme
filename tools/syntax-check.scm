@@ -13,11 +13,23 @@
 
 (use-modules (ice-9 exceptions))
 
+;; The reader's message carries the file:line:col itself, but it arrives as a
+;; "~A: ~S"-style TEMPLATE with the position and the failure as IRRITANTS —
+;; exception-message hands back the raw template. Printing it unformatted says
+;; "~A: ~S" and names nothing, which is how this tool once reported a real read
+;; error as noise. Format it the way the kernel's renderer does.
+(define (render e)
+  (let ((msg (guard (e2 (#t #f)) (exception-message e)))
+        (irr (guard (e2 (#t #f)) (exception-irritants e))))
+    (cond ((not (string? msg)) (format #f "~s" e))
+          ((and (pair? irr) (string-index msg #\~))
+           (guard (e3 (#t msg)) (apply simple-format #f msg irr)))
+          (else msg))))
+
 (define (check-file path)
   (with-exception-handler
       (lambda (e)
-        ;; the reader's message carries the file:line:col itself
-        (format #t "~a~%" (exception-message e))
+        (format #t "~a~%" (render e))
         (throw 'syntax-check-failed))
     (lambda ()
       (call-with-input-file path

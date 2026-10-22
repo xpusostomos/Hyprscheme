@@ -11,8 +11,8 @@
            hl-focus-urgent! hl-cursor-move! hl-cursor-move-to-corner!
            hl-exit! hl-force-renderer-reload! hl-force-idle! hl-global!
            hl-event! hl-mouse-action! hl-clear-crashed-lockscreen!
-           hl-exec-scheduled-prop-refresh-immediately
-           hl-release-input-capture! hl-layout-msg hl-exec! hl-cursor-pos))
+           hl-exec-scheduled-prop-refresh-immediately!
+           hl-release-input-capture! hl-layout-msg! hl-exec! hl-cursor-pos))
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
@@ -27,7 +27,7 @@
 
 (define (hl-focus-direction-set! dir)
   "Move the focus in direction DIR (left/right/up/down)."
-  (= 0 (hl--c-focus-direction (hl--dir dir))))
+  (= 0 (hl--c-focus-direction dir)))
 
 (define (hl-focus-last! )
   "Move the focus to the previously-focused window."
@@ -60,16 +60,16 @@
 (define (hl-global! action)
   "Activate the global shortcut named ACTION (D-Bus GlobalShortcuts; see
    bind-globals)."
-  (= 0 (hl--c-global (hl--str action))))
+  (= 0 (hl--c-global action)))
 
 (define (hl-event! data)
   "Send DATA as an event on socket2, visible to other IPC clients."
-  (= 0 (hl--c-event (hl--str data))))
+  (= 0 (hl--c-event data)))
 
 (define (hl-mouse-action! action)
   "Begin an interactive mouse action for mouse binds: (hl-mouse-action!
    \"drag\") or (hl-mouse-action! \"resize\")."
-  (= 0 (hl--c-mouse (hl--str action))))
+  (= 0 (hl--c-mouse action)))
 
 (define (hl-clear-crashed-lockscreen! )
   "Manual escape hatch when a lock screen has crashed: clears the
@@ -77,9 +77,9 @@
    client is attached or the session isn't locked - it can never unlock
    a live lock screen."
   (let ((rc (hl--c-clear-crashed-lockscreen)))
-    (if (= 0 rc) #t (hl--error 'hl-clear-crashed-lockscreen! "~a" (hl--c-config-last-error)))))
+    (if (= 0 rc) #t (error "hl-clear-crashed-lockscreen!:" (hl--c-config-last-error)))))
 
-(define (hl-exec-scheduled-prop-refresh-immediately )
+(define (hl-exec-scheduled-prop-refresh-immediately! )
   "Run the config-time deferred refresh pass NOW (rule/prop/layout
    changes schedule it). #t when it executed as scheduled, #f otherwise."
   (= 0 (hl--c-scheduled-prop-refresh-immediately)))
@@ -88,10 +88,10 @@
   "Release any active input capture session."
   (= 0 (hl--c-release-input-capture)))
 
-(define (hl-layout-msg msg)
+(define (hl-layout-msg! msg)
   "Send MSG to the active workspace's layout (see custom layouts in the
    wiki)."
-  (= 0 (hl--c-layout-message (hl--str msg))))
+  (= 0 (hl--c-layout-message msg)))
 
 ;; ---- config -----------------------------------------------------------------
 
@@ -107,17 +107,17 @@ command may still carry the legacy inline rule prefix
 plain path. Returns the new pid."
   (define (flat l)
     (cond ((null? l) '())
-          ((null? (cdr l)) (hl--error 'hl-exec! "odd plist of rule effects"))
-          (else (cons* (hl--str (car l))
+          ((null? (cdr l)) (error "hl-exec!: odd plist of rule effects"))
+          (else (cons* (car l)
                        (hl--rule-spec-value (cadr l))
                        (flat (cddr l))))))
-  (let ((pid (hl--c-exec! (hl--str cmd)
+  (let ((pid (hl--c-exec! cmd
                          (flat (map (lambda (x)
                                       (if (keyword? x) (keyword->symbol x) x))
                                     effects)))))
     (if (> pid 0)
         pid
-        (hl--error 'hl-exec! "~a" (hl--c-config-last-error)))))
+        (error "hl-exec!:" (hl--c-config-last-error)))))
 
 ;; ---- rules -------------------------------------------------------------------
 ;; window/layer rules: a plist with 'match (a plist of property → value),

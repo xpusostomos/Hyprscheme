@@ -294,7 +294,7 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlNotificationPausedSet(SCM id, int on) {
+    static int hlNotificationPausedSet(SCM id, bool on) {
         if (!g_up)
             return -1;
         auto* h = hl::notificationHandleOf(id);

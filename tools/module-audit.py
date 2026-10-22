@@ -5,9 +5,12 @@
 
 The machinery is modules, and the split is only worth having if it stays true:
 
-  - a FAMILY module imports (hyprscheme kernel) and (hyprscheme core) and
-    nothing else of ours — it never reaches into another family;
-  - (hyprscheme core) is shared plumbing: it imports the kernel only;
+  - a FAMILY module imports only the SHARED set — (hyprscheme kernel),
+    (hyprscheme core) and (hyprscheme enums) — and nothing else of ours: it
+    never reaches into another family;
+  - (hyprscheme core) and (hyprscheme enums) are LEAF modules: each imports the
+    kernel only, and holds no compositor knowledge of its own. That is what
+    separates them from a family, and why every family may import them;
   - (hyprscheme extras) and (hyprscheme emacs-keymaps) are the modules allowed
     to compose the raw API, so they may import families;
   - nothing calls a name a FAMILY owns from outside a family, except extras;
@@ -43,13 +46,19 @@ import sys
 DIR = 'src/config/scheme/hyprscheme'
 KERNEL = 'kernel'
 CORE = 'core'
+ENUMS = 'enums'
 EXTRAS = 'extras'
 EMACS_KEYMAPS = 'emacs-keymaps'
 # the ENTRY POINT: the one file the host loads, which loads everything else by
 # name. Every module must be named here or it is never loaded at all.
 ENTRY_PATH = 'src/config/scheme/init.scm'
-# modules allowed to import beyond the kernel + core
-FREE = {KERNEL, CORE, EXTRAS, EMACS_KEYMAPS}
+# the LEAF modules every family may import: the kernel (the C++ boundary), core
+# (shared plumbing) and enums (named sets of values). They hold no compositor
+# knowledge of their own, which is what separates them from a family.
+SHARED = {KERNEL, CORE, ENUMS}
+# the modules that are NOT families — the count in the summary, and the ones
+# exempt from the family-only rules below
+FREE = {KERNEL, CORE, ENUMS, EXTRAS, EMACS_KEYMAPS}
 
 
 def read(path):
@@ -121,24 +130,27 @@ def main():
             return own
         if name == CORE:
             return own | exports_of(read(fams[KERNEL]))
+        if name == ENUMS:
+            return own | exports_of(read(fams[KERNEL]))
         if name in (EXTRAS, EMACS_KEYMAPS):
             return own | {n for p in fams.values() for n in exports_of(read(p))}
-        return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[CORE]))
+        return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[CORE])) \
+                   | exports_of(read(fams[ENUMS]))
 
     bad = 0
     for name, path in sorted(fams.items()):
         text = read(path)
         if name not in FREE:
-            extra = imports_of(text) - {KERNEL, CORE}
+            extra = imports_of(text) - SHARED
             if extra:
                 print('IMPORT:  (hyprscheme %s) imports %s — a family imports only '
-                      'the kernel and core' % (name, ', '.join(sorted(extra))))
+                      'the kernel, core and enums' % (name, ', '.join(sorted(extra))))
                 bad = 1
         # and does it CALL another family's function?
         code = strip_prose(text)
         for callee in sorted(calls_of(code)):
             src = owner.get(callee)
-            if src and src not in (name, KERNEL, CORE) and name not in (EXTRAS, EMACS_KEYMAPS):
+            if src and src not in ({name} | SHARED) and name not in (EXTRAS, EMACS_KEYMAPS):
                 print('CALL:    (hyprscheme %s) calls %s, which belongs to '
                       '(hyprscheme %s)' % (name, callee, src))
                 bad = 1

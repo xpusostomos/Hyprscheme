@@ -56,7 +56,7 @@ namespace Config::Scheme {
         g_ruleIndex.clear();
     }
 
-    static int hlWindowRuleBegin(const char* name, int enabled) {
+    static int hlWindowRuleBegin(const char* name, bool enabled) {
         if (!g_up)
             return -1;
         const std::string              n = name ? name : "";
@@ -77,7 +77,7 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlLayerRuleBegin(const char* name, int enabled) {
+    static int hlLayerRuleBegin(const char* name, bool enabled) {
         if (!g_up)
             return -1;
         const std::string              n = name ? name : "";
@@ -93,7 +93,7 @@ namespace Config::Scheme {
                 g_anonLayerRules.emplace_back(rule);
             Desktop::Rule::ruleEngine()->registerRule(SP<Desktop::Rule::IRule>(rule));
         }
-        rule->setEnabled(enabled != 0);
+        rule->setEnabled(enabled);
         g_curLayerRule = rule;
         return 0;
     }
@@ -170,7 +170,7 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlRuleSetEnabled(SCM record, int enabled) {
+    static int hlRuleSetEnabled(SCM record, bool enabled) {
         if (!g_up)
             return -1;
         const auto it = g_ruleIndex.find(SCM_UNPACK(record));
@@ -185,7 +185,7 @@ namespace Config::Scheme {
         return (it != g_ruleIndex.end() && it->second.first->isEnabled()) ? 1 : 0;
     }
 
-    static int hlWorkspaceRuleBegin(const char* ws, int enabled) {
+    static int hlWorkspaceRuleBegin(const char* ws, bool enabled) {
         if (!g_up)
             return -1;
         if (!ws || !*ws) {
@@ -233,7 +233,7 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlWorkspaceRuleBool(const char* field, int v) {
+    static int hlWorkspaceRuleBool(const char* field, bool v) {
         if (!g_up || !g_curWorkspaceRule)
             return -1;
         const std::string f = hyprlandName(field ? field : "");

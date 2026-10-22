@@ -127,8 +127,8 @@ can fix should be fixed before a piece of work is complete.
     defined inside a lambda body**: the reader does not resolve names, and
     load-check only finds one if the form actually runs. (FABLE §4.6 Step F.)
     Two things make it work, both non-obvious: the stub kernel is generated
-    from the **real kernel's `#:export` list** (363 names — scanning for
-    `hl--c-*` alone misses the ~55 real definitions like `hl--error` and
+    from the **real kernel's `#:export` list** (369 names — scanning for
+    `hl--c-*` alone misses the ~55 real definitions like `hl--report` and
     `hl--plist-get`, and every caller of one then reads as a false positive),
     and a file given on the command line compiles in an environment that
     **imports the API**, the way the host's generation does, or every `hl-*`
@@ -302,15 +302,21 @@ load-check cannot see that (not loading something is not a load failure).
 2. `hyprscheme/core.scm` → `(hyprscheme core)` — shared plumbing: argument
    coercion, the plist convention, key-spec parsing (`hl-kbd`/`hl-key`), the
    handle predicates, the cross-reload state accessors, the listen helpers.
-3. **One module per object family** — `window.scm`, `monitor.scm`,
+3. `hyprscheme/enums.scm` → `(hyprscheme enums)` — **a NAME for a set of
+   values** (`<enum-values>`, `make-enum-values`, `define-enum-values`,
+   `enum-value`, `enum-symbol`, `enum-values->enum`), plus the two enums the
+   API ships (`fullscreen-mode`, `fullscreen-handler`). A **leaf** like core —
+   it imports the kernel only and holds no compositor knowledge, which is why
+   every family may import it. See "Enums" under API conventions.
+4. **One module per object family** — `window.scm`, `monitor.scm`,
    `workspace.scm`, `group.scm`, `layer.scm`, `bind.scm`, `event.scm`,
    `timer.scm`, `rule.scm`, `config.scm`, `notification.scm`, `gesture.scm`,
    `exec.scm`, `query.scm`. Each holds the **raw API**: thin wrappers over
    what the compositor can actually do.
-4. `hyprscheme/extras.scm` → `(hyprscheme extras)` — the few conveniences
+5. `hyprscheme/extras.scm` → `(hyprscheme extras)` — the few conveniences
    that need several calls to compose (e.g. setting a special workspace
    *on/off* when the compositor only offers a *toggle*).
-5. **THERE IS NO UMBRELLA.** `hyprscheme.scm` → `(hyprscheme)` used to be the
+6. **THERE IS NO UMBRELLA.** `hyprscheme.scm` → `(hyprscheme)` used to be the
    **public API**: a curated `#:re-export` list over everything, and "the single
    source of truth for what is public". It is **deleted**, and the reason is the
    same lesson as the `Host.cpp` list: a hand-kept list of what is public drifts
@@ -502,6 +508,121 @@ the custom-layout entry points. `Handles.*` is the object model,
 
 - Public API: `hl-*`; internal: `hl--*`. Emacs-ism machinery (defun,
   describe-function, later defcustom) is deliberately un-prefixed.
+
+### THE BOUNDARY — a gsubr mirrors C++; policy lives in Scheme
+
+**A `hl--c-*` gsubr is a thin mirror of the C/C++ call it exposes: the same
+shape, with just enough added to make it a sensible Scheme call.** It converts
+arguments in and the result out, and does nothing else. Every *decision* — which
+of several C++ calls to make, what a value means, whether the caller wanted
+toggle/set/unset — lives in Scheme, which is where the API is defined.
+
+Two things this forbids, and both had been done:
+
+- **Inventing a policy the C++ does not have.** `hl--c-window-fullscreen-toggle`
+  hand-rolled an `isFullscreen` test around Hyprland's action — but that action
+  already does the test internally, so the gsubr re-made a decision the C++ had
+  already made. Worse, once Scheme has read the current mode (to decide at all),
+  the answer is *known*: handing a "toggle" down throws that answer away and
+  makes C++ derive it a second time.
+- **Naming a gsubr after a policy rather than the call.** A gsubr called
+  `-toggle` invites its caller to toggle. If the operation underneath SETS, it
+  is `-set`.
+
+**And it is the ONE place a value is converted.** A caller passes what it has;
+the boundary makes the C++ type out of it. Two entries were missing for years,
+and the cost was a conversion repeated at every call site:
+
+- **`Arg<bool>`** — a C++ `bool` takes a Scheme BOOLEAN, by *truthiness*
+  (`scm_is_true`, so anything but `#f`). Without it every boolean parameter was
+  declared `int`, `Arg<int>` demanded a number, and **19 gsubrs** had call sites
+  writing `(if x 1 0)`. Note the trap when converting one: `0` is TRUTHY, so a
+  site left passing `(if x 1 0)` would invert.
+- **`Arg<const char*>` takes a SYMBOL as well as a string.** A name-ish
+  parameter — a config key, a tag, a prop — is what Scheme has as a symbol
+  (`'max_size`), and requiring `symbol->string` at the call site is the
+  conversion this layer exists to do. **Numbers are deliberately NOT accepted**:
+  a number becomes a name where that is meaningful and nowhere else, which is
+  the workspace/monitor argument resolvers. That coercion now lives in exactly
+  five consumers (`hl--str` in the two resolvers, `hl--hyprland-name`,
+  `hl--special-name`, and the rule loop's key — which compares against string
+  literals) instead of forty call sites.
+
+The corollary for a field pair: expose what C++ exposes. `getFullscreenModes`
+has two fields, so there are `hl--c-window-fullscreen-mode` and `-client`; the
+setter mirrors `setFullscreenMode`, which **sets** — so the Scheme decides the
+target mode and the gsubr assigns it.
+
+### ERRORS — plain `(error …)`, and the function names itself
+
+**There is no `hl--error` and no `hl--record-field`.** Both were helpers for jobs
+Guile already does, and both are gone:
+
+- **Raise with `(error MESSAGE ARGUMENTS …)`.** Guile builds the message by
+  appending one `~S` per argument, so `(error "hl-bind-add!: tokens must be
+  strings, got:" tokens)` renders as that sentence with the value written at the
+  end. Two consequences, and they are the whole style:
+  - **the function names itself in the message** (`"hl-bind-add!: …"`) — no
+    origin field is set any more, and the rendered log line is the same as it
+    was;
+  - **arguments go LAST.** A parameter cannot sit mid-sentence, so word the
+    message to put it at the end. Where a value genuinely has to be
+    interpolated — or where the *caller's* name is a runtime argument rather
+    than a literal, which happens in the `hl--*-listen` helpers — build the
+    string: `(error (format #f "~a: listener rejected" who))`. Rare.
+  - Arguments are `write`n, so a **string argument renders quoted** (`"foo"`).
+    Deliberate: usually the complaint IS about a value.
+  - A `~s` written *by hand* inside an `error` message is a **trap** — Guile's
+    own `~S` already consumed the argument, so it survives as literal text and
+    the value is appended after it. Two messages were mangled this way in the
+    pass that removed `hl--error`.
+- **Read a record field with Guile's `record-accessor`**, bound once per field.
+  It type-checks and reports `Wrong type argument (want `hl-box'): 5` — naming
+  the record type — which is why the wrapper existed and why it was not needed.
+  It is anonymous, though, so a public accessor's docstring is attached:
+  ```scheme
+  (define hl-box-x (record-accessor hl-box-rtd 'x))
+  (set-procedure-property! hl-box-x 'documentation "The box's left edge.")
+  ```
+  (`procedure-documentation` reads that back; verified.)
+
+**A tool that prints an exception must FORMAT it.** `exception-message` hands
+back the raw `"~A: ~S"` template with the parts as irritants — printing it
+unformatted says `~A: ~S` and names nothing. `tools/syntax-check.scm` did
+exactly that, which is how a real read error once came out as noise.
+
+### ENUMS — a rule, not a preference
+
+**A function that takes or returns ONE VALUE OUT OF A FIXED SET speaks in
+symbols, and that set is a named enum.** It does not take a bare integer and it
+does not return a string. `(hl-window-fullscreen-set! w #:mode 'maximized)`,
+not `#:mode 1`; `(hl-window-fullscreen w)` answers `'maximized`, not `1`.
+
+The machinery is `(hyprscheme enums)`: `make-enum-values` /
+`define-enum-values` build an `<enum-values>` from an ass list of
+`symbol -> integer`, `enum-value` takes **either spelling** and returns the
+integer (so an API function accepts a symbol or an integer with no conversion
+code of its own, and a value outside the set is an ERROR naming the set rather
+than being silently misread), and `enum-symbol` is the inverse — what a getter
+returns. `enum-values->enum` hands back a real **rnrs enum** built from the same
+symbols, so the whole `(rnrs enums)` toolkit (`enum-set-member?`,
+`enum-set-union`, `enum-set-indexer`) works on it; `(rnrs enums)` is imported
+into the generation in `init.scm` so a config can actually reach that toolkit.
+
+Two things about the design that are easy to get wrong:
+
+- **the two numberings are independent and both are kept.** The rnrs enum
+  numbers its members `0..n-1` in declaration order; the integers the API speaks
+  are whatever the compositor uses (`fullscreen-mode` is `-1/0/1/2`, where `-1`
+  is the write-side "leave it"). Neither is derivable from the other.
+- **the error names the set in the caller's own currency** — a bad symbol is
+  answered with the symbols, a bad integer with the integers.
+
+Existing enums: `fullscreen-mode` (`keep none maximized fullscreen`) and
+`fullscreen-handler` (`none default layout scrolling`). Add a new one where the
+set is shared; a set used by ONE family may live in that family, but a family
+may not import another family, so a shared set belongs in
+`(hyprscheme enums)`.
 - **A workspace or monitor argument is a handle, a number, or a selector
   string** — one shape, accepted by every function that takes one
   (`workspaceArg`/`monitorArg` in the C++). A **handle is used directly**;
@@ -563,13 +684,13 @@ the custom-layout entry points. `Handles.*` is the object model,
   flag.
   **§2.11's option sweep is DONE for the flags** (`hl-window-cycle!`,
   `hl-window-size-set!`, `hl-window-position-set!`, `hl-group-cycle!`,
-  `hl-group-window-move-next!`, `hl-window-fullscreen-state`,
+  `hl-group-window-move-next!`, `hl-window-fullscreen-sync!`,
   `hl-window-swap-next!`), and a **choice from a set is `#:mode 'x`** — not
   three booleans — as the gesture makers now take it. The old positional
   spellings are refused, not ignored: a stale config fails loudly instead of
   meaning the opposite. What remains of §2.11 is a separate question — the
   genuine OPTIONAL VALUES (`hl-state-ref`'s default, `hl-submap`'s NEXT,
-  `hl-group-add!`'s index, `hl-curve-add!`'s variadic data) and the
+  `hl-group-add!`'s index) and the
   optional-*window* pair (`hl-window-send-shortcut!`, `-send-key-state!`),
   neither of which is a flag wearing the wrong clothes.
 - Binds validate exclusivity (long-press/release vs repeat conflicts)
@@ -604,7 +725,7 @@ the custom-layout entry points. `Handles.*` is the object model,
   a lint must never resolve — let alone read or run — the real config. This is
   the same rule as never touching `~/.config/`, one level down: a tool that
   inherits the ambient environment is a tool that pokes the user's config.
-- `tests/run.sh` — the 17-file suite against a nested compositor, 17/17
+- `tests/run.sh` — the 18-file suite against a nested compositor, 18/18
   green is the bar. It tests the **tree, pre-install**: the compositor is
   `../Hyprland/build/Hyprland` (never an installed one — testing what is
   installed is a different question), the plugin is this directory's
@@ -686,7 +807,7 @@ in the wiki's building-the-plugin page.
   exist. The Chez artifact is not built by this tree at all (frozen in
   `chez/`).
   STEP 3 DONE: SUITE 12/12 ON GUILE (chez 12/12 unchanged — 12 files then;
-  the suite is 17 now, see Testing). The
+  the suite is 18 now, see Testing). The
   gotcha list lives in GUILE-CONVERSION.txt step 3 — headline items:
   boot-9's error template-wraps messages ("~A" + irritants — display
   code must render them); srfi-9 constructor/accessors are syntax

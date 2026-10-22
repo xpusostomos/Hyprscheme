@@ -64,7 +64,7 @@ $SCHEME '(hl-layout-add! "t-multi" (quote recalculate)
            (quote layout-msg) (lambda (msg) #t))' >/dev/null 2>&1
 $SCHEME '(hl-workspace-rule-add! "8" #:layout "scheme:t-multi")' >/dev/null 2>&1
 
-# Focus the workspace FIRST: `hl-layout-msg` below goes to the ACTIVE
+# Focus the workspace FIRST: `hl-layout-msg!` below goes to the ACTIVE
 # workspace's layout, so ws 8 has to be the active one for the drive to reach
 # ours.
 $SCHEME '(hl-workspace-focus! "8")' >/dev/null 2>&1
@@ -85,7 +85,7 @@ $SCHEME '(hl-window-workspace-set! (hl-window-from "class:^multi-win$") (hl-work
 # drive the recalculate: a window arriving does not reliably trigger one
 calls=0
 for _ in $(seq 1 15); do
-  $SCHEME '(hl-layout-msg "noop")' >/dev/null 2>&1
+  $SCHEME '(hl-layout-msg! "noop")' >/dev/null 2>&1
   calls=$($SCHEME '(or (hl-state-ref (quote multi-calls)) 0)' 2>/dev/null)
   [[ -n "$calls" && "$calls" -gt 0 ]] && break
   sleep 0.5

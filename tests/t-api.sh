@@ -138,17 +138,96 @@ ok '(hl-window-position-set! w 60 60 #:relative #t)'
 bad_opt=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-size-set! w 10 10 (quote relative)))))')
 [[ "$bad_opt" == *"keyword"* ]] || { echo "FAIL: the old positional option was accepted => [$bad_opt]"; FAILED=1; }
 ok '(hl-window-float-set! w #:on? #f)'
-ok '(hl-window-fullscreen-set! w)'
-ok '(= 2 (hl-window-fullscreen-mode w))'
-ok '(begin (hl-window-fullscreen-set! w #:on? #f) (= 0 (hl-window-fullscreen-mode w)))'
-ok '(begin (hl-window-fullscreen-set! w #:on? #t) (= 2 (hl-window-fullscreen-mode w)))'
-ok '(begin (hl-window-fullscreen-set! w #:on? #f) (= 0 (hl-window-fullscreen-mode w)))'
-ok '(hl-window-maximized-set! w)'
-ok '(= 1 (hl-window-fullscreen-mode w))'
-ok '(begin (hl-window-maximized-set! w #:on? #f) (= 0 (hl-window-fullscreen-mode w)))'
-ok '(begin (hl-window-maximized-set! w #:on? #t) (= 1 (hl-window-fullscreen-mode w)))'
-ok '(begin (hl-window-maximized-set! w #:on? #f) (= 0 (hl-window-fullscreen-mode w)))'
-ok '(hl-window-fullscreen-state w 0 0)'
+# ---- fullscreen: modes as SYMBOLS, and the three actions --------------------
+# The getter answers in the enum's symbols, so a test that read an integer would
+# be reading the wrong thing — this is the check that the enum is wired through.
+val '(begin (hl-window-fullscreen-set! w #:mode (quote fullscreen) #:action (quote unset))
+            (hl-window-fullscreen w))' 'none'
+ok  '(begin (hl-window-fullscreen-set! w #:mode (quote fullscreen))       ; toggle on
+            (eq? (hl-window-fullscreen w) (quote fullscreen)))'
+ok  '(begin (hl-window-fullscreen-set! w #:mode (quote fullscreen))       ; toggle off
+            (eq? (hl-window-fullscreen w) (quote none)))'
+# 'set is idempotent: a second one must NOT toggle it back off
+ok  '(begin (hl-window-fullscreen-set! w #:mode (quote fullscreen) #:action (quote set))
+            (hl-window-fullscreen-set! w #:mode (quote fullscreen) #:action (quote set))
+            (eq? (hl-window-fullscreen w) (quote fullscreen)))'
+# 'unset the SAME way round
+ok  '(begin (hl-window-fullscreen-set! w #:mode (quote fullscreen) #:action (quote unset))
+            (hl-window-fullscreen-set! w #:mode (quote fullscreen) #:action (quote unset))
+            (eq? (hl-window-fullscreen w) (quote none)))'
+# maximized is the same call with a different mode — there is no second setter
+ok  '(begin (hl-window-fullscreen-set! w #:mode (quote maximized) #:action (quote set))
+            (and (eq? (hl-window-fullscreen w) (quote maximized))
+                 (hl-window-maximized? w)))'
+# 'set in one mode does not disturb the OTHER mode's action, but unsetting the
+# wrong mode is a no-op rather than a clear — the bit Lua gets right and the old
+# #:on? #f got wrong (it wrote NONE, wiping whichever mode was set)
+ok  '(begin (hl-window-fullscreen-set! w #:mode (quote maximized) #:action (quote set))
+            (hl-window-fullscreen-set! w #:mode (quote fullscreen) #:action (quote unset))
+            (eq? (hl-window-fullscreen w) (quote maximized)))'
+# a bad mode or action is refused, not silently treated as something else
+bad_mode=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-fullscreen-set! w #:mode (quote bogus)))))')
+[[ "$bad_mode" == *"not a value of this enum"* ]] || { echo "FAIL: a bad #:mode was accepted => [$bad_mode]"; FAILED=1; }
+bad_act=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-fullscreen-set! w #:action (quote bogus)))))')
+[[ "$bad_act" == *"#:action"* ]] || { echo "FAIL: a bad #:action was accepted => [$bad_act]"; FAILED=1; }
+
+# the client side is readable, and the compositor SYNCS it by default (the
+# window property `sync_fullscreen`, on unless turned off) — so after a plain
+# fullscreen-set! the app has been told, and the two sides agree. This is the
+# assertion that pins the DEFAULT; 'keep is how a caller avoids the sync.
+ok  '(begin (hl-window-fullscreen-set! w #:mode (quote fullscreen) #:action (quote set))
+            (and (eq? (hl-window-fullscreen w) (quote fullscreen))
+                 (eq? (hl-window-fullscreen-client w) (quote fullscreen))))'
+# and 'keep on the client side is how you fullscreen WITHOUT telling the app
+ok  '(begin (hl-window-fullscreen-sync! w (quote none) (quote none))
+            (hl-window-fullscreen-sync! w (quote fullscreen) (quote keep))
+            (and (eq? (hl-window-fullscreen w) (quote fullscreen))
+                 (eq? (hl-window-fullscreen-client w) (quote none))))'
+# the handler is a symbol; memq gives a sublist, so #t is what makes it a check
+ok  '(and (memq (hl-window-fullscreen-handler w) (quote (default scrolling unknown none layout))) #t)'
+ok  '(and (memq (hl-window-fullscreen-handler #f) (quote (default scrolling unknown none layout))) #t)'
+
+# ---- hl-window-fullscreen-sync!: BOTH sides, and the dispatcher's actions ---
+# This is the only way to move the two sides independently, and the action works
+# on the PAIR. The guard on 'set is the point: the action underneath CLEARS a
+# window whose pair already matches, so without it a second identical call would
+# fullscreen and then unfullscreen. That is what these two lines pin.
+ok  '(begin (hl-window-fullscreen-sync! w (quote none) (quote none))
+            (hl-window-fullscreen-sync! w (quote fullscreen) (quote fullscreen))
+            (and (eq? (hl-window-fullscreen w) (quote fullscreen))
+                 (eq? (hl-window-fullscreen-client w) (quote fullscreen))))'
+ok  '(begin (hl-window-fullscreen-sync! w (quote fullscreen) (quote fullscreen))
+            (eq? (hl-window-fullscreen w) (quote fullscreen)))'   # idempotent, NOT cleared
+# 'unset clears, and only when the pair IS what you named
+ok  '(begin (hl-window-fullscreen-sync! w (quote fullscreen) (quote fullscreen)
+                                        #:action (quote unset))
+            (eq? (hl-window-fullscreen w) (quote none)))'
+ok  '(begin (hl-window-fullscreen-sync! w (quote none) (quote none))
+            (hl-window-fullscreen-sync! w (quote maximized) (quote none))   ;; establish (maximized none)
+            (hl-window-fullscreen-sync! w (quote fullscreen) (quote none)
+                                        #:action (quote unset))
+            ;; asked to unset (fullscreen none) while the window is (maximized none):
+            ;; the pair is NOT what was named, so nothing moves — the mode-specific
+            ;; behaviour, and the reason un-fullscreening cannot un-maximize
+            (and (eq? (hl-window-fullscreen w) (quote maximized))
+                 (eq? (hl-window-fullscreen-client w) (quote none))))'
+# 'toggle flips EACH side on its own: internal is already fullscreen so it
+# clears, client is not so it sets
+ok  '(begin (hl-window-fullscreen-sync! w (quote fullscreen) (quote none))
+            (hl-window-fullscreen-sync! w (quote fullscreen) (quote fullscreen)
+                                        #:action (quote toggle))
+            (and (eq? (hl-window-fullscreen w) (quote none))
+                 (eq? (hl-window-fullscreen-client w) (quote fullscreen))))'
+# 'keep on a side leaves THAT side alone: from none, set internal and keep the
+# client — the internal side really moves
+ok  '(begin (hl-window-fullscreen-sync! w (quote none) (quote none))
+            (hl-window-fullscreen-sync! w (quote fullscreen) (quote keep))
+            (eq? (hl-window-fullscreen w) (quote fullscreen)))'
+# a bad action is refused, not silently treated as 'set
+bad_sync=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-window-fullscreen-sync! w (quote none) (quote none) #:action (quote bogus)))))')
+[[ "$bad_sync" == *"#:action"* ]] || { echo "FAIL: a bad sync action was accepted => [$bad_sync]"; FAILED=1; }
+ok  '(hl-window-fullscreen-sync! w (quote none) (quote none) #:layout-aware #f)'
+ok  '(hl-window-fullscreen-sync! w (quote none) (quote none))'
 ok '(hl-window-pseudo-set! w)'
 ok '(hl-window-pseudo-set! w #:on? #f)'
 ok '(boolean? (hl-window-pseudo? w))'
@@ -466,7 +545,7 @@ bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl
 # ---- notifications / misc ---------------------------------------------------
 ok '(hl-notify! "api coverage" 100)'
 ok '(boolean? (hl-notify! "api coverage opts" 100 #:icon "info" #:font-size 13))'
-ok '(boolean? (hl-is-key-down "Return"))'
+ok '(boolean? (hl-key-down? "Return"))'
 ok '(list? (hl-loaded-plugins))'
 ok '(string? (hl-version))'
 ok '(list? (hl-layers))'
@@ -516,7 +595,16 @@ ok '(hl-focus-last!)'
 ok '(hl-focus-urgent!)'
 
 # ---- curves, animations, rules ----------------------------------------------
-ok '(hl-curve-add! "api-curve" (quote bezier) 0.25 0.1 0.25 1.0)'
+ok '(hl-bezier-curve-add! "api-curve" 0.25 0.1 0.25 1.0)'
+ok '(hl-spring-curve-add! "api-spring" 250 25 1)'
+# the two are separate calls because the compositor has two: a bezier takes two
+# control POINTS, a spring takes its three dynamics. Re-declaring by name is
+# how the compositor replaces a curve, so both must be accepted.
+ok '(hl-bezier-curve-add! "api-curve" 0.1 0.1 0.9 0.9)'
+# a spring with a parameter below 0.5 is refused by the compositor side, and the
+# error names the function that was called
+spr_bad=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-spring-curve-add! "api-bad" 0.1 25 1))))')
+[[ "$spr_bad" == *"hl-spring-curve-add!"* ]] || { echo "FAIL: a bad spring param was accepted => [$spr_bad]"; FAILED=1; }
 ok '(hl-animation-add! "fadeIn" #:speed 2 #:curve "api-curve")'
 ok '(hl-rule? (hl-window-rule-add! "api-rule" #:match (quote (class "^api-main$")) #:opacity "0.9"))'
 $SCHEME '(define api-layer-rule (hl-layer-rule-add! "api-layer-rule" #:match (quote (namespace "^nope$")) #:blur #f)))' >/dev/null 2>&1
@@ -592,7 +680,7 @@ noerr '(hl-layout-add! "api-layout" (quote recalculate)
                out)))
        (quote layout-msg)
        (lambda (msg) #t))'
-noerr '(hl-layout-msg "noop")'
+noerr '(hl-layout-msg! "noop")'
 noerr '(hl-workspace-rule-add! "10" #:layout "scheme:api-layout")'
 noerr '(begin (hl-workspace-focus! "10") (hl-exec! "foot -a api-layout-win") #t)'
 WAIT_FOR 10 '(let ((n (hl-state-ref (quote api-layout-calls)))) (and n (> n 0) #t))' >/dev/null \
@@ -612,7 +700,7 @@ ok '(and (pair? (hl-state-ref (quote api-layout-in)))
 # The recalculate is DRIVEN, not waited for: layout-msg is a request to the
 # compositor to re-run the layout, so each attempt here pokes it rather than
 # hoping a scheduled refresh arrives.
-WAIT_FOR 10 '(begin (hl-layout-msg "noop")
+WAIT_FOR 10 '(begin (hl-layout-msg! "noop")
                     (let ((i (hl-state-ref (quote api-layout-in)))
                           (o (hl-state-ref (quote api-layout-out))))
                       (and i o (pair? i) (equal? i o) #t)))' >/dev/null \
@@ -718,7 +806,7 @@ ok '(hl-timer? (hl-after 5000 (lambda () #f)))'
 ok '(let ((t (hl-repeat 5000 (lambda () #f))))
      (and (boolean? (hl-timer-enabled-set! t #:on? #f))
           (eq? (hl-timer-enabled? t) #f)
-          (boolean? (hl-timer-set-timeout t 6000))
+          (boolean? (hl-timer-set-timeout! t 6000))
           (boolean? (hl-timer-enabled-set! t #:on? #t))
           (boolean? (hl-timer-enabled-set! t))))'
 # cancel! tears the timer down now (a repeating timer would otherwise run until
@@ -809,7 +897,7 @@ ok '(begin (hl-state-set! (quote proto-ticks) 0) #t)'
 ok '(let ((t (hl-repeat 60 (lambda ()
         (hl-state-set! (quote proto-ticks) (+ 1 (hl-state-ref (quote proto-ticks) 0)))
         (quote (ok #f))))))
-     (and (hl-timer? t) (hl-timer-set-timeout t 60)))'
+     (and (hl-timer? t) (hl-timer-set-timeout! t 60)))'
 WAIT_FOR 10 '(= (hl-state-ref (quote proto-ticks) 0) 1)' >/dev/null || { echo "FAIL: proto timer never fired"; FAILED=1; }
 sleep 0.5
 # if the C++ reader missed ok #f, the timer re-armed and ticks kept climbing
@@ -868,7 +956,7 @@ bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl-
 # and the prop refresh runs trivially
 bad_lock=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-clear-crashed-lockscreen!))))')
 [[ "$bad_lock" == *"session is not locked"* ]] || { echo "FAIL: clear-crashed-lockscreen did not refuse when unlocked => [$bad_lock]"; FAILED=1; }
-ok '(boolean? (hl-exec-scheduled-prop-refresh-immediately))'
+ok '(boolean? (hl-exec-scheduled-prop-refresh-immediately!))'
 ok '(hl-event? (hl-screenshare-state-notification-add! (lambda (a t n) #f)))'
 ok '(hl-event? (hl-keyboard-key-notification-add! (lambda (k t s) #f)))'
 

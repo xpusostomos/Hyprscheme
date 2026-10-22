@@ -99,6 +99,19 @@ namespace hl {
         static int pass(const Store& s) { return s; }
     };
 
+    // A C++ `bool` takes a Scheme BOOLEAN, and takes it by TRUTHINESS — #t/#f,
+    // but also anything that is not #f, the way `if` reads it. This exists so a
+    // gsubr whose C++ wants a bool can say so and be called with a bool: the
+    // alternative is an `int` parameter and an `(if X 1 0)` at every Scheme call
+    // site, which is the conversion this layer is here to do. (#t is a distinct
+    // immediate, not a number, so `Arg<int>` refuses it outright.)
+    template <>
+    struct Arg<bool> {
+        using Store = bool;
+        static Store from(SCM v, size_t) { return scm_is_true(v); }
+        static bool  pass(const Store& s) { return s; }
+    };
+
     template <>
     struct Arg<unsigned long long> {
         using Store = unsigned long long;
@@ -122,11 +135,22 @@ namespace hl {
     };
 
     template <>
+    // A name-ish parameter — a config key, a workspace name, a tag, a prop —
+    // takes a Scheme SYMBOL as readily as a string, because that is what the
+    // Scheme side has to hand ('max_size, 'release) and making every caller
+    // write symbol->string is the conversion this layer exists to do.
+    //
+    // Numbers are deliberately NOT accepted: a value that is genuinely a number
+    // is turned into a name where that is meaningful and nowhere else (the
+    // workspace/monitor argument resolvers, which take `2` as a workspace name).
+    // Accepting them here would quietly let `(hl-config-get 5)` mean "5".
     struct Arg<const char*> {
         using Store = std::string;
         static Store from(SCM v, size_t i) {
+            if (scm_is_symbol(v))
+                return toStdString(scm_symbol_to_string(v));
             if (!scm_is_string(v))
-                fail("argument ~A is not a string", scm_from_size_t(i));
+                fail("argument ~A is not a string or symbol", scm_from_size_t(i));
             return toStdString(v);
         }
         static const char* pass(const Store& s) { return s.c_str(); }

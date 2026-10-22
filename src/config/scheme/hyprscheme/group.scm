@@ -25,7 +25,7 @@
 
 (define* (hl-group-cycle! w #:key (prev #f))
   "Switch to the next window in WINDOW's group; #:prev #t goes backwards."
-  (= 0 (hl--c-group-cycle w (if prev 1 0))))
+  (= 0 (hl--c-group-cycle w prev)))
 
 (define (hl-group-window-active! w index)
   "Switch to the member at 1-based INDEX in WINDOW's group."
@@ -33,7 +33,7 @@
 
 (define* (hl-group-window-move-next! w #:key (prev #f))
   "Move WINDOW within its group; #:prev #t moves backwards."
-  (= 0 (hl--c-group-move-window w (if prev 1 0))))
+  (= 0 (hl--c-group-move-window w prev)))
 
 (define* (hl-groups-lock-set! #:key (on? 'unset))
   "Lock or unlock ALL groups compositor-wide (no window involved). See
@@ -86,11 +86,11 @@
   (if (= 0 (hl--c-group-add g window
                            (if (null? index) -1 (inexact->exact (car index)))))
       #t
-      (hl--error 'hl-group-add! "~a" (hl--c-config-last-error))))
+      (error "hl-group-add!:" (hl--c-config-last-error))))
 
 (define (hl-group-remove! g window)
   "Remove WINDOW from the group G; errors when it is not a member."
   (if (= 0 (hl--c-group-remove g window))
       #t
-      (hl--error 'hl-group-remove! "~a" (hl--c-config-last-error))))
+      (error "hl-group-remove!:" (hl--c-config-last-error))))
 

@@ -26,14 +26,14 @@
   (let ((rec (make-hl-event 'start handler)))
     (if (= 0 (hl--c-lifecycle-listen rec 0))
         rec
-        (hl--error 'hl-start-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-start-notification-add!: listener rejected, see compositor log"))))
 
 (define (hl-shutdown-notification-add! handler)
   "Register a handler that fires once before the session exits."
   (let ((rec (make-hl-event 'shutdown handler)))
     (if (= 0 (hl--c-lifecycle-listen rec 1))
         rec
-        (hl--error 'hl-shutdown-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-shutdown-notification-add!: listener rejected, see compositor log"))))
 
 (define (hl-keyboard-key-notification-add! handler)
   "Register a handler that fires on every key event - high-frequency;
@@ -41,7 +41,7 @@
   (let ((rec (make-hl-event 'keyboard-key handler)))
     (if (= 0 (hl--c-keyboard-key-listen rec))
         rec
-        (hl--error 'hl-keyboard-key-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-keyboard-key-notification-add!: listener rejected, see compositor log"))))
 
 (define (hl-screenshare-state-notification-add! handler)
   "Register a handler that fires when a screenshare session starts or
@@ -49,5 +49,5 @@
   (let ((rec (make-hl-event 'screenshare-state handler)))
     (if (= 0 (hl--c-screenshare-listen rec))
         rec
-        (hl--error 'hl-screenshare-state-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-screenshare-state-notification-add!: listener rejected, see compositor log"))))
 

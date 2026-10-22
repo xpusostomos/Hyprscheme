@@ -33,9 +33,9 @@
    \"0x80FF80FF\" #:font-size 13). Icons: none warn info hint error
    confused ok. Color: 0xAARRGGBB hex string; 0 = the icon's default
    color."
-  (let ((s (hl--c-notify (hl--str text) (exact->inexact duration)
-                        (hl--str icon)
-                        (hl--str color)
+  (let ((s (hl--c-notify text (exact->inexact duration)
+                        icon
+                        color
                         (exact->inexact font-size))))
     (if s #t #f)))
 
@@ -62,7 +62,7 @@
     (let ((n (hl--c-notification-add fields)))
       (if n
           n
-          (hl--error 'hl-notification-add! "~a" (hl--c-config-last-error))))))
+          (error "hl-notification-add!:" (hl--c-config-last-error))))))
 
 (define (hl-notifications )
   "The live notifications, as a list of handles."
@@ -112,7 +112,7 @@
 (define (hl-notification-text-set! n text)
   "Set the notification's text."
   (hl--notif-act 'hl-notification-text-set!
-    (hl--c-notification-text-set n (hl--str text))))
+    (hl--c-notification-text-set n text)))
 
 (define (hl-notification-timeout-set! n ms)
   "Set the notification's timeout, in ms."
@@ -122,7 +122,7 @@
 (define (hl-notification-color-set! n color)
   "Set the notification's color (0xAARRGGBB hex string)."
   (hl--notif-act 'hl-notification-color-set!
-    (hl--c-notification-color-set n (hl--str color))))
+    (hl--c-notification-color-set n color)))
 
 (define (hl-notification-icon-set! n icon)
   "Set the notification's icon (icon name, e.g. \"warn\")."

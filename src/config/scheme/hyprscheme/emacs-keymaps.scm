@@ -48,7 +48,7 @@ key."
   (let ((r (hl--c-key-regularise tokens)))
     (if r
         r
-        (hl--error 'hl-key-regularise "~a" (hl--c-config-last-error)))))
+        (error "hl-key-regularise:" (hl--c-config-last-error)))))
 
 (define (hl-key-logical-to-physical tokens) "Convert a LOGICAL chord to the
 PHYSICAL keys that produce it. A logical key is the symbol you mean — \"%\",
@@ -74,7 +74,7 @@ keymap, so a failure there is real and raises."
       ((pair? r) r)
       ;; #f with no keymap = nothing to convert against; pass through
       ((and (not (hl--c-config-last-error))) tokens)
-      (else (hl--error 'hl-key-logical-to-physical "~a" (hl--c-config-last-error))))))
+      (else (error "hl-key-logical-to-physical:" (hl--c-config-last-error))))))
 
 (define (hl-key-physical-to-logical tokens) "Convert a PHYSICAL chord to the
 LOGICAL key it produces: (\"SHIFT\" \"5\") → (\"%\"), (\"SHIFT\" \"a\") →
@@ -83,7 +83,7 @@ inverse of hl-key-logical-to-physical and is layout-aware in the same way."
   (let ((r (hl--c-key-physical-to-logical tokens)))
     (if r
         r
-        (hl--error 'hl-key-physical-to-logical "~a" (hl--c-config-last-error)))))
+        (error "hl-key-physical-to-logical:" (hl--c-config-last-error)))))
 
 ;; ---- emacs key-description ---------------------------------------------------
 ;; The token -> emacs letter tables, the reverse of the ones hl-kbd uses.

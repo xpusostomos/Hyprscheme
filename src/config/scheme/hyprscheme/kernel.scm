@@ -37,7 +37,7 @@
            hl--c-config-tbl-set-hash hl--c-config-tbl-seti
            hl--c-config-unload-listen hl--c-current-submap
            hl--c-cursor-corner hl--c-cursor-move hl--c-cursor-pos
-           hl--c-curve-add hl--c-device-add hl--c-dpms hl--c-enter-submap
+           hl--c-bezier-curve-add hl--c-device-add hl--c-dpms hl--c-enter-submap
            hl--c-event hl--c-event-active hl--c-event-cancel hl--c-exec!
            hl--c-exit hl--c-focus-direction hl--c-focus-last
            hl--c-focus-monitor hl--c-focus-urgent hl--c-focus-workspace
@@ -100,7 +100,8 @@
            hl--c-rule-enabled hl--c-rule-match hl--c-rule-set-enabled
            hl--c-run-finalizers hl--c-scheduled-prop-refresh-immediately
            hl--c-screenshare-listen hl--c-send-key-state
-           hl--c-send-shortcut hl--c-set-submap-ctx hl--c-state-get
+           hl--c-send-shortcut hl--c-set-submap-ctx hl--c-spring-curve-add
+           hl--c-state-get
            hl--c-state-set hl--c-submap-listen hl--c-timer
            hl--c-timer-cancel hl--c-timer-enabled hl--c-timer-set-enabled
            hl--c-timer-set-timeout hl--c-toggle-swallow hl--c-unbind-key
@@ -114,9 +115,10 @@
            hl--c-window-destroy-listen hl--c-window-event-listen
            hl--c-window-float-act hl--c-window-floating
            hl--c-window-focus hl--c-window-focus-history-id
-           hl--c-window-from hl--c-window-fullscreen-handler
+           hl--c-window-from hl--c-window-fullscreen-client
+           hl--c-window-fullscreen-handler
            hl--c-window-fullscreen-mode hl--c-window-fullscreen-set
-           hl--c-window-fullscreen-state hl--c-window-fullscreen-toggle
+           hl--c-window-fullscreen-state
            hl--c-window-group hl--c-window-group-denied
            hl--c-window-group-lock hl--c-window-group-locked
            hl--c-window-hidden hl--c-window-ids hl--c-window-in-group
@@ -160,7 +162,7 @@
            hl--c-workspace-special hl--c-workspace-swap-monitors
            hl--c-workspace-tiled-layout hl--c-workspace-toggle-special
            hl--c-workspace-visible hl--c-workspace-window-count
-           hl--c-workspace-windows hl--c-workspace? hl--error hl--eval
+           hl--c-workspace-windows hl--c-workspace? hl--eval
            hl--event-fire hl--event-thunk hl--event-type
            hl--fire-bool-rec hl--fire-list hl--fire-list-rec
            hl--fire-mon-rec hl--fire-str-rec hl--fire-win-rec
@@ -169,7 +171,7 @@
            hl--layout-recalculate hl--layout-resize
            hl--layout-window-close hl--layout-window-open hl--load
            hl--now-ms hl--plist-cdr hl--plist-get hl--plist-has? hl--print-exception
-           hl--ready hl--record-field hl--report hl--target-env
+           hl--ready hl--report hl--target-env
            hl--timer-fire hl--timer-interval hl--timer-thunk
            hl--watchdog-ms hl--wd-aborted hl--wd-alarm hl--wd-enter
            hl--wd-exit hl--wd-handler hl--wd-handler-set hl--wd-rearm
@@ -204,29 +206,34 @@
 ;; the log a SECOND write offset (error lines then overwrite the beginning of
 ;; the file — a real bug once).
 
-;; Raise a formatted error that KEEPS its origin: `who` is the function that
-;; rejected the argument, and the renderer below prints it. (Guile's `error`
-;; would carry it too, but building the condition explicitly leaves the
-;; message formatted and the irritants available for a later backtrace pass.)
-(define (hl--error who fmt . args)
-  (raise-exception (make-exception (make-error)
-                                   (make-exception-with-origin who)
-                                   (make-exception-with-message (apply format #f fmt args))
-                                   (make-exception-with-irritants args))))
+;; ERRORS ARE PLAIN (error MESSAGE ARGUMENTS ...). There is no hl--error: Guile
+;; already does what a helper was doing, and better. `error` builds its message
+;; by appending one ~S per argument, so
+;;
+;;     (error "hl-bind-add!: tokens must be strings, got:" tokens)
+;;
+;; renders as that sentence with the value written at the end. Two things
+;; follow, and they are the whole style:
+;;
+;;   - THE FUNCTION NAMES ITSELF IN THE MESSAGE ("hl-bind-add!: ..."), because
+;;     no origin field is set any more. Same rendered line as before, and it
+;;     reads the same in the log.
+;;   - ARGUMENTS GO LAST. A parameter cannot sit mid-sentence, so a message is
+;;     worded to put it at the end. Where a value genuinely has to be
+;;     interpolated, format it into the string rather than reaching for ~a:
+;;     (error (format #f "..." x)) — rare, and the wordier of the two.
+;;
+;; Use `write`-style arguments deliberately: a string argument renders QUOTED
+;; ("foo"), which is usually what you want when the complaint is about a value.
 
-;; Render an exception to PORT. Two shapes arrive here:
-;;   - our own hl--error conditions: a formatted message plus an origin
-;;   - Guile's own conditions, whose message may still be a "~A"-style
-;;     TEMPLATE with the arguments as irritants (the default handler formats
-;;     them; exception-message hands back the raw template) — render it the
-;;     same way, guarded so a bad escape cannot kill the report
+;; Render an exception to PORT. Guile's conditions carry a "~A"-style TEMPLATE
+;; as the message with the arguments as irritants (exception-message hands back
+;; the raw template; the default handler is what normally formats it), so it is
+;; formatted here the same way, guarded — a bad escape in a message must not
+;; kill the report. A condition with no usable message is written whole.
 (define (hl--print-exception e port)
   (let ((msg (guard (e2 (#t #f)) (exception-message e)))
-        (irr (guard (e2 (#t #f)) (exception-irritants e)))
-        (who (guard (e2 (#t #f)) (exception-origin e))))
-    (when who
-      (display who port)
-      (display ": " port))
+        (irr (guard (e2 (#t #f)) (exception-irritants e))))
     (cond ((not (string? msg)) (format port "~s" e))
           ((and (pair? irr) (string-index msg #\~))
            (guard (e3 (#t (display msg port)))
@@ -333,11 +340,6 @@
 ;; other. (hl--plist-get lives here for the same reason: the layout entry
 ;; points below look callbacks up in a spec plist.)
 
-(define (hl--record-field who rtd idx x)
-  (if (and (struct? x) (eq? (struct-vtable x) rtd))
-      (struct-ref x idx)
-      (hl--error who "not a ~a: ~s" (record-type-name rtd) x)))
-
 ;; ---- handles ----------------------------------------------------------------
 ;; A window/workspace/monitor/group/layer/notification handle is a Guile
 ;; FOREIGN OBJECT built by the C++ side (see Handles.hpp): the object IS the
@@ -351,9 +353,9 @@
 
 (define hl-event-rtd (make-record-type 'hl-event '(type thunk)))
 
-(define (hl--event-type b) (hl--record-field 'hl--event-type hl-event-rtd 0 b))
+(define hl--event-type (record-accessor hl-event-rtd 'type))
 
-(define (hl--event-thunk b) (hl--record-field 'hl--event-thunk hl-event-rtd 1 b))
+(define hl--event-thunk (record-accessor hl-event-rtd 'thunk))
 
 ;; timers: the record IS the handle — the initial interval and the thunk.
 ;; C++ locks it inside the timer's fire callback; a one-shot timer releases
@@ -361,9 +363,9 @@
 
 (define hl-timer-rtd (make-record-type 'hl-timer '(interval thunk)))
 
-(define (hl--timer-interval t) (hl--record-field 'hl--timer-interval hl-timer-rtd 0 t))
+(define hl--timer-interval (record-accessor hl-timer-rtd 'interval))
 
-(define (hl--timer-thunk t) (hl--record-field 'hl--timer-thunk hl-timer-rtd 1 t))
+(define hl--timer-thunk (record-accessor hl-timer-rtd 'thunk))
 
 ;; binds: the record IS the handle — the token LIST (the bind's meaning)
 ;; and the thunk. C++ locks the record while the bind is registered (see
@@ -376,15 +378,15 @@
 ;; INTERNAL record-field accessors, hence hl-- : a bind's tokens and thunk are
 ;; how the fire trampoline takes a bind apart, not something a config reads.
 ;; They were hl-bind-* and so leaked into the public API list.
-(define (hl--bind-tokens b) (hl--record-field 'hl--bind-tokens hl-bind-rtd 0 b))
+(define hl--bind-tokens (record-accessor hl-bind-rtd 'tokens))
 
-(define (hl--bind-thunk b) (hl--record-field 'hl--bind-thunk hl-bind-rtd 1 b))
+(define hl--bind-thunk (record-accessor hl-bind-rtd 'thunk))
 
 (define (hl--plist-cdr l)
   ;; (key value rest ...) → (value rest ...); a trailing bare KEY is an error
   (let ((tail (cdr l)))
     (if (null? tail)
-        (hl--error 'hl--plist "odd plist: ~s" l)
+        (error "hl--plist: odd plist:" l)
         tail)))
 
 ;; hl--plist-has? lives HERE, not in core, because the kernel's own

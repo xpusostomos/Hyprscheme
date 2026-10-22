@@ -249,7 +249,7 @@ namespace Config::Scheme {
     // (built-in or custom alike), which moves into the manager, owned from
     // birth; destroyed at config reload, which also unlocks any thunks it
     // carried. The addGesture result (overshadow rules) is checked.
-    static int hlSchemeGesture(SCM recipe, int fingers, const char* direction, SCM mods, double scale, int disableInhibit) {
+    static int hlSchemeGesture(SCM recipe, int fingers, const char* direction, SCM mods, double scale, bool disableInhibit) {
         if (!g_up || !g_pTrackpadGestures)
             return -1;
         const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");
@@ -309,7 +309,7 @@ namespace Config::Scheme {
     // (fingers, direction, mods, scale, disableInhibit) → 0 removed / 1 no
     // such gesture / -1 error. removeGesture matches on the registration
     // spec (the manager stores one gesture per spec), never on the action.
-    static int hlSchemeGestureRemove(int fingers, const char* direction, SCM mods, double scale, int disableInhibit) {
+    static int hlSchemeGestureRemove(int fingers, const char* direction, SCM mods, double scale, bool disableInhibit) {
         if (!g_up || !g_pTrackpadGestures)
             return -1;
         const auto dir = g_pTrackpadGestures->dirForString(direction ? direction : "");

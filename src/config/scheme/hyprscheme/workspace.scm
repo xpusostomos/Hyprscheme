@@ -58,7 +58,7 @@
 
 (define (hl-workspace-name-set! old new)
   "Rename the workspace OLD to NEW."
-  (= 0 (hl--c-workspace-rename old (hl--str new))))
+  (= 0 (hl--c-workspace-rename old new)))
 
 (define (hl-workspace-monitor-set! ws mon)
   "Move the workspace WS to monitor MON."
@@ -88,18 +88,18 @@
    underscore spelling is accepted too."
   (let ((spec (map (lambda (x) (if (keyword? x) (keyword->symbol x) x)) fields)))
     (if (not (= 0 (hl--c-workspace-rule-begin (hl--ws-arg ws)
-                (if (hl--plist-get spec 'enabled #t) 1 0))))
-        (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error))
+                (hl--plist-get spec 'enabled #t))))
+        (error "hl-workspace-rule-add!:" (hl--c-config-last-error))
         (let loop ((rest spec))
           (cond ((null? rest)
                  (if (= 0 (hl--c-workspace-rule-commit))
                      #t
-                     (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error))))
+                     (error "hl-workspace-rule-add!:" (hl--c-config-last-error))))
                 (else
                  (let* ((tail (hl--plist-cdr rest))
                         ;; the compositor's spelling, so the field names
                         ;; below and the C++ lookups agree with the keyword
-                        (k  (hl--hyprland-name (hl--str (car rest))))
+                        (k  (hl--hyprland-name (car rest)))
                         (v  (car tail)))
                    (cond ((member k (list "workspace" "enabled"))
                           (loop (cdr tail)))
@@ -110,10 +110,10 @@
                                    (let* ((otail (hl--plist-cdr o))
                                           (sv (hl--rule-spec-value (car otail))))
                                      (if (not sv)
-                                         (hl--error 'hl-workspace-rule-add! "bad layout-opts value")
-                                         (if (= 0 (hl--c-workspace-rule-layout-opt (hl--str (car o)) sv))
+                                         (error "hl-workspace-rule-add!: bad layout-opts value")
+                                         (if (= 0 (hl--c-workspace-rule-layout-opt (car o) sv))
                                              (oloop (cdr otail))
-                                             (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error)))))))))
+                                             (error "hl-workspace-rule-add!:" (hl--c-config-last-error)))))))))
                          ((member k (list "gaps_in" "gaps_out" "float_gaps"))
                           ;; css-gap fields: scalars and per-side plists both
                           ;; go through the gap parser, whatever their type
@@ -121,20 +121,20 @@
                           (hl--push-val v)
                           (if (= 0 (hl--c-workspace-rule-gap k))
                               (loop (cdr tail))
-                              (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error))))
+                              (error "hl-workspace-rule-add!:" (hl--c-config-last-error))))
                          ((string? v)
                           (if (= 0 (hl--c-workspace-rule-str k v))
                               (loop (cdr tail))
-                              (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error))))
+                              (error "hl-workspace-rule-add!:" (hl--c-config-last-error))))
                          ((number? v)
                           (if (= 0 (hl--c-workspace-rule-num k (exact->inexact v)))
                               (loop (cdr tail))
-                              (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error))))
+                              (error "hl-workspace-rule-add!:" (hl--c-config-last-error))))
                          ((boolean? v)
-                          (if (= 0 (hl--c-workspace-rule-bool k (if v 1 0)))
+                          (if (= 0 (hl--c-workspace-rule-bool k v))
                               (loop (cdr tail))
-                              (hl--error 'hl-workspace-rule-add! "~a" (hl--c-config-last-error))))
-                         (else (hl--error 'hl-workspace-rule-add! "unsupported value for ~a" k))))))))))
+                              (error "hl-workspace-rule-add!:" (hl--c-config-last-error))))
+                         (else (error "hl-workspace-rule-add!: unsupported value for" k))))))))))
 
 ;; ---- queries ------------------------------------------------------------------
 
@@ -171,7 +171,7 @@
    Finds only — it does not create the workspace; the actions
    (hl-workspace-focus! and friends) take a selector directly and create on
    demand."
-  (hl--c-workspace-from (hl--str sel)))
+  (hl--c-workspace-from sel))
 
 (define (hl-workspace-name w)
   "The workspace's name."
@@ -268,7 +268,7 @@
   (let ((rec (make-hl-event 'workspace-active handler)))
     (if (= 0 (hl--c-workspace-active-listen rec))
         rec
-        (hl--error 'hl-workspace-active-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-workspace-active-notification-add!: listener rejected, see compositor log"))))
 
 ;; handler signature: (lambda (ws) ...) — ws is a workspace handle
 

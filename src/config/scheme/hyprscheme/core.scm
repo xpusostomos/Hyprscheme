@@ -7,7 +7,7 @@
 
 (define-module (hyprscheme core)
   #:export (
-           hl--bind-flags hl--bool-act hl--dir hl--gesture-mode
+           hl--bind-flags hl--bool-act hl--gesture-mode
            hl--mon-arg hl--monitor-listen hl--notif-act hl--plist-fold
            hl--plist-map hl--push-val hl--rule-kind
            hl--hyprland-name hl--rule-name hl--rule-spec-value
@@ -44,10 +44,18 @@
 Coordinates are global, as everywhere in the API."
   (make-struct/no-tail hl-box-rtd x y w h))
 
-(define (hl-box-x b) "The box's left edge." (hl--record-field 'hl-box-x hl-box-rtd 0 b))
-(define (hl-box-y b) "The box's top edge." (hl--record-field 'hl-box-y hl-box-rtd 1 b))
-(define (hl-box-w b) "The box's width." (hl--record-field 'hl-box-w hl-box-rtd 2 b))
-(define (hl-box-h b) "The box's height." (hl--record-field 'hl-box-h hl-box-rtd 3 b))
+;; record-accessor is Guile's own: it type-checks and reports "Wrong type
+;; argument (want `hl-box')" naming the record type, so there is no helper here.
+;; One is anonymous, though, so the docstring is attached as a property — that
+;; is what procedure-documentation (and the docs) read.
+(define hl-box-x (record-accessor hl-box-rtd 'x))
+(set-procedure-property! hl-box-x 'documentation "The box's left edge.")
+(define hl-box-y (record-accessor hl-box-rtd 'y))
+(set-procedure-property! hl-box-y 'documentation "The box's top edge.")
+(define hl-box-w (record-accessor hl-box-rtd 'w))
+(set-procedure-property! hl-box-w 'documentation "The box's width.")
+(define hl-box-h (record-accessor hl-box-rtd 'h))
+(set-procedure-property! hl-box-h 'documentation "The box's height.")
 
 (define (hl-layout-add! name . spec) "Register the custom layout NAME.
 SPEC is either a single recalculate procedure or a plist of named
@@ -64,24 +72,23 @@ Layouts register in the compositor's global registry (hence -add!),
 and every callback must be NAMED — there is no shorthand that guesses
 a bare lambda's role."
   (when (or (null? spec) (and (pair? spec) (procedure? (car spec))))
-    (hl--error 'hl-layout-add!
-            "the callbacks must be named, e.g. (hl-layout-add! ~s
-             'recalculate LAMBDA ...)"
-            name))
+    (error "hl-layout-add!: the callbacks must be named, e.g. (hl-layout-add! NAME
+             'recalculate LAMBDA ...) — the name given was:"
+           name))
   (if (= 0 (hl--c-layout-add name spec))
       name
-      (hl--error 'hl-layout-add! "layout ~a rejected, see compositor log" name)))
+      (error "hl-layout-add!: layout rejected, see compositor log — the name was:" name)))
 
 (define (hl--bool-act on?)
   (cond ((eq? on? 'unset) 0)
         (on? 1)
         (else 2)))
 
-(define (hl--dir d)
-  (if (symbol? d) (symbol->string d) d))
-
-;; names/tags/props accept symbols or strings (numbers become strings)
-
+;; A NAME as a string, for the few places that genuinely need one rather than a
+;; gsubr argument: the workspace/monitor argument resolvers (a workspace may be
+;; named by a NUMBER — "2") and the two name helpers below, which do string
+;; work on it. The gsubr boundary takes strings AND symbols itself, so no CALLER
+;; of an API function converts any more — this is the consumer normalising.
 (define (hl--str s)
   (cond ((symbol? s) (symbol->string s))
         ((number? s) (number->string s))
@@ -136,11 +143,11 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
                          (submap-universal #f) (allow-input-capture #f)
                          (mouse #f) (key ""))
   (when (and click drag)
-    (hl--error 'hl-bind-add! "click and drag are exclusive"))
+    (error "hl-bind-add!: click and drag are exclusive"))
   (when (and (or long-press release) repeat)
-    (hl--error 'hl-bind-add! "long-press / release is incompatible with repeat"))
+    (error "hl-bind-add!: long-press / release is incompatible with repeat"))
   (when (and mouse (or repeat locked release))
-    (hl--error 'hl-bind-add! "mouse is exclusive with repeat/locked/release"))
+    (error "hl-bind-add!: mouse is exclusive with repeat/locked/release"))
   (+ (if (or click drag) 2 0)                    ; click/drag imply release: upstream also sets BIND_FLAG_RELEASE for them
      (if (cond ((eq? device-inclusive 'unset) (pair? devices))  ; absent: inclusive when devices are listed (upstream default true)
                (device-inclusive #t)                          ; explicit #t
@@ -156,12 +163,12 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
 
 (define (hl-after ms thunk) "Run THUNK once after MS milliseconds.
 Returns an hl-timer handle for later control
-(hl-timer-enabled-set!, hl-timer-set-timeout, hl-timer-cancel!); a
+(hl-timer-enabled-set!, hl-timer-set-timeout!, hl-timer-cancel!); a
 one-shot releases its own record lock when it completes."
   (let ((rec (make-hl-timer ms thunk)))
     (if (= 0 (hl--c-timer rec (inexact->exact ms) 0))
         rec
-        (hl--error 'hl-after "timer ~ams rejected, see compositor log" ms))))
+        (error "hl-after: timer rejected, see compositor log — timeout was (ms):" ms))))
 
 (define (hl-window? x)
   "#t when X is a window handle."
@@ -193,9 +200,10 @@ one-shot releases its own record lock when it completes."
 (define (hl--special-name s)
   ;; normalize a special-workspace name/selector to its bare name, so an
   ;; open/close comparison survives a leading "special:" on either side
-  (if (and (> (string-length s) 8) (string=? (substring s 0 8) "special:"))
-      (substring s 8 (string-length s))
-      s))
+  (let ((s (hl--str s)))
+    (if (and (> (string-length s) 8) (string=? (substring s 0 8) "special:"))
+        (substring s 8 (string-length s))
+        s)))
 
 (define (hl--hyprland-name s)
   ;; A Scheme identifier as the compositor spells it: '-' becomes '_'. Scheme
@@ -206,7 +214,8 @@ one-shot releases its own record lock when it completes."
   ;;
   ;; Only '-' changes, so a name already written with underscores passes
   ;; through untouched and both spellings keep working.
-  (let ((n (string-length s)))
+  (let* ((s (hl--str s))
+         (n (string-length s)))
     (let loop ((i 0) (acc '()))
       (if (= i n)
           (list->string (reverse acc))
@@ -220,13 +229,13 @@ one-shot releases its own record lock when it completes."
          (if (exact? v)
              (hl--c-config-push-int (exact->inexact v))
              (hl--c-config-push-num v)))
-        ((boolean? v) (hl--c-config-push-bool (if v 1 0)))
+        ((boolean? v) (hl--c-config-push-bool v))
         ((string? v) (hl--c-config-push-str v))
         ((and (pair? v) (symbol? (car v)))
          ;; plist → hash table (the API's nested named-fields form)
          (hl--c-config-tbl-open 1)
          (hl--plist-fold (lambda (k val _)
-                           (hl--c-config-tbl-key (hl--str k))
+                           (hl--c-config-tbl-key k)
                            (hl--push-val val)
                            (hl--c-config-tbl-set-hash))
                          0 v))
@@ -238,13 +247,13 @@ one-shot releases its own record lock when it completes."
              (hl--push-val (car rest))
              (hl--c-config-tbl-seti i)
              (loop (cdr rest) (+ i 1)))))
-        (else (hl--error 'hl-config-add! "unsupported value ~s" v))))
+        (else (error "hl-config-add!: unsupported value" v))))
 
 (define (make-hl-rule kind name) (make-struct/no-tail hl-rule-rtd kind name))
 
-(define (hl--rule-kind r) (hl--record-field 'hl--rule-kind hl-rule-rtd 0 r))
+(define hl--rule-kind (record-accessor hl-rule-rtd 'kind))
 
-(define (hl--rule-name r) (hl--record-field 'hl--rule-name hl-rule-rtd 1 r))
+(define hl--rule-name (record-accessor hl-rule-rtd 'name))
 
 (define (hl--rule-spec-value v)
   (cond ((string? v) v)
@@ -254,17 +263,19 @@ one-shot releases its own record lock when it completes."
 
 (define (hl--window-rule-mk name spec begin-fn effect-fn commit-fn what kind)
   (let ((enabled (hl--plist-get spec 'enabled #t)))
-    (if (not (= 0 (begin-fn (if name (hl--str name) "") (if enabled 1 0))))
-        (hl--error what "~a" (hl--c-config-last-error))
+    (if (not (= 0 (begin-fn (if name name "") enabled)))
+        (error (format #f "~a: ~a" what (hl--c-config-last-error)))
         (let loop ((rest spec))
           (cond ((null? rest)
                  ;; done: make the handle record, commit, index it C++-side
                  (let ((rec (make-hl-rule kind (or name ""))))
                    (if (not (= 0 (commit-fn rec)))
-                       (hl--error what "~a" (hl--c-config-last-error))
+                       (error (format #f "~a: ~a" what (hl--c-config-last-error)))
                        rec)))
                 (else
                  (let* ((tail (hl--plist-cdr rest))
+                        ;; a plist KEY, as a string: the branches below compare
+                        ;; it against string literals ("match", "enabled", ...)
                         (k  (hl--str (car rest)))
                         (v  (car tail)))
                    (cond ((equal? k "match")
@@ -272,22 +283,22 @@ one-shot releases its own record lock when it completes."
                             (cond ((null? m) (loop (cdr tail)))
                                   (else
                                    (let* ((mtail (hl--plist-cdr m))
-                                          (mk (hl--str (car m)))
+                                          (mk (car m))
                                           (sv (hl--rule-spec-value (car mtail))))
                                      (if (not sv)
-                                         (hl--error what "bad match value for ~a" mk)
+                                         (error (format #f "~a: bad match value for" what) mk)
                                          (if (= 0 (hl--c-rule-match mk sv))
                                              (mloop (cdr mtail))
-                                             (hl--error what "~a" (hl--c-config-last-error)))))))))
+                                             (error (format #f "~a: ~a" what (hl--c-config-last-error))))))))))
                          ((equal? k "enabled")
                           (loop (cdr tail)))
                          (else
                           (let ((sv (hl--rule-spec-value v)))
                             (if (not sv)
-                                (hl--error what "bad effect value for ~a" k)
+                                (error (format #f "~a: bad effect value for" what) k)
                                 (if (= 0 (effect-fn k sv))
                                     (loop (cdr tail))
-                                    (hl--error what "~a" (hl--c-config-last-error))))))))))))))
+                                    (error (format #f "~a: ~a" what (hl--c-config-last-error)))))))))))))))
 
 (define (hl-group? x)
   "#t when X is a group handle."
@@ -310,31 +321,31 @@ one-shot releases its own record lock when it completes."
   (hl--c-layer? x))
 
 (define (hl--notif-act who act)
-  (if (= 0 act) #t (hl--error who "~a" (hl--c-config-last-error))))
+  (if (= 0 act) #t (error (format #f "~a: ~a" who (hl--c-config-last-error)))))
 
 (define (hl--gesture-mode who mode allowed)
   "Validate a gesture maker's #:mode against ALLOWED, for WHO; the value."
   (unless (memq mode allowed)
-    (hl--error who "#:mode must be one of ~a, got ~a" allowed mode))
+    (error (format #f "~a: #:mode must be one of ~a, got" who allowed) mode))
   mode)
 
 (define (hl--window-listen which type thunk who)
   (let ((rec (make-hl-event type thunk)))
     (if (= 0 (hl--c-window-event-listen rec which))
         rec
-        (hl--error who "listener rejected, see compositor log"))))
+        (error (format #f "~a: listener rejected, see compositor log" who)))))
 
 (define (hl--workspace-listen which type thunk who)
   (let ((rec (make-hl-event type thunk)))
     (if (= 0 (hl--c-workspace-event-listen rec which))
         rec
-        (hl--error who "listener rejected, see compositor log"))))
+        (error (format #f "~a: listener rejected, see compositor log" who)))))
 
 (define (hl--monitor-listen which type thunk who)
   (let ((rec (make-hl-event type thunk)))
     (if (= 0 (hl--c-monitor-event-listen rec which))
         rec
-        (hl--error who "listener rejected, see compositor log"))))
+        (error (format #f "~a: listener rejected, see compositor log" who)))))
 
 (define (hl-current-submap )
   "The active submap's name, or the empty string when no submap is

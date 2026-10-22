@@ -88,7 +88,7 @@ these for the same reason."
 ;; ---- the machinery, as the host builds it ----------------------------------
 
 (define api-modules
-  '(core bind config event exec gesture group layer monitor
+  '(enums core bind config event exec gesture group layer monitor
     notification query rule timer window workspace extras emacs-keymaps))
 
 (define (stub-c-entry-points files)

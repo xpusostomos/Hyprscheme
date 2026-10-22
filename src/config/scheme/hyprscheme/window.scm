@@ -26,8 +26,9 @@
            hl-window-send-shortcut! hl-window-send-key-state!
            hl-window-rule-add! hl-window-from hl-urgent-window
            hl-last-window hl-windows-from hl-window-fullscreen-handler
-           hl-window-fullscreen-set! hl-window-maximized-set!
-           hl-window-fullscreen-state hl-window-fullscreen-mode
+           hl-window-fullscreen-set! hl-window-fullscreen-sync!
+           hl-window-fullscreen
+           hl-window-fullscreen-client
            hl-window-hidden? hl-window-address hl-window-mapped?
            hl-window-visible? hl-window-accepts-input? hl-window-position
            hl-window-pin-fullscreened? hl-window-allowed-over-fullscreen?
@@ -56,6 +57,7 @@
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
+(use-modules (hyprscheme enums))
 
 (use-modules (ice-9 exceptions)
              (rnrs io ports)
@@ -121,11 +123,11 @@
 
 (define (hl-window-move-direction! w dir)
   "Move WINDOW in direction DIR."
-  (= 0 (hl--c-window-move-direction w (hl--dir dir))))
+  (= 0 (hl--c-window-move-direction w dir)))
 
 (define (hl-window-swap-direction! w dir)
   "Swap WINDOW with the window in direction DIR."
-  (= 0 (hl--c-window-swap-direction w (hl--dir dir))))
+  (= 0 (hl--c-window-swap-direction w dir)))
 
 (define* (hl-window-swap-next! w #:key (prev #f))
   "Swap WINDOW with the next window in its group; #:prev #t swaps
@@ -137,7 +139,7 @@
   ;; dispatchers page). The trap it replaces was real in both directions — the
   ;; docstring said "'prev or #t" while the code took anything truthy, and a
   ;; "fix" that made 'prev the only backwards spelling silently removed #t.
-  (= 0 (hl--c-window-swap-next w (if prev 1 0))))
+  (= 0 (hl--c-window-swap-next w prev)))
 
 (define (hl-window-swap-with! w other)
   "Swap WINDOW with OTHER."
@@ -148,8 +150,8 @@
    #:tiled #t or #:floating #t restricts the cycle to windows of that
    kind — they are exclusive, as click/drag are for hl-bind-add!."
   (when (and tiled floating)
-    (hl--error 'hl-window-cycle! "#:tiled and #:floating are exclusive"))
-  (= 0 (hl--c-window-cycle #f (if prev 0 1) (cond (tiled 1) (floating 2) (else 0)))))
+    (error "hl-window-cycle!: #:tiled and #:floating are exclusive"))
+  (= 0 (hl--c-window-cycle #f (not prev) (cond (tiled 1) (floating 2) (else 0)))))
 
 (define (hl-window-center! w)
   "Center WINDOW."
@@ -159,13 +161,13 @@
   "Resize WINDOW to WIDTH x HEIGHT pixels; #:relative #t makes them
    deltas to its current size."
   (= 0 (hl--c-window-resize-px w (exact->inexact width) (exact->inexact height)
-         (if relative 1 0))))
+         relative)))
 
 (define* (hl-window-position-set! w x y #:key (relative #f))
   "Move WINDOW to (X, Y); #:relative #t makes the coordinates deltas
    from its current position."
   (= 0 (hl--c-window-move-px w (exact->inexact x) (exact->inexact y)
-         (if relative 1 0))))
+         relative)))
 
 (define* (hl-window-pinned-set! w #:key (on? 'unset))
   "Pin or unpin WINDOW: absent #:on? toggles, #t/#f set."
@@ -185,16 +187,16 @@
 
 (define (hl-window-zorder-set! w mode)
   "Restack WINDOW per MODE: \"up\", \"down\", \"top\" or \"bottom\"."
-  (= 0 (hl--c-window-zorder w (hl--str mode))))
+  (= 0 (hl--c-window-zorder w mode)))
 
 (define (hl-window-prop-set! w prop val)
   "Set a dynamic window prop on WINDOW (e.g. 'opacity \"0.8\"). Read
    back with hl-window-prop."
-  (= 0 (hl--c-window-set-prop w (hl--str prop) (hl--str val))))
+  (= 0 (hl--c-window-set-prop w prop val)))
 
 (define (hl-window-tag-add! w tag)
   "Add the static TAG string to WINDOW's tags."
-  (= 0 (hl--c-window-tag w (hl--str tag))))
+  (= 0 (hl--c-window-tag w tag)))
 
 (define (hl-window-tags-clear! w)
   "Clear WINDOW's tags."
@@ -212,7 +214,7 @@
    window. See hl-window-group?."
   (if (eq? on? 'unset)
       (= 0 (hl--c-group-toggle w))
-      (= 0 (hl--c-group-set w (if on? 1 0)))))
+      (= 0 (hl--c-group-set w on?))))
 
 (define (hl-window-group w)
   "The group W is in, as a handle, or #f when it is in none. W may be a window
@@ -234,16 +236,16 @@
 
 (define (hl-window-group-move-in! w dir)
   "Move WINDOW into the group in direction DIR."
-  (= 0 (hl--c-window-into-group w (hl--dir dir))))
+  (= 0 (hl--c-window-into-group w dir)))
 
 (define (hl-window-group-move-out! w dir)
   "Move WINDOW out of its group in direction DIR."
-  (= 0 (hl--c-window-out-of-group w (hl--dir dir))))
+  (= 0 (hl--c-window-out-of-group w dir)))
 
 (define (hl-window-group-move-in-or-create! w dir)
   "Move WINDOW into the group in direction DIR, creating one when there
    is none."
-  (= 0 (hl--c-window-into-or-create-group w (hl--dir dir))))
+  (= 0 (hl--c-window-into-or-create-group w dir)))
 
 (define* (hl-window-deny-from-group-set! w #:key (on? 'unset))
   "Set whether WINDOW denies being grouped (absent #:on? toggles)."
@@ -260,14 +262,14 @@
    MODS is a list of modifier tokens, as built by hl-kbd/hl-key (e.g.
    (hl-key \"SUPER\")), and KEY an xkb keysym name."
   (unless (and (list? mods) (every (lambda (m) (string? m)) mods))
-    (hl--error 'hl-window-send-shortcut! "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
+    (error "hl-window-send-shortcut!: 'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
   (= 0 (hl--c-send-shortcut mods key (if (null? w) -1 (car w)))))
 
 (define (hl-window-send-key-state! mods key state . w)
   "Like hl-window-send-shortcut!, but STATE selects the key state
    explicitly (press or release)."
   (unless (and (list? mods) (every (lambda (m) (string? m)) mods))
-    (hl--error 'hl-window-send-key-state! "'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
+    (error "hl-window-send-key-state!: 'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\")"))
   (= 0 (hl--c-send-key-state mods key state (if (null? w) -1 (car w)))))
 
 (define* (hl-window-rule-add! name #:key #:rest fields)
@@ -288,7 +290,7 @@
   "The window matching SELECTOR, or #f when none. Selectors use the
    config selector syntax: \"class:^foot$\", \"title:foo\", \"pid:123\",
    \"address:0x...\", \"workspace:3\", \"floating\", \"tiled\", ..."
-  (hl--c-window-from (hl--str sel)))
+  (hl--c-window-from sel))
 
 (define (hl-urgent-window )
   "The most urgent window, as a handle, or #f when none."
@@ -300,42 +302,125 @@
 
 (define (hl-windows-from sel)
   "All windows matching SELECTOR, as a list of window handles."
-  (let ((s (hl--c-windows-from (hl--str sel))))
+  (let ((s (hl--c-windows-from sel)))
     (if (not s)
         '()
         s)))
 
+;; The fullscreen modes, as the compositor numbers them. 'keep is the WRITE-side
+;; "leave this alone", so it appears in a setter's list of acceptable values but
+;; never comes back from a getter.
+(define-enum-values fullscreen-mode
+  '((keep       . -1)
+    (none       . 0)
+    (maximized  . 1)
+    (fullscreen . 2)))
+
 (define (hl-window-fullscreen-handler w)
-  "Which fullscreen handler the window uses, as a string."
+  "Which handler owns W's fullscreen, as a symbol: 'default, or a layout
+   that takes fullscreen over for its windows ('scrolling), or 'unknown.
+   W may be #f for the focused window; #f when there is no such window.
+
+   The symbol comes from the compositor itself, which reports the handler
+   by name — so the vocabulary is theirs and a new handler appears here
+   without a change on our side."
   (hl--c-window-fullscreen-handler w))
 
 ;; ---- notifications ------------------------------------------------------------
 
-(define* (hl-window-fullscreen-set! w #:key (on? 'unset))
-  "Toggle or set WINDOW's fullscreen: absent #:on? runs the fullscreen
-   toggle; #t sets fullscreen mode, #f unsets. Modes mirror the internal
-   fullscreen modes: 1 maximized, 2 fullscreen."
-  (if (eq? on? 'unset)
-      (= 0 (hl--c-window-fullscreen-toggle w 2))
-      (= 0 (hl--c-window-fullscreen-set w (if on? 2 0)))))
+(define* (hl-window-fullscreen-set! w #:key (mode 'fullscreen) (action 'toggle) (layout-aware #t))
+  "Set W's fullscreen state. W may be #f for the focused window.
 
-(define* (hl-window-maximized-set! w #:key (on? 'unset))
-  "Toggle or set WINDOW's maximized state: the maximized flavour of
-   hl-window-fullscreen-set!."
-  (if (eq? on? 'unset)
-      (= 0 (hl--c-window-fullscreen-toggle w 1))
-      (= 0 (hl--c-window-fullscreen-set w (if on? 1 0)))))
+   #:mode is the mode to act on — 'fullscreen (the default) or
+   'maximized — and #:action says how: 'toggle flips it (the default),
+   'set makes it that mode, 'unset takes THAT mode off and leaves any
+   other one alone (un-fullscreening a maximized window must not
+   un-maximize it).
 
-(define* (hl-window-fullscreen-state w internal client #:key (layout-aware #f))
-  "Set the explicit fullscreen state: INTERNAL and CLIENT are modes
-   0/1/2; #:layout-aware #t makes the internal mode layout-aware."
-  (= 0 (hl--c-window-fullscreen-state w internal client
-         (if layout-aware 1 0))))
+   READ, DECIDE, SET: the current mode is read once, the target follows
+   from it, and the compositor is told to ASSIGN that. So every action is
+   idempotent by construction — asking for the state the window is
+   already in re-assigns the same value and changes nothing — and the
+   compositor is never asked to re-derive a decision already made here.
 
-(define (hl-window-fullscreen-mode w)
-  "The window's fullscreen mode: 0 none, 1 maximized, 2 fullscreen; -1
-   when stale."
-  (hl--c-window-fullscreen-mode w))
+   Everything here is in mode SYMBOLS; the one conversion to the
+   compositor's integers happens at the gsubr call, which is what
+   enum-value is for.
+
+   The app IS told what happened: the compositor syncs the client side
+   by default (the window property `sync_fullscreen`, on unless a rule
+   or hl-window-prop-set! turns it off), so hl-window-fullscreen-client
+   follows. To set the two sides independently use
+   hl-window-fullscreen-sync!, whose 'keep leaves a side alone —
+   that is how to fullscreen a window WITHOUT the app being told.
+
+   #:layout-aware defaults to #t, the dispatcher's own default."
+  (let* ((current (hl-window-fullscreen w))
+         (target (case action
+                   ;; each action's TARGET, from the mode just read, then
+                   ;; assigned. CURRENT is a mode symbol like MODE, so the two
+                   ;; compare with eq? — and 'unset keeps CURRENT rather than
+                   ;; forcing 'none when the window is in some OTHER mode.
+                   ((toggle) (if (eq? mode current) 'none mode))
+                   ((set) mode)
+                   ((unset)  (if (eq? mode current) 'none current))
+                   (else (error "hl-window-fullscreen-set!: #:action must be 'toggle, 'set or 'unset, got" action)))))
+    (= 0 (hl--c-window-fullscreen-set w (enum-value fullscreen-mode target)
+                                     layout-aware))))
+
+(define* (hl-window-fullscreen-sync! w internal client #:key (action 'set) (layout-aware #t))
+  "Set BOTH sides of the fullscreen state at once: INTERNAL is what the
+   compositor does, CLIENT is what the app is told, each a mode symbol
+   from fullscreen-mode — 'none, 'maximized, 'fullscreen — or 'keep to
+   leave that side alone. W may be #f for the focused window.
+
+   This is the only way to move the two sides INDEPENDENTLY, and so the
+   only way to fullscreen a window without telling the app (internal
+   'fullscreen, client 'keep). hl-window-fullscreen-set! keeps them in
+   step, because the compositor syncs the client side by default.
+
+   #:action works on the PAIR, as the dispatcher's does, and defaults to
+   'set:
+     'set     assign the pair, unless it is already exactly that
+     'unset   clear to no-fullscreen, when the pair IS what you named
+     'toggle  flip EACH side separately — the internal one clears if it
+              is already what you asked for, and likewise the client one
+   #:layout-aware defaults to #t, the dispatcher's own default.
+
+   'set and 'unset are the dispatcher's own guards, and they are what
+   make this idempotent: the underlying action CLEARS a window whose
+   pair already matches what it was asked for, so a bare 'set called
+   twice would fullscreen and then unfullscreen."
+  (let* ((want-i (enum-value fullscreen-mode internal))
+         (want-c (enum-value fullscreen-mode client))
+         (cur-i (hl--c-window-fullscreen-mode w))
+         (cur-c (hl--c-window-fullscreen-client w))
+         (none (enum-value fullscreen-mode 'none))
+         (at (and (= cur-i want-i) (= cur-c want-c)))
+         (assign (lambda (i c) (= 0 (hl--c-window-fullscreen-state w i c layout-aware)))))
+    (case action
+      ((set)    (if at #t (assign want-i want-c)))
+      ((unset)  (if at (assign want-i want-c) #t))
+      ((toggle) (assign (if (= cur-i want-i) none want-i)
+                        (if (= cur-c want-c) none want-c)))
+      (else (error "hl-window-fullscreen-sync!: #:action must be 'set, 'toggle or 'unset, got" action)))))
+
+(define (hl-window-fullscreen w)
+  "W's fullscreen mode, as a symbol: 'none, 'maximized or 'fullscreen.
+   W may be #f for the focused window. #f when there is no such window."
+  (let ((mode (hl--c-window-fullscreen-mode w)))
+    (and (>= mode 0) (enum-symbol fullscreen-mode mode))))
+
+(define (hl-window-fullscreen-client w)
+  "The fullscreen mode the APP has been told W is in, as a symbol — the
+   other side of hl-window-fullscreen. The compositor syncs this to the
+   internal state by default, so the two usually agree; they part when
+   `sync_fullscreen` is off for the window, or when
+   hl-window-fullscreen-sync! set the sides independently (its 'keep is
+   exactly how you leave the app's belief alone).
+   W may be #f for the focused window; #f when there is no such window."
+  (let ((mode (hl--c-window-fullscreen-client w)))
+    (and (>= mode 0) (enum-symbol fullscreen-mode mode))))
 
 (define (hl-window-hidden? w)
   "#t when the window is hidden."
@@ -438,7 +523,7 @@
   "Read back a dynamic window prop set with hl-window-prop-set!: #t/#f
    for booleans, numbers for opacities and border/rounding; #f for
    unknown props."
-  (hl--c-window-prop w (hl--str prop)))
+  (hl--c-window-prop w prop))
 
 (define (hl-window-initial-class w)
   "The class the window opened with (what static rules match on)."
@@ -503,7 +588,7 @@
   (let ((rec (make-hl-event 'window-minimize handler)))
     (if (= 0 (hl--c-window-minimize-listen rec))
         rec
-        (hl--error 'hl-window-minimize-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-window-minimize-notification-add!: listener rejected, see compositor log"))))
 
 (define (hl-window-open-early-notification-add! handler)
   "Register a handler that fires when a window is created and mapped,
@@ -533,7 +618,7 @@
   (let ((rec (make-hl-event 'window-destroy handler)))
     (if (= 0 (hl--c-window-destroy-listen rec))
         rec
-        (hl--error 'hl-window-destroy-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-window-destroy-notification-add!: listener rejected, see compositor log"))))
 
 (define (hl-window=? a b)
   "#t when A and B refer to the same live window."

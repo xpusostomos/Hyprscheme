@@ -76,12 +76,11 @@ the core API - define your own wrapper on top if you want one."
   ;; non-string tokens are skipped — with a stale message attached. Say what is
   ;; actually wrong instead.
   (unless (every string? tokens)
-    (hl--error 'hl-bind-add!
-               "tokens must be a list of key-name strings, but got ~s. \
+    (error "hl-bind-add!: tokens must be a list of key-name strings, but got (see the value below). \
 If that came from (hl-kbd \"...\") with a space in it, it is a SEQUENCE \
 (a list of chords) — bind those with hl-bind-keys!, which registers the \
-submaps to chain them."
-               tokens))
+submaps to chain them. The value was:"
+           tokens))
   (let* ((key (car (reverse tokens)))
          (rec (make-hl-bind tokens thunk))
          (rc (hl--c-bind rec
@@ -103,7 +102,7 @@ submaps to chain them."
                         (if (list? devices) devices '()))))
       (if (= 0 rc)
           rec
-          (hl--error 'hl-bind-add! "~a" (hl--c-config-last-error)))))
+          (error "hl-bind-add!:" (hl--c-config-last-error)))))
 ;; ---- key specification helpers -----------------------------------------------
 ;; (hl-kbd "C-M-a")      — emacs syntax → token list for hl-bind-add!
 ;; (hl-key "SUPER+SHIFT+Q") — lua/hyprland syntax → token list
@@ -114,7 +113,7 @@ hl-timer handle like hl-after's."
   (let ((rec (make-hl-timer ms thunk)))
     (if (= 0 (hl--c-timer rec (inexact->exact ms) 1))
         rec
-        (hl--error 'hl-repeat "timer ~ams rejected, see compositor log" ms))))
+        (error "hl-repeat: timer rejected, see compositor log — timeout was (ms):" ms))))
 
 (define (hl-bind? x) (and (struct? x) (eq? (struct-vtable x) hl-bind-rtd)))
 
@@ -125,7 +124,7 @@ hl-timer handle like hl-after's."
   (let ((rec (make-hl-event 'submap handler)))
     (if (= 0 (hl--c-submap-listen rec))
         rec
-        (hl--error 'hl-submap-notification-add! "listener rejected, see compositor log"))))
+        (error "hl-submap-notification-add!: listener rejected, see compositor log"))))
 
 ;; ---- workspace events ---------------------------------------------------------
 

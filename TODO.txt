@@ -135,7 +135,7 @@ Wiki updated (dispatchers, scheme-utilities, submaps, dwindle,
 == MUTATING-API NAMING REVIEW (list for Chris to consider) ==
 Scheme convention: mutating APIs end with !. Already conforming:
   all *-set! above, hl-state-set!, hl-rule-set-enabled,
-  hl-timer-set-enabled, hl-timer-set-timeout, hl-window-set-prop.
+  hl-timer-set-enabled, hl-timer-set-timeout!, hl-window-set-prop.
 Toggle-named (conforming after the renames): the *-toggle! six.
 Mutating APIs with PLAIN names — candidates for !, grouped:
 - window lifecycle/actions: hl-window-close, hl-window-kill,
@@ -641,7 +641,7 @@ NOTIFICATIONS (audit item B — full upstream hl.notification parity):
   ::forceUnlock) while refusing (errorf, upstream's exact three messages)
   when the manager is absent, the session isn't locked, or a lock client
   is attached/denied — it can never unlock a genuinely locked machine.
-(hl-exec-scheduled-prop-refresh-immediately) — upstream
+(hl-exec-scheduled-prop-refresh-immediately!) — upstream
   hl.exec_scheduled_prop_refresh_immediately parity: forwards to
   CPropRefresher::executeScheduledRefreshImmediately; returns #t when the
   pending refresh ran. Docs: scheme-utilities.md (Prop Refresh section
@@ -844,7 +844,7 @@ Regression cases for 1-3 live in tests/t-config.sh; 4-6 are covered by
   because it IS the no-rule path. os.execute() is no substitute (blocking
   system() on the config thread, no env injection, no rules, no
   execOnce/execShutdown lifecycle). Rename sweep protected
-  hl-exec-scheduled-prop-refresh-immediately from the bare-name pass.
+  hl-exec-scheduled-prop-refresh-immediately! from the bare-name pass.
   Tests: t-exec (pid returns, bracket rules, plist rule + live float
   check), t-api (pid assertions, unknown-effect rejection). Docs:
   dispatchers.md single row, scheme-utilities.md convenience list.
