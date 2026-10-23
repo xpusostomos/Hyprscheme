@@ -337,3 +337,4 @@ hl-workspace?
 hl-workspaces
 key-state-enum
 make-enum-values
+string->color

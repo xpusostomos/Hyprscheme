@@ -99,6 +99,7 @@
            hl--c-notification-timeout-set hl--c-notification?
            hl--c-notify hl--c-on-readable hl--c-pass hl--c-permission-add
            hl--c-release-input-capture hl--c-reload-config
+           hl--c-string-color
            hl--c-rule-enabled hl--c-rule-match hl--c-rule-set-enabled
            hl--c-run-finalizers hl--c-scheduled-prop-refresh-immediately
            hl--c-screenshare-listen hl--c-send-key-state

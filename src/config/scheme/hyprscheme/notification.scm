@@ -27,12 +27,20 @@
              (srfi srfi-1)
              (ice-9 optargs))
 
-(define* (hl-notify! text duration #:key (icon "none") (color "0") (font-size 13))
+(define* (hl-notify! text duration #:key (icon "none") (color #f) (font-size 13))
   "Show a one-shot notification: (hl-notify! \"text\" 5000), or with
    keyword options: (hl-notify! \"text\" 5000 #:icon \"info\" #:color
-   \"0x80FF80FF\" #:font-size 13). Icons: none warn info hint error
-   confused ok. Color: 0xAARRGGBB hex string; 0 = the icon's default
-   color."
+   #xffffa500 #:font-size 13). Icons: none warn info hint error
+   confused ok.
+
+   #:color is a 0xAARRGGBB integer — ALPHA FIRST, then red, green and
+   blue, the packed-ARGB32 layout the compositor uses. Scheme has hex
+   literals, so it is written as one: dark orange is #xffa500, and
+   opaque dark orange is #xffffa500. An alpha of 00 is fully
+   transparent; the usual mistake is writing the RGB triplet first
+   (#xffa500ff is blue, not orange).
+
+   #:color #f (the default) means the icon's own colour, not black."
   (let ((s (hl--c-notify text (exact->inexact duration)
                         icon
                         color
@@ -52,7 +60,11 @@
    subsystem applies its own defaults (icon \"none\", color 0, font
    size 13) — Scheme holds no defaults here. Pausing freezes the
    timeout timer (the bubble stays until dismissed); expired handles
-   read #f and mutate as no-ops."
+   read #f and mutate as no-ops.
+
+   #:color is a 0xAARRGGBB integer, alpha first — #xffffa500, not
+   #xffa500ff. It is the same number hl-notification-color gives back,
+   so a colour can be read and written without converting anything."
   (let ((fields (append
                   (if text (list 'text text) '())
                   (if timeout (list 'timeout timeout) '())
@@ -77,8 +89,9 @@
   (hl--c-notification-timeout n))
 
 (define (hl-notification-color n)
-  "The notification's color, as the raw 0xAARRGGBB integer (readback
-   parity with upstream)."
+  "The notification's color, as the raw 0xAARRGGBB integer — the same
+   number hl-notification-add! and hl-notification-color-set! take, so
+   it round-trips."
   (hl--c-notification-color n))
 
 (define (hl-notification-icon n)
@@ -120,7 +133,9 @@
     (hl--c-notification-timeout-set n (exact->inexact ms))))
 
 (define (hl-notification-color-set! n color)
-  "Set the notification's color (0xAARRGGBB hex string)."
+  "Set the notification's color, as a 0xAARRGGBB integer (alpha first,
+   e.g. #xffffa500). Takes the same number hl-notification-color
+   returns."
   (hl--notif-act 'hl-notification-color-set!
     (hl--c-notification-color-set n color)))
 

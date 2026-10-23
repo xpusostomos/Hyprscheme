@@ -635,6 +635,71 @@ and TODO.txt's archived sections.)
   the hook is observable at all). 20/20; make check 7/7; api-check reported ONE
   addition, hl-loaded-files, and no removals, and the snapshot was rebaselined.
 
+== COLOURS ARE NUMBERS; strings go through string->color ==
+- A colour is now a 0xAARRGGBB INTEGER everywhere in the API — alpha first, the
+  packed-ARGB32 layout CHyprColor's uint64_t constructor reads. Scheme has hex
+  literals, so a config writes (hl-notify! "hi" 5000 #:color #xffffa500) and
+  nothing is parsed. The gsubrs take SCM and convert with colorFromNumber.
+- A STRING IS REFUSED by a colour argument, on purpose. Hyprland's config-file
+  spellings still work but only through a new, deliberate function:
+  string->color (in core, so every module and config reaches it) answers the
+  integer or #f. It delegates to Config::ParserUtils::parseColor — the
+  compositor's OWN parser, the one the config file, the rule engine, the IPC
+  commands and the scripting API all use — so our acceptance set is Hyprland's
+  by construction, the same argument as resolveKeycode for keysyms.
+- WHAT THIS FIXED. The old schemeColorFromStr accepted bare hex digits
+  ("FFA500FF") that Hyprland's parser REJECTS — an invented spelling — and
+  refused rgba(...) that Hyprland ACCEPTS: both stricter and more permissive
+  than the format it claimed to implement. Worse, the reader returned an
+  integer while the setter demanded a string, so
+  (hl-notification-color-set! n (hl-notification-color n)) was impossible. The
+  parity gap is why rgba(ffa500ff) worked in bindings.lua and failed in
+  bindings.scm.
+- hl-notify!'s absent colour is #f, not 0: 0 is a legal colour (transparent
+  black), so #f is what means "the icon's default".
+- THE TESTS ARE MEASURED, NOT GUESSED. Seven spellings pinned against expected
+  decimal integers, and the expectations were verified by linking the tree's own
+  ParserUtils.cpp.o and printing what the compositor's parser actually answers —
+  all eleven rows matched, including the two refusals ("red", "FFA500FF"). The
+  load-bearing one is "#00ff00ff" -> #xff00ff00: a hex passthrough would say
+  #x00ff00ff, so it fails the moment anyone "simplifies" the string path. Also
+  pinned: "#fa5f" (four digits) is #f, since the parser takes 3, 6 or 8 only.
+- Tests also cover the round trip that used to be impossible, and that a STRING
+  is refused by the setter. t-api had one older call site still passing a string
+  ("0x80FF80FF") — the new code caught it, which is the change working.
+- Docs: notifications.md gained a Colours section — the alpha-first layout, the
+  #xffa500ff trap spelled out, and string->color with its full accepted set.
+  CLAUDE.md gained a COLOURS convention.
+- 316 gsubrs registered/called (was 315); 20/20 suite; make check 7/7.
+
+== THE MACHINERY COMPILER WAS BROKEN, AND hyprpm HID IT ==
+- `make scm-compile` was aborting with a CORE DUMP and hyprpm still reported the
+  build as successful, so this user's installed machinery sat at the last good
+  copy (00:34) while the plugin updated — which is why the new (hyprscheme
+  watch) auto-reload was not live in their session at all.
+- THE CAUSE WAS MINE, and the trap is worth knowing. guild compile runs with the
+  machinery dir on GUILE_LOAD_PATH (it must — modules resolve each other by name
+  from there), and GUILE EVALUATES <load-path>/init.scm AT STARTUP. So compiling
+  ANY module evaluates init.scm, which imports everything and runs each module's
+  top level. watch.scm called hl--c-on-readable at its top level; that gsubr
+  exists only inside the compositor, so a plain guile died with
+  "Unbound variable: hl--c-on-readable" -> "Aborted (core dumped)". Verified by
+  putting a (display ...) in an init.scm on the load path and watching it print
+  during an unrelated module's compile.
+- WHY NOTHING CAUGHT IT: scm-compile is NOT part of `make check`, so every lint
+  I ran all session was green. `install` and `hyprpm-machinery` both depend on
+  it, so both were broken too — and bind-audit, module-audit and compile-lint
+  all passed throughout.
+- THE FIX: watch.scm's top level now only DEFINES. The fd is opened and the
+  arming attempted under a `guard`; outside the compositor it fails harmlessly,
+  the fd is closed, and hl--watch-armed? stays #f with the hook inert. The
+  kernel's "keep the top level to defines" rule is the same rule, one module
+  earlier, and CLAUDE.md now states it generally.
+- HONEST LIMIT OF THE GUARD: it makes the arming failure invisible to
+  load-check and compile-lint, so a real arming bug would show up only in the
+  compositor — where t-config's watcher test covers it (verified to fail with
+  the registration neutered).
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

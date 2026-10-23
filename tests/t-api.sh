@@ -514,29 +514,38 @@ bad_exec=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl-
 [[ "$bad_exec" == *"bogus_effect"* ]] || { echo "FAIL: unknown exec effect not rejected => [$bad_exec]"; FAILED=1; }
 
 # ---- live notifications (upstream hl.notification object parity) ------------
-ok '(let ((n (hl-notification-add! #:text "api-notif" #:timeout 5000 #:icon "info" #:font-size 15 #:color "0x80FF80FF")))
+ok '(let ((n (hl-notification-add! #:text "api-notif" #:timeout 5000 #:icon "info" #:font-size 15 #:color #x80FF80FF)))
      (and (string? (hl-notification-text n))
        (equal? (hl-notification-text n) "api-notif")
        (= (hl-notification-timeout n) 5000)
        (integer? (hl-notification-icon n))
        (= (hl-notification-font-size n) 15)
-       (integer? (hl-notification-color n))))'
+       (equal? (hl-notification-color n) #x80FF80FF)))'
 ok '(let ((n (hl-notification-add! #:text "api-rw" #:timeout 9000)))
      (and (begin (hl-notification-text-set! n "api-rw-2") #t)
        (equal? (hl-notification-text n) "api-rw-2")
        (begin (hl-notification-timeout-set! n 7000) (= (hl-notification-timeout n) 7000))
        (begin (hl-notification-font-size-set! n 18) (= (hl-notification-font-size n) 18))
        (begin (hl-notification-icon-set! n "warn") (= (hl-notification-icon n) 0))))'
-# color setter: the handle id is opaque-int, the setter takes the 0xAARRGGBB
-# hex form and the reader gives the raw int back (exact round-trip or a
-# changed value — either proves the write reached the notification)
-ok '(let* ((n (hl-notification-add! #:text "api-id" #:timeout 9000))
-        (before (hl-notification-color n)))
+# colour is a NUMBER now — 0xAARRGGBB, alpha first — and the setter takes the
+# same integer the reader gives, so the round-trip is exact. That round trip is
+# itself the regression test: the setter used to take a STRING while the reader
+# returned an int, so `(hl-notification-color-set! n (hl-notification-color n))`
+# was impossible.
+ok '(let* ((n (hl-notification-add! #:text "api-id" #:timeout 9000)))
      (and (hl-notification? n)
-       (eq? #t (hl-notification-color-set! n "0x80FF0000"))
-       (integer? (hl-notification-color n))
-       (or (equal? (hl-notification-color n) (string->number "80FF0000" 16))
-         (not (equal? before (hl-notification-color n))))))'
+       (eq? #t (hl-notification-color-set! n #x80FF0000))
+       (equal? (hl-notification-color n) #x80FF0000)))'
+# …and read-back-then-write-back, which is the same claim from the other side
+ok '(let* ((n (hl-notification-add! #:text "api-rt" #:timeout 9000 #:color #x11223344))
+        (c (hl-notification-color n)))
+     (and (equal? c #x11223344) (eq? #t (hl-notification-color-set! n c))
+       (equal? (hl-notification-color n) #x11223344)))'
+# A STRING IS REFUSED — that is the point of the change, not an accident. The
+# old API took strings and this test would have passed; a config that hands over
+# "rgba(…)" now fails loudly instead of half-working.
+ok '(let ((n (hl-notification-add! #:text "api-str" #:timeout 9000)))
+     (guard (e (#t #t)) (hl-notification-color-set! n "rgba(ffa500ff)") #f))'
 # the handle predicate: records of the right family answer #t, anything else #f
 ok '(let ((n (hl-notification-add! #:text "api-pred" #:timeout 9000)))
      (and (hl-notification? n) (not (hl-notification? 5)) (not (hl-notification? (list 1)))))'
@@ -572,6 +581,52 @@ bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl
 # ---- notifications / misc ---------------------------------------------------
 ok '(hl-notify! "api coverage" 100)'
 ok '(boolean? (hl-notify! "api coverage opts" 100 #:icon "info" #:font-size 13))'
+# a NUMBER is the documented way in; #f means "the icon's default colour", which
+# is why the default is #f and not 0 — 0 is a legal colour
+ok '(boolean? (hl-notify! "api color num" 100 #:color #xffffa500))'
+ok '(boolean? (hl-notify! "api color default" 100 #:color #f))'
+
+# ---- string->color: the one way in for a colour that arrives as TEXT ----------
+# It exists so the string form is something a config ASKS FOR by name, rather
+# than every colour argument quietly accepting one. The parser underneath is the
+# compositor's own, so this pins the acceptance set to Hyprland's — if upstream
+# adds or drops a spelling, this test is where it shows.
+#
+# The orderings differ and that is the trap it documents: the INTEGER is alpha
+# first (#xAARRGGBB) while "#RRGGBBAA" and "rgba(RRGGBBAA)" are RGB first. These
+# two must therefore come out EQUAL — the parser reorders the string — which is
+# the assertion that would fail if anyone "simplified" it into a hex passthrough.
+# EXPECTED VALUES ARE DECIMAL, spelled out, not computed — `val` compares its
+# second argument AS A LITERAL STRING, so a (number->string ...) form there would
+# be compared against its own source text. #xffffa500 is 4294944000.
+val '(string->color "rgba(ffa500ff)")' '4294944000'
+val '(string->color "#ffa500ff")'      '4294944000'
+val '(string->color "#ffa500")'        '4294944000'
+val '(string->color "0xffffa500")'     '4294944000'
+# the three-digit short form expands each nibble (f->ff, a->aa, 5->55), which is
+# NOT the same colour as "#ffa500" — it is #xFFFFAA55, and pinning the difference
+# is the point: "#fa5f" is four DIGITS, so it takes the #rrggbbaa path instead
+val '(string->color "#fa5")'           '4294945365'
+# FOUR digits is not a form the parser takes (it is 3, 6 or 8), so this is #f
+# rather than a guess — the same refusal a bad spelling gets
+val '(string->color "#fa5f")'          '#f'
+# the comma form, where alpha is a FLOAT 0..1 and not a byte
+val '(string->color "rgba(255,165,0,1.0)")' '4294944000'
+# the alpha-first integer form, spelled the other way round from the RGB-first
+# strings above — 0xAARRGGBB, so this one is a DIFFERENT colour on purpose
+val '(string->color "0xFFA500FF")'     '4289003775'
+# NOT a colour → #f, and the spellings Hyprland's parser does not know are
+# refused rather than guessed at: our OLD parser accepted bare hex digits like
+# "FFA500FF", which no hyprland config could contain, and inventing that back
+# would be inventing a spelling.
+val '(string->color "red")'       '#f'
+val '(string->color "FFA500FF")'  '#f'
+val '(string->color "")'          '#f'
+# THE ORDERING TRAP, pinned so it cannot drift: "#00ff00ff" is RGB-FIRST, so it
+# means r=00 g=ff b=00 a=ff — opaque green, whose ARGB integer is #xff00ff00.
+# A hex passthrough would have answered #x00ff00ff instead, so this is the
+# assertion that fails if anyone "simplifies" the string path.
+val '(string->color "#00ff00ff")' '4278255360'
 ok '(boolean? (hl-key-down? "Return"))'
 ok '(list? (hl-loaded-plugins))'
 ok '(string? (hl-version))'

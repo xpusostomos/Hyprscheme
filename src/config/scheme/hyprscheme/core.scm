@@ -20,7 +20,8 @@
            hl-layer? hl-layout-add! hl-load hl-monitor? hl-notification?
            hl-plist-get hl-state-keys hl-state-ref hl-state-remove!
            hl-state-set! hl-window? hl-workspace? make-hl-bind
-           make-hl-event make-hl-rule make-hl-timer))
+           make-hl-event make-hl-rule make-hl-timer
+           string->color))
 
 (use-modules (hyprscheme kernel))
 
@@ -302,6 +303,44 @@ one-shot releases its own record lock when it completes."
 
 (define (make-hl-rule kind name) (make-struct/no-tail hl-rule-rtd kind name))
 
+;; ---- colour ------------------------------------------------------------------
+;; A COLOUR IS A NUMBER, everywhere in this API: 0xAARRGGBB, alpha first, the
+;; packed-ARGB32 layout the compositor uses. Scheme writes it as a hex literal
+;; (#xffffa500 is opaque orange), so nothing has to be parsed and no string
+;; format has to be learned.
+;;
+;; This is the ONE way in for a colour written as a string, and it is a separate
+;; function on purpose: it makes the string form something a config asks for by
+;; name, instead of every colour argument quietly accepting one. The parser is
+;; the compositor's OWN (ParserUtils::parseColor, via the hl--c-string-color
+;; gsubr) — the same one the config file, the rule engine, the IPC commands and
+;; the scripting API use — so what it accepts here is exactly what Hyprland
+;; accepts anywhere else: "0x…", "#rgb", "#rrggbb", "#rrggbbaa", "rgba(...)",
+;; "rgb(...)", comma forms, and a bare decimal.
+;;
+;; The name is `string->color`, not `hl-*`, because it is a CONVERSION rather
+;; than a compositor operation, and the convention for that in this tree is the
+;; un-prefixed arrow form (the same shape as string->symbol). It is in core, not
+;; a family, so every module and every config can reach it.
+(define (string->color s)
+  "Parse a colour STRING and return the 0xAARRGGBB integer the colour
+   arguments of this API take — or #f when the string is not a colour.
+
+   Every colour argument here wants the NUMBER (#xffffa500 for opaque
+   orange), so this exists only for the case where a colour arrives as
+   text — out of the environment, a file, or a value copied from a
+   hyprland.conf. Prefer the literal:
+
+     (hl-notify! \"hi\" 5000 #:color #xffffa500)
+     (hl-notify! \"hi\" 5000 #:color (string->color \"rgba(ffa500ff)\"))
+
+   Accepts what Hyprland itself accepts wherever it reads a colour:
+   \"0xFFA500FF\", \"#fa5f\", \"#ffa500\", \"#ffa500ff\", \"rgba(ffa500ff)\",
+   \"rgba(255,165,0,1.0)\", \"rgb(255,165,0)\", or decimal digits. Note the
+   orderings differ, which is the whole reason to prefer the number: the
+   integer is ALPHA FIRST (#xAARRGGBB), while \"#RRGGBBAA\" and
+   \"rgba(RRGGBBAA)\" are RGB first. The parser reorders those for you."
+  (hl--c-string-color s))
 (define hl--rule-kind (record-accessor hl-rule-rtd 'kind))
 
 (define hl--rule-name (record-accessor hl-rule-rtd 'name))

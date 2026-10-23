@@ -410,6 +410,21 @@ Things that bit us and are worth not rediscovering:
   unbound**, so a gsubr called at kernel load time fails. Keep the kernel's
   top level to `define`s. (Nothing in the tree does this today; it is a trap
   for the next person who adds a top-level call there.)
+- **NO GSBR AT A MODULE'S TOP LEVEL — and `make check` will not tell you.**
+  `guild compile` runs with the machinery dir on `GUILE_LOAD_PATH` (it must:
+  modules resolve each other by name from there), and **Guile evaluates
+  `<load-path>/init.scm` at startup** — so compiling ANY module evaluates
+  init.scm, which imports every module and runs each one's top level. A gsubr
+  called there is unbound in a plain `guile`, and the failure is
+  `Unbound variable: hl--c-on-readable` → `Aborted (core dumped)`. This is the
+  kernel's "keep the top level to `define`s" rule made general: it cost an
+  afternoon because `scm-compile` is NOT part of `make check`, so every lint was
+  green while `make scm-compile`, `make install` and `make hyprpm-machinery`
+  were all dying — and **hyprpm reported the build as successful** (it sees the
+  `.so` step pass), leaving the installed machinery silently at the last good
+  copy. Verified with a `(display …)` in an init.scm on the load path. Anything
+  needing a gsubr at load time must be guarded (`guard` +
+  `(when …)`), which is what `watch.scm` does.
 - **Guile hoists top-level defines**, so a top-level `(define base load)` in a
   module file that also defines `load` captures that file's own shadow — write
   `(@ (guile) load)` when you mean Guile's. The kernel no longer shadows `load`
@@ -684,8 +699,48 @@ back the raw `"~A: ~S"` template with the parts as irritants — printing it
 unformatted says `~A: ~S` and names nothing. `tools/syntax-check.scm` did
 exactly that, which is how a real read error once came out as noise.
 
-### ENUMS — a rule, not a preference
+### COLOURS — a number, and alpha is FIRST
 
+**A colour is a 0xAARRGGBB INTEGER, everywhere in this API.** Alpha first, then
+red, green, blue — the packed-ARGB32 layout `CHyprColor`'s `uint64_t`
+constructor reads (`Color.cpp`: `ALPHA >>24`, `RED >>16`, `GREEN >>8`, `BLUE`).
+Opaque orange is `#xffffa500`; the natural-looking `#xffa500ff` is a blue.
+
+Scheme has hex literals, so nothing has to be parsed and no string format has to
+be learned: `(hl-notify! "hi" 5000 #:color #xffffa500)`. The gsubrs therefore take
+`SCM` and convert with `colorFromNumber` (integer only, `scm_to_uint64`).
+
+**A string is NOT accepted by a colour argument, deliberately.** Config-file
+spellings exist (`#rgb`, `#rrggbbaa`, `rgba(...)`) and a config that has a colour
+as TEXT converts it once, by name: **`string->color`** (in core, so every module
+and every config can reach it) answers the integer or `#f`. Underneath it is the
+compositor's own `Config::ParserUtils::parseColor` — the same parser the config
+file, the rule engine, the IPC commands and the scripting API use — so our
+acceptance set is Hyprland's by construction. That is the same argument as
+`resolveKeycode` for keysyms: validate with the compositor's parser, never a
+lookalike.
+
+**What this replaced, and why:** the gsubrs used to take a string and parse it
+with a hand-rolled `schemeColorFromStr` that accepted bare hex digits
+(`"FFA500FF"`) that Hyprland's parser REJECTS — an invented spelling — while
+refusing `rgba(...)` that Hyprland accepts. It was both stricter and more
+permissive than the format it claimed to implement. And the reader returned an
+integer while the setter demanded a string, so
+`(hl-notification-color-set! n (hl-notification-color n))` was impossible.
+
+**The two orderings are the trap, and both are real.** The integer is
+alpha-first; `#RRGGBBAA` and `rgba(RRGGBBAA)` are RGB-first. `string->color`
+reorders, which is why `"#ffa500ff"` and `"0xffffa500"` are the SAME colour.
+`tests/t-api.sh` pins seven spellings against expected decimal integers measured
+from the compositor's own parser (verified by linking `ParserUtils.cpp.o` and
+printing them), including the two refusals (`"red"`, `"FFA500FF"`) and
+`"#00ff00ff"` → `#xff00ff00` — the assertion that fails if anyone "simplifies"
+the string path into a hex passthrough.
+
+**A colour argument's absent value is `#f`, not 0**, in `hl-notify!`: 0 is a
+legal colour (transparent black).
+
+### ENUMS — a rule, not a preference
 **A function that takes or returns ONE VALUE OUT OF A FIXED SET speaks in
 symbols, and that set is a named enum.** It does not take a bare integer and it
 does not return a string. `(hl-window-fullscreen-set! w #:mode 'maximized)`,

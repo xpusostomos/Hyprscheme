@@ -14,6 +14,11 @@
 
 #include <src/notification/Notification.hpp>
 #include <src/notification/NotificationOverlay.hpp>
+// ParserUtils::parseColor — the compositor's own colour-string parser, used by
+// hl--c-string-color rather than a hand-rolled one. It is the SAME parser the
+// config file, the window-rule engine, the IPC commands and the scripting API
+// all use, so our acceptance set matches theirs by construction.
+#include <src/config/shared/parserUtils/ParserUtils.hpp>
 
 namespace Config::Scheme {
 
@@ -49,18 +54,41 @@ namespace Config::Scheme {
         return ICON_NONE;
     }
 
-    // color: config hex form "0xAARRGGBB" (decimal digits also accepted)
-    static std::optional<CHyprColor> schemeColorFromStr(const std::string& cs) {
-        if (cs.empty())
-            return CHyprColor(0);
-        try {
-            return CHyprColor(std::stoull(cs.starts_with("0x") || cs.starts_with("0X") ? cs.substr(2) : cs, nullptr, 16));
-        } catch (...) {
+    // A COLOUR IS A NUMBER. 0xAARRGGBB — alpha FIRST, then red, green, blue,
+    // which is the packed-ARGB32 layout CHyprColor reads in its uint64_t
+    // constructor (Color.cpp: ALPHA >>24, RED >>16, GREEN >>8, BLUE). So opaque
+    // orange is #xffffa500, NOT #xffa500ff.
+    //
+    // Scheme has native hex integers, so a config writes the number directly and
+    // no parsing is needed: (hl-notify! "hi" 5000 #:color #xffffa500). That is
+    // the whole interface — the string spellings Hyprland's config syntax allows
+    // (#rgb, #rrggbbaa, rgba(...), "0x…") exist for the CONFIG FILE and for the
+    // scripting API's parity, and are reached deliberately through string->color
+    // rather than by every colour argument quietly accepting them.
+    //
+    // A string still REACHES here from one place: hl--c-string-color, the
+    // string->color gsubr. It goes to the compositor's own ParserUtils::parseColor,
+    // deliberately NOT a hand-rolled parser of our own — the same argument as
+    // resolving key names with the compositor's keymap resolver. Anything that
+    // parser rejects, we reject, and vice versa: no invented spellings in either
+    // direction. (Our old parser took bare hex digits like "FFA500FF" that
+    // Hyprland rejects, so we accepted a string no config file could contain.)
+    static std::optional<CHyprColor> colorFromNumber(SCM v) {
+        if (!scm_is_integer(v))
             return std::nullopt;
-        }
+        return CHyprColor(static_cast<uint64_t>(scm_to_uint64(v)));
     }
 
-    static SCM hlNotify(const char* text, double durationMs, const char* icon, const char* color, double fontSize) {
+    static std::optional<CHyprColor> colorFromString(const std::string& cs) {
+        // the compositor's parser, not ours. `0x…`, `#rgb`, `#rrggbb`,
+        // `#rrggbbaa`, `rgba(...)`, `rgb(...)`, comma forms, bare decimal.
+        const auto parsed = Config::ParserUtils::parseColor(cs);
+        if (!parsed)
+            return std::nullopt;
+        return CHyprColor(static_cast<uint64_t>(*parsed));
+    }
+
+    static SCM hlNotify(const char* text, double durationMs, const char* icon, SCM color, double fontSize) {
         if (!g_up)
             return SCM_BOOL_F;
 
@@ -74,9 +102,12 @@ namespace Config::Scheme {
                 return SCM_BOOL_F;
             }
         }
-        const auto col = schemeColorFromStr(color ? color : "");
+        // ABSENT means "the icon's default colour", and that is #f rather than 0
+        // so no valid colour is ambiguous; 0 is still accepted, as CHyprColor(0),
+        // which is what the compositor's own default is.
+        const auto col = scm_is_false(color) ? std::optional<CHyprColor>{CHyprColor(0)} : colorFromNumber(color);
         if (!col) {
-            g_configError = "hl-notify!: bad color (expected 0xAARRGGBB)";
+            g_configError = "hl-notify!: bad 'color (expected a 0xAARRGGBB integer)";
             return SCM_BOOL_F;
         }
         Notification::overlay()->addNotification(text ? text : "", *col, sc<float>(durationMs), theIcon, sc<float>(fontSize));
@@ -123,9 +154,9 @@ namespace Config::Scheme {
                     return SCM_BOOL_F;
                 }
             } else if (k == "color") {
-                const auto c = schemeColorFromStr(scm_is_string(v) ? schemeDatumToStr(v) : (scm_is_integer(v) ? std::to_string(scm_to_int64(v)) : ""));
+                const auto c = colorFromNumber(v);
                 if (!c) {
-                    g_configError = "hl-notification-add!: bad 'color (expected 0xAARRGGBB)";
+                    g_configError = "hl-notification-add!: bad 'color (expected a 0xAARRGGBB integer)";
                     return SCM_BOOL_F;
                 }
                 color = *c;
@@ -255,17 +286,28 @@ namespace Config::Scheme {
         return 0;
     }
 
-    static int hlNotificationColorSet(SCM id, const char* color) {
+    static int hlNotificationColorSet(SCM id, SCM color) {
         if (!g_up)
             return -1;
-        const auto c = schemeColorFromStr(color ? color : "");
+        const auto c = colorFromNumber(color);
         if (!c) {
-            g_configError = "hl-notification-color-set!: bad color (expected 0xAARRGGBB)";
+            g_configError = "hl-notification-color-set!: bad color (expected a 0xAARRGGBB integer)";
             return -2;
         }
         if (const auto n = hl::notificationOf(id))
             n->setColor(*c);
         return 0;
+    }
+
+    // string->color: the deliberate escape hatch for a colour written the way the
+    // CONFIG FILE spells it. Takes one of Hyprland's colour strings and answers
+    // the 0xAARRGGBB integer every colour argument here wants. #f when the
+    // compositor's parser refuses it.
+    static SCM hlStringColor(SCM s) {
+        if (!scm_is_string(s))
+            return SCM_BOOL_F;
+        const auto c = colorFromString(schemeDatumToStr(s));
+        return c ? scm_from_uint64(c->getAsHex()) : SCM_BOOL_F;
     }
 
     static int hlNotificationIconSet(SCM id, SCM v) {
@@ -344,6 +386,7 @@ namespace Config::Scheme {
         hl::bind<hlNotificationTextSet>("hl--c-notification-text-set");
         hl::bind<hlNotificationTimeoutSet>("hl--c-notification-timeout-set");
         hl::bind<hlNotificationColorSet>("hl--c-notification-color-set");
+        hl::bind<hlStringColor>("hl--c-string-color");
         hl::bind<hlNotificationIconSet>("hl--c-notification-icon-set");
         hl::bind<hlNotificationFontSizeSet>("hl--c-notification-font-size-set");
         hl::bind<hlNotificationPausedSet>("hl--c-notification-paused-set");
