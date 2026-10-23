@@ -25,12 +25,14 @@
 ;;      as they do for a reader who copies the page into their config;
 ;;   3. in that module the *registering* functions are replaced by wrappers that
 ;;      record every procedure they are handed. Which ones those are is DERIVED
-;;      from the API's own export list (every `-add!`, plus hl-submap, hl-repeat,
+;;      from the API's own export list (every `-add!`, plus hl-repeat,
 ;;      hl-after) rather than kept by hand, since a hand-kept list is a list
-;;      that drifts;
+;;      that drifts. hl-submap used to be in this list — it registered binds
+;;      through its thunk — and is gone with it: the submap is a per-bind
+;;      #:submap argument now, so the bind registering it is an `-add!`;
 ;;   4. once every block has been evaluated, every recorded procedure is
-;;      invoked, and invoking one can record more — the binds inside an
-;;      hl-submap thunk are only registered when that thunk runs — so it repeats
+;;      invoked, and invoking one can record more (a thunk that registers is
+;;      only run when the block that defines it is evaluated), so it repeats
 ;;      until nothing new appears.
 ;;
 ;; It FAILS on `unbound-variable`: a name the docs use that does not exist. That
@@ -191,7 +193,10 @@ these for the same reason."
 (define (registrar? name)
   (let ((s (symbol->string name)))
     (or (string-suffix? "-add!" s)
-        (memq name '(hl-submap hl-repeat hl-after)))))
+        ;; no hl-submap: the submap is a per-bind argument now, so a block that
+        ;; puts a bind in one does it through hl-bind-add!, which "-add!"
+        ;; already matches
+        (memq name '(hl-repeat hl-after)))))
 
 (define (shadow-registrars! mod)
   ;; The names to shadow come from the modules the HARNESS imports — the
@@ -273,8 +278,8 @@ these for the same reason."
         ((> n 400) (format #t "  note: stopped after 400 callbacks (registers on every run?)\n"))
         (else
          ;; the label follows the callback being run, so a thunk registered BY a
-         ;; thunk (the binds inside an hl-submap) is blamed on the submap's own
-         ;; block rather than on whichever block happened to run last
+         ;; thunk is blamed on the block that registered it rather than on
+         ;; whichever block happened to run last
          (set! label (cdr (car todo)))
          (set! invoked (+ invoked 1))
          (invoke (car (car todo)) (cdr (car todo)))

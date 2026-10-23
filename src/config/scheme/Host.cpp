@@ -622,8 +622,11 @@ namespace Config::Scheme {
     static Hyprutils::Signal::CHyprSignalListener g_reloadListener;
 
     // ---- submap registration context ------------------------------------------
-    // the bind context a submap definition runs under: binds registered while
-    // it is set are scoped to that submap (see the hl-submap wrapper).
+    // GONE. The host used to carry the submap a config was defining into
+    // (g_regSubmap/g_regSubmapReset, in Bind.cpp) so that binds created inside
+    // an hl-submap thunk inherited the name. The submap is a per-bind argument
+    // to hl-bind-add! now (#:submap / #:submap-reset), which is what the
+    // compositor always modelled — see the note in Bind.cpp.
 
     void shutdown() {
         if (g_schemeIpcCommand) {

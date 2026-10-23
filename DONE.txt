@@ -802,6 +802,129 @@ C++ apis, nothing else should be in C."**
   plus a new "Reloading" section for the auto-reload and `hl-loaded-files`.
 - 20/20 on the suite.
 
+== "Unrecognized keyword" DID NOT NAME THE KEYWORD ==
+
+Chris hit this in his live overlay: *"unfortunately it doesn't say what
+that keyword is. Can you tell?"* Two separate faults, and the answer
+needed both.
+
+- WHY IT SAID NOTHING, found in Guile's own source rather than guessed:
+  a `keyword-argument-error` exists to name a keyword you should not have
+  passed, and it is the ONE condition whose message carries no arguments.
+  `ice-9/optargs.scm:350` raises it as
+  `(scm-error 'keyword-argument-error #f "Unrecognized keyword" '() args-tail)`
+  — **EMPTY irritants**, with the keywords in the DATA slot (the 4th
+  element of `exception-args`). `hl--print-exception` formats the message
+  against the IRRITANTS, which is right for everything else, so it printed
+  the bare four words and dropped the offender. Measured:
+  `kind=keyword-argument-error  message="Unrecognized keyword"  irritants=()  args=(#f "Unrecognized keyword" () (#:bogus))`.
+  FIXED with `hl--keyword-error-name` (kernel.scm), which reads
+  `(last (exception-args e))` and is used as a `cond` test in the printer.
+  Now: `Unrecognized keyword: #:not-a-key`. Exported, as every kernel
+  top-level define must be (module-audit caught the omission immediately).
+- WHAT THE KEYWORD WAS, for Chris's config: **`#:submap`**, in his two new
+  `nkeys-passthrough` binds. His compositor was running the INSTALLED
+  machinery at `~/.local/share/hyprscheme/scm/` (a hyprpm build, all files
+  dated 12:38, before this session's work) — and that copy's
+  `hl-bind-add!` still ends at `#:mouse` and still defines `hl-submap`.
+  So the keyword was real, the config was right, and the machinery was
+  stale: `make hyprpm-machinery` refreshes it.
+- **The config was verified correct against the tree** first, which is what
+  separated the two faults: loading his real bindings.scm in a nested
+  compositor returns `#t` with `hl--config-errors` at 0. Without that the
+  stale-install half would have been invisible and the reasonable-looking
+  conclusion would have been "the config is broken".
+- TESTS: two existing assertions in t-api PINNED THE OLD BEHAVIOUR — both
+  said `assert the rejection, not the name`, with a comment treating
+  Guile's silence as permanent. They now assert the keyword is NAMED, and
+  **both were verified to fail on the old printer**: `["Unrecognized
+  keyword"]`, which is exactly what the user saw.
+- CLAUDE.md gained the general rule under the error-plumbing notes: when an
+  error message is a FIXED STRING, the part that identifies the problem
+  lives elsewhere in the condition — go and find it rather than assuming
+  the message is self-contained.
+- 20/20 on the suite, `make check` 7/7.
+
+== hl-submap IS GONE: THE SUBMAP IS A NAME ON THE BIND ==
+
+Chris, after walking through how Hyprland actually models submaps: *"get
+rid of hl-submap, change hl-bind-add! to be (hl-bind-add! (hl-kbd
+"blah") thunk #:submap subma #:submap-reset submap)"*. Recorded in
+CLAUDE.md under API conventions.
+
+- WHY IT WAS WRONG, established by reading the compositor rather than the
+  docs: a submap is NOT an object. `SBindMetadata::submap` is a
+  `std::string` (src/keybinds/Bind.hpp), `CBind::make` copies it out of
+  the args struct without looking at it, and `CRegistry::hasSubmap` is an
+  `any_of` over the flat bind vector comparing strings. There is no
+  submap-creation call anywhere in src/keybinds/, and
+  `CKeybindManager`'s entire submap API is ONE GETTER (`currentSubmap`).
+  **A submap exists because binds carry its name**, which is also why
+  entering one no bind carries is refused.
+- THE OLD hl-submap made the name AMBIENT instead of an argument: a
+  dynamic-wind that set `g_regSubmap` while a thunk ran, so every bind
+  created inside inherited whatever name was in force. That is how the
+  .conf format works (`submap = resize` is a parser-state directive) and
+  how the Lua binding does it, but it meant NO language could say "this
+  ONE bind goes in resize" — and the .conf heritage is why the verb
+  "create a submap" read as true when nothing was ever created.
+- DELETED: `hl-submap`, `hl--c-get-submap-ctx`, `hl--c-set-submap-ctx`,
+  and both C++ globals. `hl-bind-add!` gained `#:submap` and
+  `#:submap-reset`; `hlSchemeBind` takes two more `const char*` and writes
+  them straight into the metadata. `""` is the default map, so every
+  existing bind keeps its behaviour — the trampoline is variadic, so the
+  arity change needed no C++ plumbing either.
+- THE LUA EQUIVALENT is `hl.define_submap` (LuaBindingsToplevel.cpp:234),
+  the direct ancestor of what was deleted. Worth knowing: `hl.bind` has NO
+  submap option there either — the name comes from
+  `mgr->m_currentSubmap`. Our API is now STRICTLY MORE EXPRESSIVE than
+  the Lua one, which is a first.
+- `define-key!` (emacs-keymaps) needed no design change — it always
+  wanted a per-bind name — but its three internal `hl-submap` wrappers
+  became `#:submap` arguments. **Its post-action EXIT deliberately stays
+  in Scheme** rather than becoming `#:submap-reset`: the compositor
+  applies a reset inside `invokeBind` AFTER the thunk, and this harness
+  fires a bind by calling the thunk (`hl--bind-fire-rec`), so two real
+  tests in t-keydesc.sh assert the post-action submap that way. Moving it
+  to C++ would have quietly made them tests that cannot fail — which is
+  exactly the trap CLAUDE.md calls out. `#:submap-reset` is public for
+  configs that want the declarative form.
+- THE BUG FOUND ON THE WAY, and it is the kind this tree tests for:
+  `hl-bind-add!`'s "you gave me a sequence" error told the user to use
+  **`hl-bind-keys!` — a function that has never existed** (not in
+  bind.scm, emacs-keymaps.scm or API.snapshot). The real one is
+  `global-set-key!`. Worse, `t-keydesc.sh` PINNED that wording, so the
+  test was checking the bug in rather than out. Fixed both: the message
+  names `global-set-key!`, and the test now also asserts the named
+  function is a procedure.
+- TESTS: t-api's submap block was rewritten around `#:submap`, and adds a
+  case for a submap no bind carries (refused, `#t` from
+  `not (hl-submap-activate! "…")`) plus one that reads the `submap` FIELD
+  back through `hyprctl binds` — an external check, not a Scheme accessor
+  agreeing with itself. **`#:submap-reset` is deliberately NOT asserted**,
+  with the reason written into the test: the reset runs in C++ after the
+  thunk, hyprctl exposes no such field, and a synthetic keypress is
+  dropped before dispatch (t-keydeliver.sh documents that), so any
+  assertion here would be one the harness cannot see. That is stated
+  rather than papered over.
+- DOCS: submaps.md REWRITTEN (it taught the wrapper, described nesting as
+  a runtime hierarchy that does not exist, and claimed submaps "can be
+  nested"); binds.md gained the two options; code-snippets.md's group
+  submap is now a `map-g` helper taking the map name; examples/hyprland.scm
+  updated. **NEW PAGE: emacs-keymaps.md** — the define-key!/global-set-key!/
+  hl-submap!/hl-key-description layer, which was documented NOWHERE in
+  the wiki before, plus a _Sidebar entry.
+- Chris's config (bindings.scm) updated: the `nkeys-passthrough` raw
+  hl-submap became two `#:submap` binds. The `C-x` chords needed no change
+  — they were already define-key!, which now sets the name per bind.
+  Verified by loading the real file in a nested compositor: `hl-load` #t,
+  `hl--config-errors` 0, both submaps reachable.
+- `hl-submap` is a PUBLIC REMOVAL — `tools/api-check.sh` fails on it by
+  design and was rebaselined with `--update` (339 names) after this note.
+  A config calling `hl-submap` now raises "Unbound variable", which the
+  docs must say: submaps.md's examples are all converted.
+- 20/20 on the suite, `make check` 7/7.
+
 == A NESTED CONFIG FAILURE RAISED THE BANNER AND THEN ERASED IT ==
 
 Chris: *"I put garbage at the end of my bindings.scm and I got the brief

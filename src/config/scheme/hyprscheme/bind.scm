@@ -7,7 +7,7 @@
 
 (define-module (hyprscheme bind)
   #:export (
-           hl-submap hl-submap-activate! hl-submap-exit! hl-bind-add!
+           hl-submap-activate! hl-submap-exit! hl-bind-add!
            hl-repeat hl-bind? hl-submap-notification-add! hl-unbind!
            hl-unbind-key! hl-bind-enabled-set! hl-bind-enabled?))
 
@@ -19,18 +19,6 @@
              (rnrs lists)
              (srfi srfi-1)
              (ice-9 optargs))
-
-(define (hl-submap name fn . reset) "Run FN to define a submap: binds
-registered inside FN are scoped to it, and the optional RESET names
-the submap returned to on exit. The submap exists only if FN registers
-at least one bind."
-  (let* ((ctx        (hl--c-get-submap-ctx))
-         (prev-name  (car ctx))
-         (prev-reset (cdr ctx)))
-    (dynamic-wind
-      (lambda () (hl--c-set-submap-ctx name (if (null? reset) "" (car reset))))
-      (lambda () (fn))
-      (lambda () (hl--c-set-submap-ctx prev-name prev-reset)))))
 
 (define (hl-submap-activate! name) "Switch the active submap to NAME
 (\"\" or \"reset\" returns to the default map)."
@@ -52,6 +40,7 @@ default map."
 
 (define* (hl-bind-add! tokens thunk
                        #:key (description "")
+                       (submap "") (submap-reset "")
                        (devices #f)
                        (device-inclusive 'unset)
                        (locked #f) (release #f) (repeat #f) (long-press #f)
@@ -68,7 +57,20 @@ key is still a list. THUNK is the action. Keyword options: #:description
 #:transparent, #:ignore-mods, #:dont-inhibit, #:click, #:drag,
 #:submap-universal, #:allow-input-capture, #:mouse. Returns the bind
 handle; remove with (hl-unbind! B). There is no two-string shorthand in
-the core API - define your own wrapper on top if you want one."
+the core API - define your own wrapper on top if you want one.
+
+#:submap is the SUBMAP this bind lives in, \"\" (the default map, always
+active) unless you say otherwise; #:submap-reset is the submap to switch
+to AFTER this bind's action runs, for a key that should return you from a
+mode (see hl-submap-activate!). Both are the bind's OWN properties - a
+submap is only a name stamped on the binds that carry it, so naming it
+here is all it takes for the submap to exist:
+
+  (hl-bind-add! (hl-kbd \"left\") resize-left #:submap \"resize\")
+  (hl-bind-add! (hl-kbd \"g\") hl-submap-exit! #:submap \"resize\")
+
+#:submap-reset is IGNORED when the action itself switches submap, so a
+thunk that calls hl-submap-activate! decides for itself."
   ;; ONE CHORD ONLY. hl-bind-add! is the raw call: Hyprland binds a single
   ;; key+modifier set, and it has no notion of a sequence. hl-kbd returns a LIST
   ;; OF CHORDS for a multi-key spec like "C-x C-f", and feeding that here would
@@ -78,7 +80,7 @@ the core API - define your own wrapper on top if you want one."
   (unless (every string? tokens)
     (error "hl-bind-add!: tokens must be a list of key-name strings, but got (see the value below). \
 If that came from (hl-kbd \"...\") with a space in it, it is a SEQUENCE \
-(a list of chords) — bind those with hl-bind-keys!, which registers the \
+(a list of chords) — bind those with global-set-key!, which registers the \
 submaps to chain them. The value was:"
            tokens))
   (let* ((key (car (reverse tokens)))
@@ -99,7 +101,9 @@ submaps to chain them. The value was:"
                                         #:allow-input-capture allow-input-capture
                                         #:mouse mouse #:key key)
                         description
-                        (if (list? devices) devices '()))))
+                        (if (list? devices) devices '())
+                        (if submap submap "")
+                        (if submap-reset submap-reset ""))))
       (if (= 0 rc)
           rec
           (error "hl-bind-add!:" (hl--c-config-last-error)))))

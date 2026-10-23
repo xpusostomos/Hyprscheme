@@ -129,14 +129,24 @@ assert-rt "SHIFT folds into a character" "$RT_CHECK
 
 # ---- hl-bind-add! takes ONE chord, never a sequence -------------------------
 # hl-kbd returns a list of chords for a multi-key spec; that belongs to
-# hl-bind-keys!. hl-bind-add! must refuse it BY NAME rather than dying as
+# global-set-key!. hl-bind-add! must refuse it BY NAME rather than dying as
 # "A bind requires a trigger" (which is what the C++ says when it skips the
 # non-string tokens).
+#
+# The name it points at was WRONG until this was fixed: the message said
+# "hl-bind-keys!", a function that has never existed anywhere in the tree (not
+# in bind.scm, emacs-keymaps.scm or API.snapshot) — while the function that
+# actually builds a submap chain for a sequence is global-set-key!. A message
+# naming a function you cannot call is worse than naming none, and this test
+# pinned the wording, so it was checking the bug IN rather than out.
+#
 # the message is captured and matched in SHELL, the way t-api.sh does it —
 # call-with-string-output-port returns the accumulated STRING, not the thunk's
 # value, so it cannot be asserted as #t
 seq_msg=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-bind-add! (hl-kbd "C-x C-f") (lambda () #f)))))' 2>&1)
-[[ "$seq_msg" == *"hl-bind-keys!"* ]] || { echo "FAIL: a sequence fed to hl-bind-add! did not name hl-bind-keys! => [$seq_msg]"; FAILED=1; }
+[[ "$seq_msg" == *"global-set-key!"* ]] || { echo "FAIL: a sequence fed to hl-bind-add! did not name global-set-key! => [$seq_msg]"; FAILED=1; }
+# ...and the function it names EXISTS: the whole point of naming one
+[[ "$($SCHEME '(procedure? global-set-key!)')" == "#t" ]] || { echo "FAIL: hl-bind-add!'s message names global-set-key!, which is not a procedure"; FAILED=1; }
 
 # a single chord from hl-kbd still binds fine
 assert-rt "hl-bind-add! accepts a single chord" "$RT_CHECK

@@ -572,9 +572,15 @@ bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl
 bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-notification-add! #:text "x" #:timeout 100 #:font-size 0))))')
 [[ "$bad_notif" == *"font-size"* ]] || { echo "FAIL: bad font-size not rejected => [$bad_notif]"; FAILED=1; }
 bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-notification-add! #:text "x" #:timeout 100 #:bogus_field 1))))')
-# Guile's define* raises keyword-argument-error without naming the keyword
-# (no irritants in the exception) — assert the rejection, not the name
-[[ "$bad_notif" == *"nrecognized keyword"* ]] || { echo "FAIL: unknown notification field not rejected => [$bad_notif]"; FAILED=1; }
+# the keyword IS named now. It used to not be, and this assertion used to say
+# only "assert the rejection, not the name" — because Guile raises
+# keyword-argument-error with EMPTY irritants (the keywords go in the data slot;
+# see hl--keyword-error-name in kernel.scm), so hl--print-exception, which
+# formats the message against the irritants, printed the bare "Unrecognized
+# keyword". A user hit exactly that against a config using a keyword their
+# installed machinery did not have, and the banner — the surface meant to tell
+# them — named nothing.
+[[ "$bad_notif" == *"#:bogus_field"* ]] || { echo "FAIL: unknown notification field not NAMED in the error => [$bad_notif]"; FAILED=1; }
 bad_notif=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (let ((n (hl-notification-add! #:text "x" #:timeout 100))) (hl-notification-timeout-set! n -5)))))')
 [[ "$bad_notif" == *">= 0"* ]] || { echo "FAIL: negative timeout not rejected => [$bad_notif]"; FAILED=1; }
 
@@ -830,9 +836,44 @@ noerr '(hl-layout-add! "api-layout-partial" (quote recalculate)
 noerr '(begin (hl-workspace-focus! "1") #t)'
 
 # ---- submaps ----------------------------------------------------------------
-ok '(hl-bind? (hl-submap "api-sub" (lambda () (hl-bind-add! (hl-kbd "g") (lambda () #f)))))'
+# A submap is named ON the bind (there is no hl-submap wrapper any more), so
+# registering one bind in it is what brings it into existence.
+ok '(hl-bind? (hl-bind-add! (hl-kbd "g") (lambda () #f) #:submap "api-sub"))'
 ok '(hl-submap-activate! "api-sub")'
 val '(hl-current-submap)' '"api-sub"'
+ok '(hl-submap-exit!)'
+val '(hl-current-submap)' '""'
+
+# a submap NO bind carries cannot be entered — setSubmap refuses by name
+ok '(not (hl-submap-activate! "api-no-such-submap"))'
+val '(hl-current-submap)' '""'
+
+# #:submap really lands on the BIND. Read back through hyprctl binds — which
+# prints the metadata field — rather than through a Scheme accessor that could
+# agree with itself. The bind is found by its unique description; each block in
+# that output is separated by a blank line.
+ok '(begin
+      (hl-bind-add! (hl-kbd "C-<f20>") (lambda () #f)
+                    #:description "api-submap-probe"
+                    #:submap "api-probe-map")
+      #t)'
+submap_seen=$($HYP binds 2>/dev/null | awk '
+  /^bind$/ { blk = "" ; inblk = 1 }
+  inblk    { blk = blk $0 "\n" }
+  /^$/ && inblk { if (blk ~ /api-submap-probe/) printf "%s", blk ; inblk = 0 }' |
+  sed -n 's/^\tsubmap: //p')
+[[ "$submap_seen" == "api-probe-map" ]] || { echo "FAIL: #:submap did not reach the bind metadata (hyprctl says [$submap_seen])"; FAILED=1; }
+
+# #:submap-reset IS NOT ASSERTED HERE, deliberately — and this is the one place
+# to say why. The reset is applied by the COMPOSITOR, inside invokeBind, after
+# the bind's action returns; nothing on the Scheme side can reach it, and
+# hyprctl prints no submapReset field, so it is invisible to this harness. Only
+# a REAL keypress that reaches the keybind manager would exercise it, and a
+# synthetic one is dropped before dispatch (measured — see the header of
+# t-keydeliver.sh for the full account). Asserting it here would mean asserting
+# something the harness cannot see, which is worse than not asserting it. It is
+# exercised by hand in a live session.
+
 ok '(hl-submap-exit!)'
 val '(hl-current-submap)' '""'
 
@@ -1078,8 +1119,8 @@ ok '(let ((g (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-res
 ok '(let ((g (hl-gesture-add! #:fingers 9 #:direction "up" #:action (hl-make-resize-gesture)))) (and (hl-gesture-remove! g) (hl-gesture? (hl-gesture-add! #:fingers 9 #:direction "vertical" #:action (hl-make-resize-gesture)))))'
 # errors
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:bogus_field 1))))')
-# Guile's define* raises keyword-argument-error without naming the keyword
-[[ "$bad_gest" == *"nrecognized keyword"* ]] || { echo "FAIL: unknown gesture field not rejected => [$bad_gest]"; FAILED=1; }
+# NAMED, not just rejected — see the note on the equivalent notification case
+[[ "$bad_gest" == *"#:bogus_field"* ]] || { echo "FAIL: unknown gesture field not NAMED in the error => [$bad_gest]"; FAILED=1; }
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 4 #:direction "up"))))')
 [[ "$bad_gest" == *"action is required"* ]] || { echo "FAIL: missing gesture action not rejected => [$bad_gest]"; FAILED=1; }
 bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-gesture-add! #:fingers 4 #:direction "up" #:action "workspace"))))')

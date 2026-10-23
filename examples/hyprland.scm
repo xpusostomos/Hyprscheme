@@ -12,13 +12,14 @@
 (hl-bind-add! (hl-kbd "s-q") (lambda () (hl-window-close!))
          #:description "Close the focused window")
 
-;; a submap: binds inside are scoped to it, no modifiers needed
+;; a submap: name it ON the bind, no modifiers needed inside
 (hl-bind-add! (hl-kbd "s-g") (lambda () (hl-submap-activate! "resize")))
-(hl-submap "resize"
-  (lambda ()
-    (hl-bind-add! (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 #:relative #t)) #:repeat #t)
-    (hl-bind-add! (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 #:relative #t))  #:repeat #t)
-    (hl-bind-add! (hl-kbd "g")     (lambda () (hl-submap-exit!)))))
+(hl-bind-add! (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 #:relative #t))
+              #:submap "resize" #:repeat #t)
+(hl-bind-add! (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 #:relative #t))
+              #:submap "resize" #:repeat #t)
+(hl-bind-add! (hl-kbd "g")     (lambda () (hl-submap-exit!))
+              #:submap "resize")
 
 ;; ---- events ---------------------------------------------------------------
 (hl-window-open-notification-add! (lambda (w)

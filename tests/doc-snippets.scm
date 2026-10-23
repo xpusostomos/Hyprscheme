@@ -41,7 +41,10 @@
   (and (pair? form)
        (let ((s (symbol->string (car form))))
          (or (string-suffix? "-add!" s)
-             (memq (car form) '(hl-submap hl-repeat hl-after))))))
+             ;; hl-submap used to be here: it registered binds through its
+             ;; thunk. The submap is a per-bind #:submap argument now, so the
+             ;; bind itself is the registrar and "-add!" already matches it.
+             (memq (car form) '(hl-repeat hl-after))))))
 
 (define (snippet-definitions! forms)
   ;; a snippet's defines are what its thunk closes over, so they go in first

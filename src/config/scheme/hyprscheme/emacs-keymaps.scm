@@ -6,7 +6,7 @@
 ;;
 ;; It is a composer, like (hyprscheme extras) — the second module allowed to
 ;; reach across families — because key sequences have to register binds
-;; (hl-bind-add!), scope them (hl-submap) and switch between them
+;; (hl-bind-add!), scope them to a submap (#:submap) and switch between them
 ;; (hl-submap-activate!). A family may import only the kernel and core.
 ;;
 ;; Everything emacs-shaped lives here: the notation (hl-kbd/hl-key and the
@@ -328,14 +328,14 @@ mode."
       (when (or want-g want-c)
         (when want-g (hash-set! hl--exit-bound submap #t))
         (when want-c (hash-set! hl--catchall-bound submap #t))
-        (hl-submap submap
-                   (lambda ()
-                     (when want-g
-                       (hl-bind-add! (hl-kbd "s-G") (lambda () (hl-submap-activate! target))))
-                     (when want-c
-                       (hl-bind-add! (hl-kbd "catchall")
-                                     (lambda () (hl-submap-activate! target))
-                                     #:description "unmatched key: abandon the sequence"))))))))
+        (when want-g
+          (hl-bind-add! (hl-kbd "s-G") (lambda () (hl-submap-activate! target))
+                        #:submap submap))
+        (when want-c
+          (hl-bind-add! (hl-kbd "catchall")
+                        (lambda () (hl-submap-activate! target))
+                        #:submap submap
+                        #:description "unmatched key: abandon the sequence"))))))
 
 (define* (define-key! submap sequence thunk #:key (top-level #t)) "Bind a key
 SEQUENCE to THUNK inside SUBMAP — emacs' define-key, scoped to a map.
@@ -378,22 +378,37 @@ removed again with hl-unbind!."
           #f
         (let ((chord (car remaining)))
           (if (null? (cdr remaining))
-              ;; the action: run it, then leave the chain however it ends — on
-              ;; return OR on raise, so a throwing action cannot strand you
-              (hl-submap current
-                         (lambda ()
-                           (hl-bind-add! chord
-                                         (lambda ()
-                                           (dynamic-wind (lambda () #t)
-                                                         thunk
-                                                         (lambda () (hl-submap-activate! exit)))))))
+              ;; the action: run it, then leave the chain. #:submap scopes the
+              ;; bind; the EXIT is done here in Scheme rather than declared as
+              ;; #:submap-reset, and that is a deliberate choice:
+              ;;
+              ;;   - the compositor applies #:submap-reset inside invokeBind,
+              ;;     AFTER the thunk — correct in a live session, but invisible
+              ;;     to this repo's harness, which fires a bind by calling its
+              ;;     thunk (hl--bind-fire-rec). Two real tests in t-keydesc.sh
+              ;;     ("#:top-level #f returns to the base submap" and "#:top-level
+              ;;     #t ejects to the default map") assert the post-action submap
+              ;;     by firing the action, so moving the exit to C++ would have
+              ;;     quietly turned them into tests that cannot fail — which is
+              ;;     worse than no test, by this tree's own rule.
+              ;;   - it also keeps the two paths in agreement: dynamic-wind
+              ;;     restores on RAISE as well as on return, which is what stops
+              ;;     a throwing action stranding you inside the chord.
+              ;;
+              ;; #:submap-reset stays a public option for configs that want the
+              ;; declarative form (see hl-bind-add!, and submaps.md).
+              (hl-bind-add! chord
+                            (lambda ()
+                              (dynamic-wind (lambda () #t)
+                                            thunk
+                                            (lambda () (hl-submap-activate! exit))))
+                            #:submap current)
               (let ((next (hl--expand current chord)))
                 (unless (hash-ref hl--submaps-made next)
                   (hash-set! hl--submaps-made next #t)
                   ;; the prefix key, in the enclosing submap, enters the next
-                  (hl-submap current
-                             (lambda ()
-                               (hl-bind-add! chord (lambda () (hl-submap-activate! next)))))
+                  (hl-bind-add! chord (lambda () (hl-submap-activate! next))
+                                #:submap current)
                   (hl--ensure-exit! next exit #t))
                 (loop (cdr remaining) next))))))))   ; the record propagates up
 

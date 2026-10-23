@@ -191,7 +191,6 @@ hl-state-keys
 hl-state-ref
 hl-state-remove!
 hl-state-set!
-hl-submap
 hl-submap!
 hl-submap-activate!
 hl-submap-exit!

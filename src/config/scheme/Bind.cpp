@@ -29,10 +29,20 @@ namespace Config::Scheme {
 
     static Keybinds::SBindResult fireSchemeBindRec(SCM record); // defined below
 
-    // submap registration context: binds created while set are scoped to it
-    static std::string                g_regSubmap;
-
-    static std::string                g_regSubmapReset;
+    // THE SUBMAP IS A PER-BIND ARGUMENT, and there is no registration context
+    // any more. It used to be two globals here (g_regSubmap/g_regSubmapReset)
+    // that hl-submap set for the duration of a thunk, so a bind inherited
+    // whatever name happened to be ambient while it was created. That matched
+    // how the .conf format works (a `submap = resize` directive that changes the
+    // parser's state) and how the Lua binding does it, but it made the name
+    // unexpressible: neither language could say "this ONE bind goes in resize".
+    //
+    // Nothing in the compositor required that. CBind::make takes the whole
+    // SBindMetadata, and Hyprland's LuaBindingsToplevel.cpp fills .submap from
+    // its manager — it is a plain per-bind field all the way down. So the
+    // ambient pair is gone, hl-bind-add! takes #:submap / #:submap-reset, and
+    // this file writes the arguments straight into the metadata. "" is the
+    // default map, as it always was (setSubmap treats "" and "reset" alike).
 
     // ---- bind handles ---------------------------------------------------------
     // A bind's Scheme handle is an hl-bind RECORD (token list + thunk). The
@@ -79,8 +89,11 @@ namespace Config::Scheme {
     }
 
     // called from Scheme as a gsubr; flags are raw eBindFlags bits,
-    // assembled Scheme-side from the options plist
-    static int hlSchemeBind(SCM record, SCM tokens, int flags, const char* desc, SCM devices) {
+    // assembled Scheme-side from the options plist. SUBMAP and SUBMAP_RESET are
+    // the bind's own (see the note above) — "" for both means the default map
+    // with no follow-up.
+    static int hlSchemeBind(SCM record, SCM tokens, int flags, const char* desc, SCM devices,
+                            const char* submap, const char* submapReset) {
         if (!g_up)
             return -1;
 
@@ -98,8 +111,8 @@ namespace Config::Scheme {
         args.metadata.argument   = bindTag(record);
         if (desc && *desc)
             args.metadata.description = desc;
-        args.metadata.submap      = g_regSubmap;
-        args.metadata.submapReset = g_regSubmapReset;
+        args.metadata.submap      = submap ? submap : "";
+        args.metadata.submapReset = submapReset ? submapReset : "";
         // devices arrive as a real list of name strings; a non-list element
         // or a non-string device is rejected
         for (SCM p = devices; scm_is_pair(p) && p != SCM_EOL; p = scm_cdr(p)) {
@@ -260,22 +273,6 @@ namespace Config::Scheme {
 
         const auto submap = std::string(Keybinds::mgr()->currentSubmap());
         return scm_from_utf8_stringn(submap.c_str(), submap.size());
-    }
-
-    static SCM submapCtx() {
-        std::vector<SCM> roots;
-        SCM              name = scm_from_utf8_stringn(g_regSubmap.c_str(), g_regSubmap.size());
-        hl::pin(name, roots);
-        SCM reset = scm_from_utf8_stringn(g_regSubmapReset.c_str(), g_regSubmapReset.size());
-        hl::pin(reset, roots);
-        SCM pair = scm_cons(name, reset);
-        hl::unpin(roots);   // the cons cell holds both, and is returned
-        return pair;        // (name . reset)
-    }
-
-    static void setSubmapCtx(const char* name, const char* reset) {
-        g_regSubmap      = name ? name : "";
-        g_regSubmapReset = reset ? reset : "";
     }
 
     static int enterSubmap(const char* name) {
@@ -723,8 +720,6 @@ namespace Config::Scheme {
         hl::bind<hlSchemeEventCancel>("hl--c-event-cancel");
         hl::bind<hlSchemeEventActive>("hl--c-event-active");
         hl::bind<hlSchemeCurrentSubmap>("hl--c-current-submap");
-        hl::bind<submapCtx>("hl--c-get-submap-ctx");
-        hl::bind<setSubmapCtx>("hl--c-set-submap-ctx");
         hl::bind<enterSubmap>("hl--c-enter-submap");
         hl::bind<hlSchemeKeyRegularise>("hl--c-key-regularise");
         hl::bind<hlSchemeKeyLogicalToPhysical>("hl--c-key-logical-to-physical");

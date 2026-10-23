@@ -50,7 +50,7 @@
            hl--c-gesture-maker-move hl--c-gesture-maker-resize
            hl--c-gesture-maker-scroll-move hl--c-gesture-maker-special
            hl--c-gesture-maker-workspace-swipe hl--c-gesture-remove
-           hl--c-get-submap-ctx hl--c-global hl--c-group-add
+           hl--c-global hl--c-group-add
            hl--c-group-alive hl--c-group-current hl--c-group-current-idx
            hl--c-group-cycle hl--c-group-denied hl--c-group-index
            hl--c-group-lock hl--c-group-locked hl--c-group-members
@@ -103,7 +103,7 @@
            hl--c-rule-enabled hl--c-rule-match hl--c-rule-set-enabled
            hl--c-run-finalizers hl--c-scheduled-prop-refresh-immediately
            hl--c-screenshare-listen hl--c-send-key-state
-           hl--c-send-shortcut hl--c-set-submap-ctx hl--c-spring-curve-add
+           hl--c-send-shortcut hl--c-spring-curve-add
            hl--c-state-get
            hl--c-state-set hl--c-submap-listen hl--c-timer
            hl--c-timer-cancel hl--c-timer-enabled hl--c-timer-set-enabled
@@ -173,7 +173,8 @@
            hl--guarded-run hl--layout-call hl--layout-msg
            hl--layout-recalculate hl--layout-resize
            hl--layout-window-close hl--layout-window-open
-           hl--now-ms hl--plist-cdr hl--plist-get hl--plist-has? hl--print-exception
+           hl--keyword-error-name hl--now-ms hl--plist-cdr hl--plist-get
+           hl--plist-has? hl--print-exception
            hl--already-reported? hl--config-errors hl--loaded-files
            hl--notify-error hl--reported hl--ready hl--report
            hl--load-config hl--report-config hl--report-config-ok hl--report-watchdog
@@ -251,6 +252,31 @@
 ;; its timeout as a finished message ("watchdog: eval abandoned after 5000ms")
 ;; rather than as a condition, and quoting it would both read wrong and change a
 ;; log line the exit test matches on.
+;; THE ONE CONDITION THAT DROPS ITS OWN SUBJECT. A `keyword-argument-error`
+;; exists to say "you passed a keyword I do not take" — and it is the one error
+;; whose message names nothing: Guile raises it with EMPTY irritants, putting the
+;; keywords in the `data' slot instead (ice-9/optargs.scm:350 —
+;; `(scm-error 'keyword-argument-error #f "Unrecognized keyword" '() args-tail)').
+;; So a caller that formats the message against the IRRITANTS, as
+;; hl--print-exception does for every other error, prints exactly "Unrecognized
+;; keyword" and nothing else.
+;;
+;; That is not hypothetical: it cost a real diagnosis. A config using a keyword
+;; against machinery that predated it raised this, and the banner the user
+;; actually looks at said "Unrecognized keyword" with no clue which one — so the
+;; answer, that the keyword was one that did not exist in the installed copy, was
+;; invisible from the one surface meant to tell them.
+;;
+;; exception-args for a throw is (subr message irritants data), so the DATA is
+;; the LAST element; for this condition it is the leftover argument list, whose
+;; car is the offending keyword. Answers #f for anything else, so the caller can
+;; use it as a cond test.
+(define (hl--keyword-error-name e)
+  (let ((args (guard (e2 (#t #f)) (exception-args e))))
+    (and (pair? args)
+         (let ((data (last args)))
+           (and (pair? data) (keyword? (car data)) (car data))))))
+
 (define (hl--print-exception e port)
   (if (string? e)
       (display e port)
@@ -260,6 +286,9 @@
               ((and (pair? irr) (string-index msg #\~))
                (guard (e3 (#t (display msg port)))
                  (apply simple-format port msg irr)))
+              ;; the keyword the message cannot carry — see above
+              ((hl--keyword-error-name e)
+               => (lambda (kw) (format port "~a: ~a" msg kw)))
               (else (display msg port))))))
 
 ;; ---- reporting an error to the user -------------------------------------------

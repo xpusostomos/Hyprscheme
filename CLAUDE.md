@@ -748,6 +748,24 @@ back the raw `"~A: ~S"` template with the parts as irritants — printing it
 unformatted says `~A: ~S` and names nothing. `tools/syntax-check.scm` did
 exactly that, which is how a real read error once came out as noise.
 
+**AND THE IRRITANTS ARE NOT THE ONLY PLACE THE PARTS LIVE.** Formatting against
+them is right for almost every condition and silently wrong for one:
+**`keyword-argument-error` puts the keywords in the DATA slot and passes EMPTY
+irritants** (`ice-9/optargs.scm:350` — `(scm-error 'keyword-argument-error #f
+"Unrecognized keyword" '() args-tail)`). So a printer that formats the message
+against the irritants — as `hl--print-exception` did — emits the bare
+`"Unrecognized keyword"` and drops the one thing the error exists to say. That
+is not theoretical: a config using `#:submap` against a machinery copy that
+predated the option raised it, and the banner the user actually looks at named
+nothing, so the cause was invisible from the one surface meant to reveal it.
+`hl--keyword-error-name` reads `(last (exception-args e))` and is used as a
+`cond` test in the printer; `t-api` asserts the keyword is NAMED (not merely
+that the call was rejected), and **both assertions were verified to fail on the
+old printer** — they printed `["Unrecognized keyword"]`, which is the bug.
+**The general rule: when an error message is a fixed string, the part that
+identifies the problem is somewhere else in the condition — go and find it
+rather than assuming the message is self-contained.**
+
 **AN ERROR IS NOT JUST A LOG LINE — and the split is the compositor's own.**
 Errors went only to stderr, and the compositor log does not carry `[scheme]`
 lines in every session (measured: zero in a live one), so a raising bind thunk
@@ -957,10 +975,44 @@ that `fullscreen-handler` was one of them. Neither was true:
   three booleans — as the gesture makers now take it. The old positional
   spellings are refused, not ignored: a stale config fails loudly instead of
   meaning the opposite. What remains of §2.11 is a separate question — the
-  genuine OPTIONAL VALUES (`hl-state-ref`'s default, `hl-submap`'s NEXT,
+  genuine OPTIONAL VALUES (`hl-state-ref`'s default,
   `hl-group-add!`'s index) and the
   optional-*window* pair (`hl-window-send-shortcut!`, `-send-key-state!`),
   neither of which is a flag wearing the wrong clothes.
+- **A submap is a NAME ON A BIND — there is no submap object, and no wrapper
+  around bind creation any more.** `hl-bind-add!` takes `#:submap NAME` (`""`,
+  the default map) and `#:submap-reset NAME` (where to go after the action).
+  This is worth stating as a standing fact because the old shape looked like a
+  container and was not one:
+  - **In the compositor**, `submap` is a `std::string` field on `SBindMetadata`
+    (`Hyprland/src/keybinds/Bind.hpp`). A "submap" exists if and only if some
+    bind carries that name — `CRegistry::hasSubmap` is an `any_of` over the flat
+    bind vector comparing strings, which is also why entering a submap no bind
+    carries is REFUSED ("submap doesn't exist (wasn't registered!)"). Runtime
+    state is one global `m_currentSubmap`, and matching is
+    `m_metadata.submap != ctx.submap` — exact equality, no hierarchy, no
+    fallthrough. Nothing in `src/keybinds/` creates a submap; `CBind::make`
+    just copies the metadata struct it is handed.
+  - **The old `hl-submap NAME THUNK` wrapper** was a `dynamic-wind` that set a
+    C++ global (`g_regSubmap`) for the thunk's duration so binds created inside
+    inherited the name. That mirrored the `.conf` format (`submap = resize` is a
+    parser-state directive) and the Lua binding (`hl.define_submap` saves and
+    restores `mgr->m_currentSubmap`), but it made the name UNEXPRESSIBLE: no
+    language could say "this ONE bind goes in resize". Deleted, along with
+    `hl--c-get-submap-ctx` / `hl--c-set-submap-ctx` and both globals.
+  - **`define-key!` in emacs-keymaps is unaffected** — it always set the name
+    per bind conceptually; it now passes `#:submap` instead of wrapping each
+    `hl-bind-add!` in an `hl-submap` thunk. Its post-action exit is still done
+    in **Scheme** (a `dynamic-wind` around the thunk) rather than declared as
+    `#:submap-reset`, deliberately: the compositor applies a reset inside
+    `invokeBind`, AFTER the thunk, so the harness — which fires a bind by
+    calling its thunk (`hl--bind-fire-rec`) — cannot see it, and two real tests
+    in `t-keydesc.sh` assert the post-action submap that way. Moving the exit to
+    C++ would have made them tests that cannot fail.
+  - `#:submap-reset` is skipped by the compositor when the action switched
+    submap itself (`SUBMAP_BEFORE == currentSubmap()`), and it still fires when
+    the action RAISED, because `hl::call1` contains the error before
+    `invokeBind` reaches its reset check.
 - Binds validate exclusivity (long-press/release vs repeat conflicts)
   at the Scheme level; hyprland does not.
 - Documentation: every public function is a plain `define` whose body
