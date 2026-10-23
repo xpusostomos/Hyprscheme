@@ -595,6 +595,43 @@ the custom-layout entry points. `Handles.*` is the object model,
 
 ### THE BOUNDARY — a gsubr mirrors C++; policy lives in Scheme
 
+**THE BARE-MINIMUM-IN-C RULE (Chris, standing): *C++ exists for ONE reason —
+to reach a Hyprland C++ API that Scheme cannot. Anything else belongs in
+Scheme.*** A `.cpp` edit that is not touching a compositor API is a smell, and
+the answer to "where should this live?" is Scheme until proven otherwise.
+
+It is not a style preference; the code has twice been made worse by ignoring it,
+and both times the cost was a *bug*, not untidiness:
+
+- **The config loader.** `hl::evalFile` in `Guile.cpp` loaded the config in C
+  and caught errors with `scm_c_catch`, writing them to fd 2 from C. But a
+  config with a SYNTAX error never reaches evaluation — it dies in the READER —
+  so no Scheme handler ran: `hl--config-errors` stayed empty and the persistent
+  config banner, the one surface the user actually looks at, never appeared.
+  A config that RAISED was caught, which is exactly why it survived so long.
+  Loading is now `hl--load-config` in the kernel, where ONE `guard` covers
+  reader and evaluator alike. `tests/t-config.sh` pins it and was **verified to
+  fail on the old code** (`hl--config-errors=0`).
+- **The inotify watcher.** The host kept its own fd, watched the config's
+  directory and drained events in `drainWatch()`. Once `(hyprscheme watch)`
+  existed — fed by `%load-hook`, so it knows every file the config *actually*
+  loaded, a superset of what a directory watch can guess — the two ran together
+  and **every edit reloaded the config twice**. Deleted, along with
+  `<sys/inotify.h>`. `t-zzzz-exit` noticed, by counting duplicate log lines.
+
+So when the load path was moved to Scheme, `Guile.cpp` lost 22 lines and gained
+none. **There is deliberately no file-loading entry point in `Guile.hpp`** —
+the host calls `hl::call1(hl::globalRef("hl--load-config"), path)`, which
+contains errors exactly like every other call, and loads `init.scm` through
+`scm_c_public_ref("guile", "primitive-load")` for the same reason: loading a
+file is a Guile procedure, not a compositor API.
+
+**The one thing that IS C++ is the event loop.** `hl--c-on-readable` exists
+because waiting on an fd means `doOnReadable`, and a Scheme read loop on the
+interpreter's thread would block the thread that draws the screen. That is the
+test to apply to anything new: *does this need the compositor, or does it just
+need to be somewhere?*
+
 **A `hl--c-*` gsubr is a thin mirror of the C/C++ call it exposes: the same
 shape, with just enough added to make it a sensible Scheme call.** It converts
 arguments in and the result out, and does nothing else. Every *decision* — which

@@ -176,7 +176,7 @@
            hl--now-ms hl--plist-cdr hl--plist-get hl--plist-has? hl--print-exception
            hl--already-reported? hl--config-errors hl--loaded-files
            hl--notify-error hl--reported hl--ready hl--report
-           hl--report-config hl--report-config-ok hl--report-watchdog
+           hl--load-config hl--report-config hl--report-config-ok hl--report-watchdog
            hl--target-env
            hl--timer-fire hl--timer-interval hl--timer-thunk
            hl--watchdog-ms hl--wd-aborted hl--wd-alarm hl--wd-enter
@@ -384,6 +384,44 @@
 (define (hl--report-config-ok)
   (set! hl--config-errors '())
   (guard (e (#t #f)) (hl--c-error-overlay "")))
+
+;; ---- loading THE CONFIG: the host calls THIS, not a C loader -------------------
+;; The host used to load the config through hl::evalFile in C++, which caught
+;; errors with scm_c_catch and wrote them to fd 2 from C. That is exactly the
+;; kind of thing that does not belong there (see the note in Guile.hpp/CLAUDE.md:
+;; C++ should only be where the compositor's own API is), and it cost a visible
+;; bug: a config with a SYNTAX error dies in the READER, so it never reached any
+;; Scheme handler — the C handler wrote a line to a log nobody reads, and the
+;; config-error banner never fired. Measured: hl--config-errors stayed empty for
+;; a file with an unbalanced paren.
+;;
+;; ONE GUARD COVERS BOTH KINDS, which was verified before this was written: a
+;; read error IS catchable by a Scheme guard around primitive-load, so a syntax
+;; error and an evaluation error arrive in the same place. That is also the shape
+;; the scripting API uses — one guarded pcall around the whole config
+;; (ConfigManager.cpp:717) — so this is parity as well as tidiness.
+;;
+;; IT MUST NOT BE hl-load. That one aims at the generation (the right thing for a
+;; file a config pulls in) and reports through hl--report (a runtime error, i.e.
+;; a notification). This aims at whatever module the HOST has made current —
+;; which is the generation — and reports through hl--report-config, the banner.
+;; Same load, two different things to say about a failure.
+;;
+;; NOT used for init.scm, which is loaded directly by the host: init.scm is what
+;; DEFINES this function, so it cannot be loaded through it. Its failure is a
+;; PLUGIN bug rather than a config error, so the banner would be the wrong
+;; surface anyway.
+;;
+;; Answers #t when the load finished and #f when it raised. The host uses that
+;; only to decide whether to clear the banner. (Guile's primitive-load returns
+;; #<unspecified> on success, which is TRUTHY but not #t, so this normalises it —
+;; a bare (and ok ...) would work, but returning a real boolean is what the
+;; host's scm_is_true asks for and what a reader expects.)
+(define (hl--load-config path)
+  (let ((ok (guard (e (#t (hl--report-config e) #f))
+              (primitive-load path)
+              #t)))
+    (and ok #t)))
 
 ;; ---- wall clock --------------------------------------------------------------
 ;; Milliseconds since the epoch, used for the watchdog's budget (a wall-clock

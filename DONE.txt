@@ -761,6 +761,47 @@ and TODO.txt's archived sections.)
   also avoids a keyword parser on a path called from inside guards. (`take` IS
   available: the kernel imports srfi-1.)
 
+== THE LOAD PATH LEFT C, AND THE DUPLICATE WATCHER WENT WITH IT ==
+
+Chris's rule, now recorded in CLAUDE.md under THE BOUNDARY: **"the bare
+minimum in C, it should really only be when we have to talk to Hyprland's
+C++ apis, nothing else should be in C."**
+
+- THE CONFIG IS LOADED FROM SCHEME. `hl::evalFile` (Guile.cpp) is DELETED,
+  along with `loadFileThunk`/`loadFileHandler`, and `Guile.hpp` has a note
+  saying why there is deliberately no file-loading entry point there. The host
+  calls `hl::call1(hl::globalRef("hl--load-config"), path)`; `init.scm` goes
+  through `scm_c_public_ref("guile", "primitive-load")` for the same reason —
+  loading a file is a Guile procedure, not a compositor API, and `hl::call1`
+  already contains errors like every other call.
+- THE BUG IT FIXED (the reason this was not merely tidiness): the C loader
+  caught errors with `scm_c_catch` and wrote them to fd 2 FROM C. A config with
+  a SYNTAX error dies in the READER, so no Scheme handler ever ran:
+  `hl--config-errors` stayed empty and the persistent banner never appeared. A
+  config that RAISED was caught — which is why it survived so long. `hl--load-config`
+  (kernel.scm) is one `guard` over `primitive-load`, covering reader and
+  evaluator alike.
+- THE SECOND WATCHER IS GONE. The host's own inotify (g_watchFd, g_watchDir,
+  g_configReal, drainWatch/armWatch/setupWatch, `#include <sys/inotify.h>`) is
+  deleted. It watched the config's DIRECTORY and guessed; `(hyprscheme watch)`
+  is fed by `%load-hook` and knows every file the config ACTUALLY loaded. Both
+  were live, so every edit reloaded twice. The only fd work left in C++ is
+  `hl--c-on-readable` — the event loop, which is the thing Scheme cannot do.
+- NET C++: **−54 lines** (Host.cpp −38, Guile.cpp −22, Guile.hpp +6) and every
+  added line is a comment. `make check` 7/7.
+- TESTS: `t-config.sh` gains the SYNTAX-error case — the reader half that
+  nothing else covered — asserting the banner rises, carries the reader's own
+  message ("unexpected end of input"), and CLEARS when the file is fixed.
+  **Verified to fail on the old code**: with the C loader restored it reports
+  `hl--config-errors=0`, the exact symptom. `t-zzzz-exit` counted duplicate log
+  lines and is how the double-reload was caught; the new deliberate error is in
+  its allowance list (and the log now shows ONE line, not two).
+- DOCS: core.md's Errors section was STALE — it still said errors are "written
+  to the compositor log", the old behaviour. Rewritten to describe the two
+  surfaces (notification at runtime, banner at load, with dedup and clearing),
+  plus a new "Reloading" section for the auto-reload and `hl-loaded-files`.
+- 20/20 on the suite.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

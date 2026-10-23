@@ -93,7 +93,6 @@
 // config errors, as opposed to the notifications it uses for runtime ones
 #include <src/errorOverlay/Overlay.hpp>
 #include <xkbcommon/xkbcommon.h>
-#include <sys/inotify.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #include <cstring>
@@ -175,11 +174,13 @@ namespace Config::Scheme {
     using namespace Internals;
 
     static std::string                g_configPath;
-    // the config as the filesystem sees it: symlinks resolved, so the watch and
-    // the event match both land in the directory the file really lives in
-    static std::string                g_configReal;
-    static std::string                g_watchDir;             // the directory actually watched
-    static int                        g_watchFd       = -1;    // inotify fd; dup'd into event loop waiters
+    // NOTE: the host keeps NO inotify state of its own. Watching for config
+    // edits used to live here (an fd, a watched directory, a drain loop), and
+    // it was removed once (hyprscheme watch) existed: the interpreter reports
+    // every file the config actually loaded (%load-hook), which is a SUPERSET of
+    // what a directory watch could guess at, and keeping both made every edit to
+    // a split config reload TWICE. The only fd work left in C++ is
+    // hl--c-on-readable, which is the event loop and nothing else.
     // scheme timers: C++ owns the CEventLoopTimer, Scheme owns the closure
     // (the handler closures travel inside the connections, locked)
     // event subscriptions: C++ owns the listener handles (dropping one
@@ -380,11 +381,33 @@ namespace Config::Scheme {
         if (!buildGeneration())
             return;
 
-        if (!hl::evalFile(g_configPath.c_str())) {
+        // THE CONFIG IS LOADED FROM SCHEME, through hl--load-config. NOT
+        // through C, and NOT through hl-load. Three reasons, each a decision
+        // rather than a preference:
+        //
+        //   - loading a file is something Guile does natively, so per the
+        //     boundary rule (CLAUDE.md, "THE BOUNDARY") C++ has no business
+        //     implementing one. There is no compositor API here to bridge.
+        //   - the C loader COST a real bug. It caught errors with scm_c_catch
+        //     and wrote them to fd 2 from C, so a config with a SYNTAX error —
+        //     which dies in the READER — never reached a Scheme handler at all:
+        //     hl--config-errors stayed empty and the persistent banner, the
+        //     thing the user actually sees, never fired. (Measured.)
+        //   - one guard in hl--load-config covers read errors and evaluation
+        //     errors alike, which is the shape the scripting API uses too (one
+        //     guarded pcall around the whole config).
+        //
+        // The Scheme side loads into whatever module is CURRENT, which is the
+        // generation buildGeneration just made. hl-load, by contrast, names the
+        // generation explicitly — that is the one for a file a config pulls in
+        // from inside itself.
+        const bool loaded = scm_is_true(hl::call1(hl::globalRef("hl--load-config"),
+                                                  scm_from_utf8_string(g_configPath.c_str())));
+
+        if (!loaded) {
             LOG(Log::ERR, "[scheme] failed to load {}", g_configPath);
-            // the error banner is raised by hl--report-config, from the Scheme
-            // side, as the load fails — one line per failing file, accumulating
-            // (see kernel.scm)
+            // the banner was raised by hl--report-config while the load failed
+            // — one line per failing file, accumulating (see kernel.scm)
         } else {
             LOG(Log::INFO, "[scheme] loaded {}", g_configPath);
             // THE CONFIG LOADED CLEANLY, so take down any banner left by the
@@ -398,82 +421,10 @@ namespace Config::Scheme {
         }
     }
 
-    static void drainWatch() {
-        alignas(struct inotify_event) char buf[4096];
-        bool                               dirty = false;
-
-        while (true) {
-            const ssize_t n = read(g_watchFd, buf, sizeof(buf));
-            if (n <= (ssize_t)sizeof(struct inotify_event))
-                break;
-
-            for (ssize_t off = 0; off + (ssize_t)sizeof(struct inotify_event) <= n;) {
-                const auto*       ev = reinterpret_cast<const struct inotify_event*>(&buf[off]);
-                const std::string named{ev->name, strnlen(ev->name, ev->len)};
-
-                // The config itself (resolved, so a symlinked config counts).
-                //
-                // NOT "any .scm beside it" any more. That heuristic existed
-                // because the host could not know what a config loaded — but the
-                // interpreter can, and (hyprscheme watch) now watches exactly the
-                // files it reported, wherever they live. Keeping the heuristic
-                // as well would fire a SECOND reload for every edit to a split
-                // config that sits beside hyprland.scm, which is the documented
-                // arrangement and so the common case.
-                const bool isConfig = !g_watchDir.empty() &&
-                                      (std::filesystem::path(g_watchDir) / named).string() == g_configReal;
-
-                if ((ev->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE)) && ev->len > 0 &&
-                    isConfig)
-                    dirty = true;
-                off += (ssize_t)sizeof(struct inotify_event) + ev->len;
-            }
-        }
-
-        if (dirty)
-            reloadScheme();
-    }
-
-    // event loop waiters are one-shot: re-arm after every wakeup.
-    static void armWatch() {
-        if (g_watchFd < 0 || !g_pEventLoopManager)
-            return;
-
-        g_pEventLoopManager->doOnReadable(CFileDescriptor(dup(g_watchFd)), [] {
-            drainWatch();
-            armWatch();
-        });
-    }
-
-    static void setupWatch() {
-        // RESOLVE SYMLINKS FIRST. Editing the target of a symlinked config (how
-        // a dotfiles manager lays one out) fires events in the TARGET's
-        // directory; watching the directory the symlink sits in never sees
-        // them, so the config appeared to reload only if you touched the
-        // symlink itself.
-        std::error_code ec;
-        const auto      real = std::filesystem::weakly_canonical(g_configPath, ec);
-        g_configReal = ec ? g_configPath : real.string();
-
-        g_watchDir = std::filesystem::path(g_configReal).parent_path().string();
-
-        g_watchFd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-        if (g_watchFd < 0)
-            return;
-
-        if (inotify_add_watch(g_watchFd, g_watchDir.c_str(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) < 0) {
-            close(g_watchFd);
-            g_watchFd = -1;
-            return;
-        }
-
-        armWatch();
-    }
-
     /*
         Arm an event-loop waiter on FD that calls THUNK on each wakeup and
-        re-arms: waiters here are one-shot. The fd is dup'd per arming, as
-        armWatch does, and the CFileDescriptor owns that copy.
+        re-arms: waiters here are one-shot. The fd is dup'd per arming and the
+        CFileDescriptor owns that copy.
     */
     static void armReader(int fd, SCM thunk) {
         g_pEventLoopManager->doOnReadable(CFileDescriptor(dup(fd)), [fd, thunk] {
@@ -987,7 +938,21 @@ namespace Config::Scheme {
         if (!hl::setModuleVariable(kernel, "hl--ready", SCM_BOOL_F))
             LOG(Log::ERR, "[scheme] could not clear hl--ready");
 
-        if (!hl::evalFile(schemePath("init.scm").c_str())) {
+        // LOADING init.scm IS JUST A CALL TO A GUILE PROCEDURE, so it goes
+        // through the same contained-call bridge as everything else and there is
+        // no loader in C++ at all. Reached via scm_c_public_ref rather than by
+        // name, because init.scm is what DEFINES the machinery — a lookup in the
+        // generation would find nothing yet — whereas `primitive-load` is
+        // Guile's own and always there.
+        //
+        // Its failure is a PLUGIN bug, not a config error, so the config banner
+        // is the wrong surface for it. Reached before the generation is swapped
+        // in, which is exactly why the host can keep the previous one.
+        const bool booted = scm_is_true(hl::call1(
+            scm_c_public_ref("guile", "primitive-load"),
+            scm_from_utf8_string(schemePath("init.scm").c_str())));
+
+        if (!booted) {
             LOG(Log::ERR, "[scheme] init.scm failed to load");
             scm_set_current_module(prevModule);
             return false;
@@ -1118,9 +1083,6 @@ namespace Config::Scheme {
         }
         LOG(Log::INFO, "[scheme] config: {}", g_configPath);
 
-        // watch the file for edits (skipped during --verify: no event loop yet)
-        if (g_pEventLoopManager)
-            setupWatch();
         reloadScheme();
     }
 }

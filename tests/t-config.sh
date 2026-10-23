@@ -93,3 +93,45 @@ done
 # loading a file that no longer exists logs an error, which t-zzzz-exit counts
 sed -i '$ d' "$REAL"
 sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' "$REAL"
+
+# ---- a SYNTAX error in the config raises the BANNER ---------------------------
+# THE BUG THIS PINS. The config used to be loaded by a C loader (hl::evalFile in
+# Guile.cpp), which caught the error with scm_c_catch and wrote it to fd 2 FROM
+# C. A config with a syntax error never reaches EVALUATION at all — it dies in
+# the READER — so no Scheme handler ever ran: hl--config-errors stayed EMPTY and
+# the persistent banner the user actually looks at never appeared. A config that
+# RAISES (an unbound variable) IS caught, which is why the bug survived so long:
+# the two failures go through different code, and only the raising one worked.
+#
+# The load now runs through hl--load-config in Scheme, where ONE guard covers the
+# reader and the evaluator alike. This asserts the reader half end to end, which
+# nothing else does — a file that LOADS and then raises is a different path.
+okv '(length hl--config-errors)' '0' 'no config errors before the broken config'
+
+# an unbalanced paren: the reader dies partway through the file
+printf '\n(hl-state-set! (quote syntax-marker) 1\n' >> "$REAL"
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(length hl--config-errors)')
+  [[ "$out" != "0" ]] && break
+  sleep 0.5
+done
+[[ "$out" != "0" ]] || { echo "a SYNTAX error in the config did not raise the banner (hl--config-errors=$out)"; exit 1; }
+
+# ...and the banner carries the READER'S OWN MESSAGE, which is the only part that
+# makes it actionable — "your scheme config has errors" with nothing under it
+# would be a banner that tells you nothing
+out=$($SCHEME '(let ((e hl--config-errors)) (if (pair? e) (car e) ""))')
+[[ "$out" == *"unexpected end of input"* ]] || { echo "the banner does not carry the reader's message (got [$out])"; exit 1; }
+
+# FIXING the file CLEARS it. A banner left up after the problem is fixed is worse
+# than no banner at all, so this half matters as much as the other.
+sed -i '$ d' "$REAL"
+sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' "$REAL"
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(length hl--config-errors)')
+  [[ "$out" == "0" ]] && break
+  sleep 0.5
+done
+[[ "$out" == "0" ]] || { echo "fixing the config did not clear the banner (hl--config-errors=$out)"; exit 1; }

@@ -22,8 +22,14 @@ namespace hl {
     // start the interpreter (idempotent; the compositor calls it once)
     void init();
 
-    // load a file of Scheme forms, contained: false when it failed
-    bool evalFile(const char* path);
+    // NOTE: there is deliberately NO file-loading entry point here. Loading a
+    // file is something Guile does natively, so it is NOT this layer's job —
+    // the host calls the Scheme-side loader with hl::call1(hl::globalRef(...)),
+    // which contains errors the same way every other call does. A bespoke C
+    // loader used to live here and cost a real bug: it caught errors with
+    // scm_c_catch and wrote them to fd 2 from C, so a config with a SYNTAX
+    // error — which dies in the READER — never reached a Scheme handler and the
+    // user-visible error banner never fired.
 
     // top-level binding lookup (in the CURRENT module, which is the generation
     // while one is being built — see Host.cpp's buildGeneration)

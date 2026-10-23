@@ -81,37 +81,15 @@ namespace hl {
     }
 
     // Errors must NEVER unwind through C++ frames (the compositor heap
-    // corrupts), so every call and load is contained here: report on fd 2 and
-    // return a falsy value. (Plugin LOG() output is swallowed by an upstream
-    // logger refactor, hence the direct write.)
+    // corrupts), so every call is contained here: report on fd 2 and return a
+    // falsy value. (Plugin LOG() output is swallowed by an upstream logger
+    // refactor, hence the direct write.)
     static SCM callHandler(void*, SCM tag, SCM args) {
         SCM  msg = scm_simple_format(SCM_BOOL_F, scm_from_locale_string("[scheme] call error: ~a ~a\n"), scm_list_2(tag, args));
         char* s   = scm_to_locale_string(msg);
         (void)!::write(2, s, strlen(s));
         free(s);
         return SCM_BOOL_F;
-    }
-
-    static SCM loadFileThunk(void* path) {
-        // UTF-8, not locale: this is a PATH, and under LC_ALL=C a locale
-        // conversion mangles anything non-ASCII in it
-        scm_primitive_load(scm_from_utf8_string((const char*)path));
-        return SCM_BOOL_T;
-    }
-
-    static SCM loadFileHandler(void*, SCM tag, SCM args) {
-        SCM  msg = scm_simple_format(SCM_BOOL_F, scm_from_locale_string("load error: ~a: ~a"), scm_list_2(tag, args));
-        char* s   = scm_to_locale_string(msg);
-        (void)!::write(2, "[scheme] ", 9);
-        (void)!::write(2, s, strlen(s));
-        (void)!::write(2, "\n", 1);
-        free(s);
-        return SCM_BOOL_F;
-    }
-
-    bool evalFile(const char* path) {
-        SCM ok = scm_c_catch(SCM_BOOL_T, loadFileThunk, (void*)path, loadFileHandler, NULL, NULL, NULL);
-        return scm_is_true(ok);
     }
 
     SCM makeModule(const char* name) {

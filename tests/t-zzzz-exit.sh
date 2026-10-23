@@ -33,6 +33,12 @@ log_clean() {
   # notification (and that a repeat is suppressed). Both messages are asserted by
   # that test, so their log lines are asked for too.
   intended="$intended|^\[scheme\] error: probe: (a different failure|deliberate failure)$"
+  # t-config's deliberate SYNTAX error — an unbalanced paren appended to the
+  # config, which proves the READER half reaches the config banner (the half the
+  # C loader used to swallow). Quoted loosely because the path is a temp dir.
+  # ONE line, not two: this check is what noticed that the host's own inotify
+  # watcher and (hyprscheme watch) were BOTH reloading on one edit.
+  intended="$intended|^\[scheme\] error: .*hyprland\.scm:.*unexpected end of input while searching for: \)$"
   local unexpected
   unexpected=$(grep '^\[scheme\] error:' "$log" | grep -vE "$intended")
   if [[ -n $unexpected ]]; then
