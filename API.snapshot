@@ -97,7 +97,9 @@ hl-layer?
 hl-layers
 hl-layout-add!
 hl-layout-msg!
+hl-load
 hl-load-config
+hl-loaded-files
 hl-loaded-plugins
 hl-make-close-gesture
 hl-make-cursor-zoom-gesture

@@ -48,6 +48,7 @@ namespace hl {
     bool setModuleVariable(SCM module, const char* name, SCM value);
 
     // contained calls: the result, or #f when the call raised
+    SCM call0(SCM fn);
     SCM call1(SCM fn, SCM a1);
     SCM call2(SCM fn, SCM a1, SCM a2);
     SCM call3(SCM fn, SCM a1, SCM a2, SCM a3);

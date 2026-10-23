@@ -94,13 +94,20 @@ these for the same reason."
 ;; kernel is excluded — its gsubrs are stubbed below instead, since they do not
 ;; exist outside the compositor.
 (define (named-modules)
-  ;; (use-or-reload-modules (hyprscheme a) (hyprscheme b) ...), in file order
+  ;; (use-modules (hyprscheme a) (hyprscheme b) ...), in file order. Matched on
+  ;; the form being `use-modules` AND its first module being ours: init.scm also
+  ;; imports the standard library with plain `use-modules`, and those are not
+  ;; machinery.
   (call-with-input-file (string-append (machinery-dir) "/init.scm")
     (lambda (port)
       (let loop ((acc '()))
         (let ((form (read port)))
           (cond ((eof-object? form) (reverse acc))
-                ((and (pair? form) (eq? (car form) 'use-or-reload-modules))
+                ((and (pair? form)
+                      (eq? (car form) 'use-modules)
+                      (pair? (cdr form))
+                      (pair? (cadr form))
+                      (eq? (car (cadr form)) 'hyprscheme))
                  (loop (append (reverse (map cadr (cdr form))) acc)))
                 (else (loop acc))))))))
 

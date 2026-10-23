@@ -11,3 +11,11 @@ hl-permission-add!      # permissions.md: config-load-only (startup rules); the
 hl-clear-crashed-lockscreen!  # scheme-utilities.md: errors when the session is
                         # not locked — which is always true in the harness;
                         # the refusal IS the documented behavior
+hl-load (string-append  # core.md / scheme-utilities.md: loading a file the
+                        # harness does not have. hl-load REPORTS rather than
+                        # raising — that is the documented behaviour and the
+                        # reason it exists — so the block answers #f and passes
+                        # on its own; what it leaves behind is the log line, and
+                        # t-zzzz-exit counts those. The alternative is an
+                        # example that only runs if you happen to have the file,
+                        # which is worse documentation than a skip.

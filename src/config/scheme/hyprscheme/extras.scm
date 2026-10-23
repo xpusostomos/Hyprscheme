@@ -182,12 +182,12 @@
          #:timeout 5000
          #:icon "warning")
        #f)
-      ;; hl--load, not `load`: it is the same function the kernel shadows
-      ;; `load` with, but naming it directly says which one is meant and
-      ;; avoids a compile warning about the kernel's `load` overriding the
-      ;; core binding in this module. It answers whether the file LOADED, so a
-      ;; file that raises is reported here rather than looking like a success.
-      ((hl--load found) found)
+      ;; hl-load, not `load`: both would work, but naming it says which one is
+      ;; meant — the one that targets the generation by name instead of relying
+      ;; on the current module happening to be it. It answers whether the file
+      ;; LOADED, so a file that raises is reported here rather than looking like
+      ;; a success.
+      ((hl-load found) found)
       (else
        (hl-notification-add!
          #:text (format #f "hyprscheme: config failed to load: ~a" found)

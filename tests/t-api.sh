@@ -940,6 +940,27 @@ ok '(let ((n (length (hl-notifications))))
 printf '(hl-state-set! (quote broken-ran-first) 1)\n(hl-this-does-not-exist 2)\n' > "$CFG/api-broken.scm"
 val '(begin (hl-load-config "api-broken") #f)' '#f'
 ok '(eq? (hl-state-ref (quote broken-ran-first) 0) 1)'
+
+# hl-load is the public one now — the same load said out loud, and the thing
+# the OLD kernel shadow of Guile's `load` was for. It is what hl-load-config
+# builds on, so it has to answer whether the file loaded rather than always #t:
+# same broken file, reached by PATH rather than by name, and the answer is #f.
+# (The error line it logs is the same one hl-load-config's load above produced,
+# so t-zzzz-exit's allowance already covers it.)
+val "(hl-load \"$CFG/api-broken.scm\")" '#f'
+
+# ...and the load was RECORDED, which is the other half: hl-loaded-files is what
+# (hyprscheme watch) matches inotify events against, and a file that is not in it
+# reloads nothing. It is fed by %load-hook, so this passing means the hook fires
+# for a load and the path survives canonicalisation. Matched by SUFFIX rather
+# than equality on the full path: the watcher stores canonical paths, and whether
+# $WORK resolved through a symlink is not this test's business.
+ok '(let ((want "api-broken.scm"))
+       (and (pair? (hl-loaded-files))
+            (not (not (any (lambda (f)
+                             (let ((n (string-length f)) (m (string-length want)))
+                               (and (>= n m) (string=? (substring f (- n m) n) want))))
+                           (hl-loaded-files))))))'
 # and the notification names the FILE (the path), not just the bare name —
 # `string-suffix?` on the piece after the last /, since the path is absolute
 ok '(let ((txt (map hl-notification-text (hl-notifications))))
@@ -1109,6 +1130,24 @@ val 'hl--watchdog-ms' '999999'
 ok '(hl-config-reload!)'
 unbound '(api-gen-scoped)'
 val 'hl--watchdog-ms' '5000'
+
+# NOTE what makes that last line true, because the mechanism changed: the
+# machinery is no longer RE-READ on a reload, so the file being read again is no
+# longer what puts the variable back. The kernel's own `reset` does, and init.scm
+# calls it on every generation. So the same sweep has to reach the OTHER module
+# that keeps state — emacs-keymaps' three tables of submaps it has already built,
+# where a stale entry means define-key! declines to rebuild the binds it holds.
+# Those tables are unexported (nothing a config should be reading), so this
+# reaches them the way the sweep does: resolve the module, take its OWN binding.
+# `module-uses` would not do — what it holds is the public INTERFACE, which
+# carries only exported names.
+submaps() { $SCHEME '(hash-count (lambda (k v) #t) (variable-ref (module-local-variable (resolve-module (quote (hyprscheme emacs-keymaps)) #f #:ensure #f) (quote hl--submaps-made))))'; }
+$SCHEME '(global-set-key! (hl-kbd "C-z C-z") (lambda () #t))' >/dev/null
+n=$(submaps)
+[[ "$n" -gt 0 ]] || { echo "FAIL: no submap recorded before the reload => [$n]"; FAILED=1; }
+ok '(hl-config-reload!)'
+n=$(submaps)
+[[ "$n" == "0" ]] || { echo "FAIL: submap tables survived the reload => [$n] want [0]"; FAILED=1; }
 
 # ---- the swap flag, both directions ----------------------------------------
 # The option is the FLAG the dispatcher mirrors (its lua is swap({prev = true})),

@@ -456,6 +456,185 @@ and TODO.txt's archived sections.)
   soak on the guile artifact: PASS (14k evals, 0 errors, 0 crash
   markers). Remaining: plugin LOG() swallowed (upstream issue).
 
+== THE RELOAD NO LONGER RE-READS THE MACHINERY: an explicit reset instead ==
+- The machinery (kernel, core, enums, values, the 14 families, extras,
+  emacs-keymaps) is now loaded ONCE per process. init.scm is still read on every
+  generation, but every use-modules in it is a no-op after the first — which is
+  what the module objects, and the gsubrs the host registered into the kernel,
+  rely on. `reload-module`, the `in?` probe and the `use-or-reload-modules`
+  macro are GONE from init.scm.
+- The cost of that reuse is that a module's top-level state now OUTLIVES the
+  generation, where re-reading it used to reset it by accident. A set! from a
+  config on an EXPORTED binding writes into the EXPORTING module's cell, so the
+  old behaviour was load-bearing: with reload-module removed and nothing in its
+  place, t-api's `(set! hl--watchdog-ms 999999)` + reload test kept 999999, and
+  t-watchdog failed downstream of it.
+- So a module that keeps state defines an UNEXPORTED `reset`, and the sweep at
+  the end of init.scm calls them all, once per generation, after every module is
+  imported and before the config is read. Written for the only two modules that
+  have state — kernel (watchdog budget/rearm/stack/handler) and emacs-keymaps
+  (its three submap tables) — and nothing is registered anywhere, so a module
+  cannot be forgotten from a list. The sweep runs on every generation including
+  the first, where it is a no-op.
+- THE SUBTLETY THAT COST THE FIRST ATTEMPT: the sweep iterates `module-uses`,
+  which holds each module's PUBLIC INTERFACE, not the module. use-modules is
+  module-use! on resolve-interface, and an interface carries only the EXPORTED
+  names — so an unexported `reset` is simply not in one. The first version found
+  nothing and silently did nothing (calling it by hand returned cleanly and
+  changed no value). Probed and confirmed for (hyprscheme kernel): the use-list
+  entry has module-kind `interface`, the resolved name has `directory`, they are
+  not eq?, and module-local-variable answers #f for the former and the variable
+  for the latter. The fix resolves each entry's NAME back to the module.
+- `module-local-variable`, not `module-variable`, is the predicate — the latter
+  answers for imported bindings too, so a module merely USING something named
+  `reset` would look as though it owned one. tools/module-audit.py carries a
+  named UNEXPORTED exception for `reset`, with its reason, because its
+  every-define-is-exported rule is exactly right otherwise.
+- Also fixed: the host clears `hl--ready` BEFORE reading init.scm. The kernel's
+  file being re-read each generation used to re-set it to #f; loaded once, it
+  would still be #t from the previous generation and the host's "did the API
+  finish loading" check would be vacuous.
+- Tests: t-api asserts the kernel variable is back to 5000 after a reload, and
+  now also that emacs-keymaps' submap table is EMPTY again — reaching the
+  unexported table the way the sweep does (resolve the module, take its own
+  binding). Verified to fail: the submap assertion reports "[1] want [0]" with
+  `(define (reset) #f)` in emacs-keymaps. 20/20 suite; make check clean, 7/7.
+- Consequence to know: a machinery .scm edit NO LONGER takes effect on a config
+  reload — the plugin has to be loaded afresh (a session restart). The wiki's
+  building-the-plugin page claimed the opposite and was corrected, as was the
+  loader section of CLAUDE.md.
+- PARKED, and worth knowing why: this pass began as a memory-leak hunt. The
+  generation module is permanently rooted by Guile — beautify-user-module! calls
+  module-name, and module-name on an UNNAMED module names it AND registers it in
+  the root module (boot-9.scm:3198; upstream bug#19235, 2014, still open, same
+  class as bug#77374, 2025). Measured with a guardian test: make-module is
+  collectable, make-module + beautify-user-module! is not, and pre-naming the
+  module before beautifying makes it collectable again — but one retained
+  generation costs ~5 kB against a ~885 kB/reload leak, so it is NOT the main
+  term, and the bulk (~800 kB/reload, fixed, independent of config size, absent
+  with the plugin unloaded) is still unexplained. Agreed not to chase a Guile
+  design issue; the leak is documented here rather than fixed.
+
+== NO MORE SHADOWS: `load` and `eval` are gone, `hl-load` is public ==
+- The kernel used to redefine Guile's `load` and `eval` for every later file:
+  `load` so a config's (load "x.scm") landed in the generation, `eval` to match.
+  Both shadows are GONE, and neither name is on the kernel's export list any
+  more. Machinery that silently redefines a core binding is a trap.
+- `hl-load` replaces the load half — a public function in (hyprscheme core),
+  exported and documented like anything else, next to the other plumbing. It is
+  the same load said out loud, with the target NAMED (hl--c-generation) rather
+  than assumed from the current module. It still answers whether the FILE
+  loaded (#f when it raised, having reported to the log), which is what
+  hl-load-config builds on, and hl-load-config now calls it by that name.
+- EVAL NEEDED NO REPLACEMENT AT ALL, which is the part worth remembering: with
+  no environment `(eval x)` evaluates in (current-module), and the host leaves
+  the GENERATION current after buildGeneration succeeds — the success path
+  never restores the old module. So a bare eval was already landing where the
+  shadow was putting it; the shadow bought the appearance of control, not the
+  thing. Nothing in the machinery or in the test config used a bare (eval ...).
+- Where the no-generation fallback goes: hl-load loads into whatever module is
+  current, via PRIMITIVE-LOAD and not `load`. Not a style choice —
+  compile-lint rejected `load` outright in (hyprscheme core): "Use of `load' in
+  declarative module", because a declarative module promises no bindings are
+  added at runtime, which is exactly what load does. Verified to fail before
+  the fix; the only visible cost is that a RELATIVE path is not searched for on
+  %load-path, and every caller passes a path it built.
+- The kernel stays #:declarative? #f, but NOT for the old reason — it is
+  nothing to do with shadows now. It stays because the HOST modifies the kernel
+  after it is read: it assigns every gsubr into the exported placeholders
+  (registerAllBindings) and it sets hl--ready. Both reasons are in CLAUDE.md.
+- Side effect worth having: the "imported module (hyprscheme kernel) overrides
+  core binding `load'" warning is gone from every harness, and compile-lint
+  reports zero warnings. NOT "warning-free" overall, and the difference is worth
+  stating exactly: the C++ build still emits 72 -Wvolatile warnings, every one
+  originating inside /usr/include/guile/3.0/libguile/scm.h's own macros — the
+  unavoidable kind CLAUDE.md allows. Nothing in src/ warns.
+- Tests: t-zz-example loads examples/hyprland.scm through hl-load — it needed
+  the guarded one anyway, since its whole method is diffing the compositor log
+  and a bare load no longer logs. t-api asserts hl-load answers #f for the file
+  that raises, reusing the same broken file hl-load-config is tested with, so
+  t-zzzz-exit's existing allowance covers the second error line. t-coverage's
+  introspected list picked hl-load up on its own. 20/20; make check clean, 7/7,
+  no lint warnings (see the side-effect bullet above for why that is not the
+  same as "no warnings").
+- Docs: the wiki's split-config example (core.md) and scheme-utilities.md now
+  use hl-load, and both say plainly that bare `load` still works but RAISES —
+  a raise at the top level of a config ends the load there. Both new blocks are
+  listed in tests/wiki-examples.skip: loading a file the harness does not have
+  answers #f and the block passes, but it leaves a log line behind, and
+  t-zzzz-exit counts those. doc-audit's API count moved 716 -> 714, exactly the
+  three kernel names removed (hl--load, hl--base-load, hl--base-eval) minus
+  hl-load added; api-check reported the addition and no removal, and the
+  snapshot was rebaselined.
+- STILL OUTSTANDING from the same directive: watching files a config loads from
+  OUTSIDE its own directory. The host watches the config file plus any .scm
+  SIBLING in its directory, so a split config beside hyprland.scm is covered
+  already — a load from elsewhere is not seen (Host.cpp drainWatch says so).
+  RESEARCHED, SO NOBODY REPEATS IT: Guile itself has NO inotify interface —
+  verified, no inotify symbol in libguile-3.0.so (any soname) and no *inotify*
+  file anywhere in its install tree. The third-party `guile-inotify` (github
+  b4283) does exist, and is a hard blocker rather than an option: it is GPL-3.0
+  and this project is BSD (packaging/PKGBUILD:20), so vendoring it relicenses
+  the tree. It is also a 2012 five-commit, five-star wrapper for Guile 2.0 with
+  no releases and no documented API. And it would not remove the C++: it wraps
+  inotify_init/add_watch/read, while the wiring — which directory to watch,
+  matching an event's name back to a path, and handing the fd to Hyprland's
+  event loop via doOnReadable — has to be where the event loop is.
+  An implementation of this (%load-hook in the kernel + a gsubr + per-directory
+  watches keyed by wd) was WRITTEN AND THEN REMOVED at the user's request. The
+  gap stands as it was: nothing was left behind, in either language.
+  -> CLOSED in the next entry below, by different means: inotify is bound from
+     SCHEME with (system foreign), so the C++ is one generic gsubr and the
+     "which files" decision never leaves Scheme.
+
+== WATCHING WHAT A CONFIG LOADED, with inotify bound from Scheme ==
+- THE GAP: the host loads exactly ONE file — the config — and nothing in it says
+  what it reached, so a (hl-load "…") pointing outside the config's directory was
+  invisible: no watch, no reload, silent. The INTERPRETER knows, because it did
+  the loading.
+- THE SHAPE, which is the part worth copying later: %load-hook (Guile's own "a
+  file is being loaded" notification) records every path the loader reads; the
+  machinery watches each one's DIRECTORY and reloads an event that matches a
+  recorded path. The only C++ is ONE GENERIC PRIMITIVE — hl--c-on-readable, "call
+  this thunk when this fd is readable" — which knows nothing about inotify or
+  config files and is reusable for any fd. Every decision stayed in Scheme.
+- INOTIFY ITSELF IS BOUND FROM SCHEME with (system foreign) — no C, no
+  dependency. (hyprscheme inotify) is the libc boundary module and is EXCLUDED
+  WHOLESALE from the API by tools/api-names.scm, alongside the kernel, with the
+  reason written down: it is a table of foreign bindings, not API, and its names
+  are inotify(7)'s on purpose so they can be checked against the header.
+  (hyprscheme watch) is the policy — a composer, since it calls
+  hl-config-reload!, which a family owns.
+- WHY THIS AND NOT THE ALTERNATIVES: Guile has no inotify of its own (verified:
+  no symbol in libguile, no file in its tree) and the third-party guile-inotify
+  is GPL-3.0 while this tree is BSD — a licence blocker, not a preference. The
+  C++-only version that was tried first was removed at the user's request on the
+  grounds that it put in C++ what Scheme could do; this does the opposite and is
+  smaller for it.
+- THREE BUGS FIXED ON THE WAY IN, all in the binding as first drafted:
+  (1) it parsed only the FIRST event of a read — a read returns every queued
+  event concatenated, so the tail was dropped and a reload silently missed;
+  (2) it redefined Guile's own `pointer->procedure`, shadowing the import, so
+  anything else in the module wanting the real one got the wrong function (now
+  `libc-procedure`, which takes a NAME where Guile's takes a pointer);
+  (3) `rassoc` is in neither (guile) nor srfi-1 — compile-lint said so, and the
+  two alist lookups are now written out rather than reached for.
+- ONE BEHAVIOUR CHANGE, deliberate and worth flagging: the host's "ANY .scm
+  beside the config reloads it" heuristic is GONE. It existed only because the
+  host could not know what a config loaded. Keeping it alongside the new watcher
+  would fire a SECOND reload for every edit to a split config beside
+  hyprland.scm — which is the documented arrangement, so the common case. The
+  config file itself is still watched by the host (symlink-resolved), and
+  everything else a config reads is covered by the watcher, wherever it lives.
+- Tests: t-config loads a scratch file from OUTSIDE the config directory, edits
+  THAT file, and requires the config to come back — the marker it writes is only
+  run because the config re-ran and re-loaded it. VERIFIED TO FAIL: with the
+  hl--c-on-readable registration neutered the test reports "did not reload
+  (marker=0)", so it is testing the watch rather than passing for another reason.
+  t-api asserts the file a config loaded appears in hl-loaded-files (which is how
+  the hook is observable at all). 20/20; make check 7/7; api-check reported ONE
+  addition, hl-loaded-files, and no removals, and the snapshot was rebaselined.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

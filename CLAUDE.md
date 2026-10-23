@@ -246,57 +246,63 @@ the suite passes. The test asserts the generation's own **use-list**, not that a
 call works. Verified to fail by restoring the old order (it names all 18 missing
 modules).
 
-**The `.scm` always ship too, and that is not redundancy.** The wipe reloads by
-`reload-module`, which re-reads the SOURCE and cannot work from a `.go` alone
-("Unable to find file k.scm in load path" — verified). The `.go` is a
-first-load accelerator, never a replacement.
+**The `.scm` always ship too, and that is not redundancy.** `use-modules` loads a
+module by resolving a NAME against `%load-path`, and the `.go` is only ever an
+accelerator for that — with no `.scm` beside it there is nothing to resolve. The
+`.go` is a first-load accelerator, never a replacement.
+
+**THE MACHINERY IS LOADED ONCE PER PROCESS; the GENERATION is what gets
+rebuilt.** This is the thing to understand before touching `init.scm`. The host
+throws the Scheme side away on every reload and evaluates `init.scm` and the
+config into a fresh generation module — but every `use-modules` in `init.scm` is
+a no-op after the first generation, so the module OBJECTS, and everything
+top-level in them, persist for the life of the plugin. That reuse is deliberate:
+the gsubrs the host registered into the kernel (`registerAllBindings`, before
+`init.scm` is read) live in those objects and have to survive, which is what lets
+the kernel's `#:export`, naming them, be satisfied on every generation.
 
 **Three things about the loader that are easy to get wrong, all verified:**
 
-- **`use-modules` loads a module once per PROCESS, ever.** A second call for one
-  already loaded is a no-op — so a loader that only called `use-modules` would
-  leave the previous generation's definitions live and silently break the wipe
-  (it did: `hl--watchdog-ms` stayed at a value a test had `set!`, and `t-api`
-  and `t-watchdog` failed with no error logged). `init.scm` therefore calls
-  `reload-module` on every module from the second generation on.
-- **`reload-module` does NOT cascade.** Reloading a module leaves its dependents
-  as they were, so every module is reloaded, in dependency order. The module
-  OBJECT is reused rather than replaced, which is why the gsubrs the host
-  registered into the kernel survive the reload — that is what lets the kernel's
-  `#:export`, which names them, be satisfied on every generation.
-- **`use-modules` is a SYNTAX form** whose arguments must be literal module names
-  at expansion time. A runtime `(use-modules name)` — or an `eval` of one —
-  fails to expand, so no *procedure* can wrap it. A **macro** can, and does:
-  `init.scm`'s `use-or-reload-module` takes the module name as a `syntax-rules`
-  pattern variable and uses it both as a quoted datum (for the `in?` and
-  `resolve-module` lookups) and as the literal name `use-modules` needs. That is
-  why the module list is one line per module rather than three.
+- **`use-modules` loads a module once per PROCESS, ever** — so the consequence is
+  not about loading at all, it is that a module's TOP-LEVEL STATE outlives every
+  generation. A `set!` from a config on an IMPORTED binding writes into the
+  EXPORTING module's cell, so one config's `(set! hl--watchdog-ms 500)` would
+  still be in force on the next reload. **A module that keeps state therefore
+  defines an unexported `reset`**, and the sweep at the end of `init.scm` calls
+  them all, once per generation, before the config is read. `t-api` pins the
+  behaviour for the kernel's variables and for emacs-keymaps' three tables, and
+  was verified to fail with a `reset` neutered.
+- **The reset sweep iterates `module-uses`, which holds PUBLIC INTERFACES, not
+  modules.** `use-modules` is `module-use!` applied to `resolve-interface`, and an
+  interface carries only the EXPORTED names — so an unexported `reset` cannot be
+  found in one. The sweep resolves each use-list entry's NAME back to the module
+  first. Verified for `(hyprscheme kernel)`: the use-list entry has `module-kind`
+  `interface`, the resolved name has `directory`, they are not `eq?`, and
+  `module-local-variable` answers `#f` for the former and the variable for the
+  latter. This was the bug that made the first version of the sweep silently do
+  nothing at all.
+- **`module-local-variable`, NOT `module-variable`,** is the predicate for a
+  `reset`: the latter answers for IMPORTED bindings too, so a module that merely
+  uses something named `reset` would look as though it had one. Own bindings
+  only — which is also why leaving `reset` out of `#:export` is correct rather
+  than a forgotten export, and why `tools/module-audit.py` carries a named
+  exception for it (`UNEXPORTED`).
 - **`#:ensure #f` IS NOT A PROBE — `resolve-module` autoloads.** It has two
   separate switches: the **second positional argument** is `autoload`
   (default `#t`), and `#:ensure` only says whether to invent an empty module
   when the search comes up empty. `(resolve-module name #:ensure #f)` therefore
   still LOADS the file it was asked about, and answers "already in" for a module
-  that had never been loaded — the old `in?` did exactly that, so on the first
-  generation it loaded each module and the branch below reloaded it, running
-  every module's body **twice**. The real probe is
+  that had never been loaded. The real probe is
   `(resolve-module name #f #:ensure #f)`: autoload off, nothing created, only
-  what is already in the tree.
-- **...and "in the tree" is still not the question — `reload-module` needs a
-  FILE.** A module can exist with none behind it. `(hyprscheme)` is the case
-  that bites: it is the PARENT of every `(hyprscheme X)`, so the tree grows it
-  as a directory module the moment the first family is defined, and
-  `reload-module` on it fails outright ("unknown file name for module") — there
-  is nothing to re-read. Its `module-filename` stays `#f` until
-  `hyprscheme.scm` itself is read, so `in?` tests that too. Without the check,
-  the last line of `init.scm` dies on the first generation.
-- **`reload-module` does not IMPORT.** It re-reads a module into the existing
-  object; the current module's use-list is untouched. So the macro must reload
-  *and then* `use-modules` unconditionally — otherwise the second generation on
-  imports nothing. (The old macro's `use-modules` branch was dead, which hid
-  this: with autoloading `in?`, the reload branch was always the one taken.)
-- **Guile's own modules must NOT go through `reload-module`.** It is an error,
-  not a refresh — there is nothing of ours to re-read. The five stdlib modules
-  therefore use plain `use-modules` in `init.scm`.
+  what is already in the tree. That is the spelling the reset sweep uses.
+- **`use-modules` is a SYNTAX form** whose arguments must be literal module names
+  at expansion time; a runtime `(use-modules name)`, or an `eval` of one, fails
+  to expand ("source expression failed to match any pattern"). That is only a
+  constraint if something has to BUILD the import list at runtime, and nothing
+  does any more — `init.scm`'s imports are plain `use-modules` forms. It does
+  constrain the tools, though: the three that read the module list out of
+  `init.scm` must match `use-modules` **with a `hyprscheme` head**, because the
+  stdlib imports in the same file are plain `use-modules` too.
 
 `tools/module-audit.py` checks that every module is named in `init.scm` — a
 module missing from it is simply never loaded, with no error anywhere, and
@@ -339,6 +345,18 @@ load-check cannot see that (not loading something is not a load failure).
 5. `hyprscheme/extras.scm` → `(hyprscheme extras)` — the few conveniences
    that need several calls to compose (e.g. setting a special workspace
    *on/off* when the compositor only offers a *toggle*).
+   - `hyprscheme/inotify.scm` → `(hyprscheme inotify)` — the **libc boundary**:
+     inotify(7) reached through `(system foreign)`, no C. A leaf that imports
+     nothing of ours, and a **boundary module** in `tools/api-names.scm`'s sense
+     alongside the kernel, for the same reason — it is a table of foreign
+     bindings, not API. Guile has no inotify of its own and the third-party
+     `guile-inotify` is GPL-3.0 in a BSD tree, which is why it is here.
+   - `hyprscheme/watch.scm` → `(hyprscheme watch)` — **reload when a file the
+     config loaded changes**. A **composer** (it calls `hl-config-reload!`, which
+     a family owns). `%load-hook` records every file the loader reads, the
+     module watches each one's *directory*, and an event matching a recorded
+     path reloads. Public surface: `hl-loaded-files`. The one thing it needs
+     from C++ is `hl--c-on-readable` — waiting on an fd means the event loop.
 6. **THERE IS NO UMBRELLA.** `hyprscheme.scm` → `(hyprscheme)` used to be the
    **public API**: a curated `#:re-export` list over everything, and "the single
    source of truth for what is public". It is **deleted**, and the reason is the
@@ -392,9 +410,17 @@ Things that bit us and are worth not rediscovering:
   unbound**, so a gsubr called at kernel load time fails. Keep the kernel's
   top level to `define`s. (Nothing in the tree does this today; it is a trap
   for the next person who adds a top-level call there.)
-- **Guile hoists top-level defines**, so `(define hl--base-load load)` in a
-  module file captures that file's own `load` shadow — use `(@ (guile) load)`.
-- A module that shadows `load`/`eval` needs **`#:declarative? #f`**.
+- **Guile hoists top-level defines**, so a top-level `(define base load)` in a
+  module file that also defines `load` captures that file's own shadow — write
+  `(@ (guile) load)` when you mean Guile's. The kernel no longer shadows `load`
+  at all (`hl-load`, in core, is an ordinary function), and it still says
+  `(@ (guile) load)` where it wants Guile's own, for exactly this reason.
+- **`#:declarative? #f` on the kernel is NOT about shadows any more.** It was
+  (a declarative module refuses to shadow an imported binding), but the load and
+  eval shadows are gone. It stays for the real reason, which is easy to miss:
+  the HOST modifies the kernel after it is loaded — it assigns every gsubr into
+  the exported placeholders (`registerAllBindings`) and sets `hl--ready`. A
+  declarative module says that will not happen.
 - **Imports are not transitive**: the API needs its own
   `(use-modules (srfi srfi-1) …)`, and the generation gets the same list so a
   config keeps the environment it always had.
@@ -436,20 +462,29 @@ side (interpreter startup, contained file loads, contained calls, GC
 pinning) is `Guile.hpp`/`Guile.cpp`. The bootstrap's wrappers call those
 gsubrs under internal `hl--c-*` names.
 
-### The wipe: the Scheme side is rebuilt on every reload
+### The wipe: the generation is rebuilt on every reload
 
 There is no persistent environment holding the API. `buildGeneration`
-(Host.cpp) creates each module per reload, defines its bindings into it,
-reads its file, and gives a **fresh generation module** the API and the
-kernel to import — then the config is read into that generation — so a definition, a `set!`, or a handler from the
-previous config is unreachable afterwards with no per-variable teardown
+(Host.cpp) creates a **fresh generation module** per reload and evaluates
+`init.scm` and the config into it — so a definition, a `set!`, or a handler from
+the previous config is unreachable afterwards with no per-variable teardown
 list to keep in step. Same clean-slate semantics as upstream's
 per-generation lua_State, reached by rebuilding rather than by copying.
 It is built aside and swapped in only if every step succeeded, so a
 broken config leaves the previous generation live.
 
-**Exactly three things live outside the wipe**, each for a concrete
-reason — do not move them back into the machinery:
+**What the wipe does NOT cover is the machinery.** `use-modules` loads a module
+once per process, so the kernel, core and the families are loaded on the first
+generation and reused for the life of the plugin — their top-level state
+survives, and a config's `set!` on an exported binding writes into whichever
+module exports it. That is what the `reset` protocol is for: a module with state
+defines an unexported `reset`, and `init.scm` sweeps the generation's use-list
+and calls them all, once per generation, before the config is read. The two
+subtleties that make the sweep non-obvious (the use-list holds interfaces, and
+the lookup must be `module-local-variable`) are in the loader section above.
+
+**Three things the HOST deliberately keeps of its own**, each for a concrete
+reason — do not move them into the machinery:
 
 - the **stderr port** (`Guile.cpp`): a port owns the fd it wraps, so a
   re-created one closes fd 2 when its predecessor is collected. The error
@@ -459,9 +494,20 @@ reason — do not move them back into the machinery:
 - the **survive list** (`g_schemeState`, behind `hl-state-set!` and
   friends): documented to outlive reloads.
 
-`hl--watchdog-ms` needs no such treatment: the reload rebuilds it from
-source, so a config's override resets on its own. `load`/`eval` are
-shadowed to target the current generation (`hl--c-generation`).
+The host owns **`hl--ready`** too: it clears the flag before reading `init.scm`
+and sets it once every module has loaded. Clearing it is load-bearing now that
+the kernel is loaded once — on the second generation on the flag would still be
+`#t` from last time, and the host's "did the API finish loading" check would
+pass without the API having loaded at all.
+
+`load` and `eval` are **no longer shadowed**. Loading a file into the generation
+is `hl-load`, an ordinary public function in `(hyprscheme core)`, exported and
+documented like anything else; a config may still call Guile's own `(load …)`,
+which is unguarded and raises. `eval` needed no replacement at all — `(eval x)`
+evaluates in `(current-module)`, and the host leaves the GENERATION current after
+`buildGeneration` succeeds, so a bare `eval` already lands where the shadow used
+to put it. `hl-load` names its target explicitly (`hl--c-generation`) rather than
+relying on that.
 
 ## The C++ layout: one translation unit per object family
 

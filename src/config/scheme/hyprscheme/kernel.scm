@@ -12,10 +12,12 @@
 ;; below.
 
 (define-module (hyprscheme kernel)
-  ;; NOT declarative: this module deliberately SHADOWS Guile's load/eval with
-  ;; generation-targeting versions (a config's (load "x.scm") must land in the
-  ;; generation, not wherever the interpreter started), and a declarative module
-  ;; refuses to shadow an imported binding
+  ;; NOT declarative: the HOST modifies this module AFTER it is loaded — it
+  ;; assigns every gsubr into the exported placeholders below
+  ;; (registerAllBindings, which runs once this file has been read) and it sets
+  ;; hl--ready. A declarative module says that will not happen, so the compiler
+  ;; would be entitled to assume it had. (The flag also had to be off to shadow
+  ;; Guile's load/eval; both shadows are gone — see the note where they were.)
   #:declarative? #f
   ;; An explicit export list, not module-export-all!: names added to a module
   ;; after it is defined do NOT reach a module that imports it later, and the
@@ -24,7 +26,7 @@
   ;; hl::bind<>() registrations. Regenerate it after adding a gsubr
   ;; (tools/ lists them; see the module-audit lint).
   #:export (
-           eval hl--base-eval hl--base-load hl--bind-fire-rec
+           hl--bind-fire-rec
            hl--bind-result hl--c-active-monitor
            hl--c-active-special-workspace hl--c-active-title
            hl--c-active-window hl--c-active-workspace hl--c-animation-set
@@ -95,7 +97,7 @@
            hl--c-notification-same hl--c-notification-text
            hl--c-notification-text-set hl--c-notification-timeout
            hl--c-notification-timeout-set hl--c-notification?
-           hl--c-notify hl--c-pass hl--c-permission-add
+           hl--c-notify hl--c-on-readable hl--c-pass hl--c-permission-add
            hl--c-release-input-capture hl--c-reload-config
            hl--c-rule-enabled hl--c-rule-match hl--c-rule-set-enabled
            hl--c-run-finalizers hl--c-scheduled-prop-refresh-immediately
@@ -169,14 +171,14 @@
            hl--fire-win-state-rec hl--fire-ws-mon-rec hl--fire-ws-rec
            hl--guarded-run hl--layout-call hl--layout-msg
            hl--layout-recalculate hl--layout-resize
-           hl--layout-window-close hl--layout-window-open hl--load
+           hl--layout-window-close hl--layout-window-open
            hl--now-ms hl--plist-cdr hl--plist-get hl--plist-has? hl--print-exception
            hl--ready hl--report hl--target-env
            hl--timer-fire hl--timer-interval hl--timer-thunk
            hl--watchdog-ms hl--wd-aborted hl--wd-alarm hl--wd-enter
            hl--wd-exit hl--wd-handler hl--wd-handler-set hl--wd-rearm
            hl--wd-stack hl-bind-rtd hl--bind-thunk hl--bind-tokens
-           hl-event-rtd hl-rule-rtd hl-timer-rtd load))
+           hl-event-rtd hl-rule-rtd hl-timer-rtd))
 
 (use-modules (ice-9 exceptions)   ; guard, make-exception, exception-* accessors
              (rnrs io ports)      ; call-with-string-output-port
@@ -186,16 +188,25 @@
 
 (define hl--ready #f)
 
-;; THIS FILE IS REBUILT ON EVERY CONFIG RELOAD. The host throws the whole
-;; Scheme side away and evaluates the prelude, the API and the config into a
-;; fresh module — so a config's definitions, and anything it set!, are gone
-;; next reload with no bookkeeping. The host owns the generation module and
-;; installs it as the *current* module before loading this file, which is why
-;; nothing here carries an environment argument or a generation pointer.
+;; THE GENERATION IS REBUILT ON EVERY CONFIG RELOAD; THIS MODULE IS NOT. The
+;; host throws the Scheme side away and evaluates init.scm and the config into a
+;; fresh module, so a config's own definitions are gone next reload with no
+;; bookkeeping. The host owns that generation module and installs it as the
+;; *current* module before reading init.scm, which is why nothing here carries an
+;; environment argument or a generation pointer.
 ;;
-;; Exactly three things deliberately live outside that wipe, all in the host:
-;; the stderr port (a port owns its fd), the after-gc hook (it must not stack),
-;; and the survive list behind hl-state-set! and friends.
+;; What does NOT go with the generation is this file. `use-modules` loads a
+;; module once per process, so there is ONE kernel for the life of the plugin
+;; and its top-level variables are still here one reload later. That matters
+;; because a `set!` from a generation on an IMPORTED binding mutates the
+;; EXPORTING module's cell: a config's `(set! hl--watchdog-ms 500)` lands in
+;; THIS file's variable and outlives the config that set it. `reset`, below,
+;; puts that back, and init.scm calls it once per generation.
+;;
+;; The three things the host deliberately keeps of its own — the stderr port (a
+;; port owns its fd), the after-gc hook (it must not stack) and the survive list
+;; behind hl-state-set! and friends — are outside the wipe for the same reason
+;; this module is: they must outlive it.
 
 ;; ---- error reporting ---------------------------------------------------------
 ;; The compositor's own stderr is where scheme errors must land. The port is
@@ -330,6 +341,27 @@
         (lambda () (hl--wd-enter what escape))
         (lambda () (thunk))
         (lambda () (hl--wd-exit))))))
+
+;; ---- reset: put this module's state back ------------------------------------
+;; Called ONCE PER GENERATION by init.scm, after every module is imported and
+;; before the config is read — see the note at the top of this file for why a
+;; module's top-level variables do not go with the generation.
+;;
+;; Every variable here that a config could reach is put back to the value this
+;; file gives it. The watchdog's own three, and not hl--ready: that flag is the
+;; HOST's, and the host clears it before reading init.scm and sets it once it
+;; knows every module loaded.
+;;
+;; UNEXPORTED on purpose. It is not API, and leaving it unexported is also what
+;; keeps it out of the API tools' picture of what the kernel publishes. init.scm
+;; finds it with `module-local-variable`, which sees own bindings whether they
+;; are exported or not — and ONLY own ones, so a module that merely imports
+;; something named `reset` does not answer for it.
+(define (reset)
+  (set! hl--watchdog-ms 5000)
+  (set! hl--wd-rearm 10000)
+  (set! hl--wd-stack '())
+  (set! hl--wd-handler #f))
 
 ;; ---- the record machinery the trampolines below read ----------------------
 ;; The fire trampolines pull a user thunk out of a record, so the record
@@ -509,44 +541,25 @@
 (define (hl--target-env)
   (or (hl--c-generation) (interaction-environment)))
 
-;; (load "file") from a config: the file must land in the CURRENT generation,
-;; never in the module the plugin happened to start in. Outside a generation it
-;; falls through to Guile's own.
-;; (@ (guile) ...) rather than the bare name: in a define-module file Guile
-;; hoists every top-level define, so `load`/`eval` already refer to THIS file's
-;; shadows by the time these run — capturing them would capture the shadow.
-(define hl--base-load (@ (guile) load))
-(define hl--base-eval (@ (guile) eval))
-
-;; Load PATH into the current generation, and RETURN WHAT HAPPENED: #t when it
-;; loaded, #f when it raised. The error is still reported to the log — that is
-;; what the guard is for, since an exception must not escape into C++.
+;; LOAD AND EVAL ARE NO LONGER SHADOWED HERE, and this is where they were.
 ;;
-;; The return value MATTERS and used to be a lie: this returned #t whether or
-;; not the load worked, so a caller could not tell. hl-load-config handed back a
-;; path for a file that had died halfway through, the failure visible only as a
-;; line in the compositor log — and a config that raised at its 300th form left
-;; every definition after it unbound with nothing to say so.
+;; `load` was redefined to route a config's (load "x.scm") into the generation,
+;; and `eval` with it. Both are gone. Machinery that silently redefines a CORE
+;; binding is a trap for everyone who reads a later file, and neither ever
+;; needed to be a shadow:
 ;;
-;; `load` itself still returns #t (Guile's own does, and a config calling it is
-;; not expected to check); only the internal one reports, and hl-load-config
-;; builds on that.
-(define (hl--load path)
-  (let ((ok (guard (e (#t (hl--report e) #f))
-              (let ((gen (hl--c-generation)))
-                (if gen
-                    (save-module-excursion
-                      (lambda ()
-                        (set-current-module gen)
-                        (primitive-load path)))
-                    (hl--base-load path)))
-              #t)))
-    (and ok #t)))
-(define (load f) (hl--load f) #t)
-
-;; (eval x) from a config: into the generation, so it sees the config's own
-;; definitions — and dies with it, like the next reload's fresh environment.
-(define (eval x . o) (hl--base-eval x (if (null? o) (hl--target-env) (car o))))
+;;   - loading a FILE into the generation is `hl-load` now — a plain public
+;;     function in (hyprscheme core), next to the other plumbing. Guile's own
+;;     `load` is left exactly as documented; a config may still call it.
+;;   - EVAL needed no replacement at all. `(eval x)` with no environment
+;;     evaluates in (current-module), and the host leaves the GENERATION current
+;;     after building one (Host.cpp buildGeneration does not restore the old
+;;     module on the success path) — so a bare `(eval ...)` already lands where
+;;     the shadow was putting it. The shadow bought the appearance of control,
+;;     not the thing.
+;;
+;; hl--eval below is unrelated to either: it is the `hyprctl scheme` entry
+;; point, called BY NAME from the host and never through `eval`.
 
 ;; hyprctl scheme entry: evaluate all forms in the string, reply with the
 ;; last value formatted, or the error text. Evals land in the current

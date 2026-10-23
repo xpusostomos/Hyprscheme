@@ -14,7 +14,8 @@ The machinery is modules, and the split is only worth having if it stays true:
   - (hyprscheme extras) and (hyprscheme emacs-keymaps) are the modules allowed
     to compose the raw API, so they may import families;
   - nothing calls a name a FAMILY owns from outside a family, except extras;
-  - every top-level define in a module file is in that module's own `#:export`;
+  - every top-level define in a module file is in that module's own `#:export`,
+    unless it is one of the deliberate exceptions in UNEXPORTED below;
   - every module is named in init.scm, the one file the host loads.
 
 There is no umbrella module any more. `(hyprscheme)` used to be a curated
@@ -50,6 +51,25 @@ ENUMS = 'enums'
 VALUES = 'values'
 EXTRAS = 'extras'
 EMACS_KEYMAPS = 'emacs-keymaps'
+# (hyprscheme inotify) imports nothing of ours — an FFI leaf, like enums.
+# (hyprscheme watch) calls hl-config-reload!, which a family owns, so it is a
+# composer and must be free of the family-import rule.
+INOTIFY = 'inotify'
+WATCH = 'watch'
+# Names a module defines on purpose WITHOUT exporting. Each needs a REASON, the
+# same way doc-audit's ALLOWED does: the export rule exists because a forgotten
+# export is invisible everywhere, so an entry here is only legitimate where NOT
+# exporting is the whole point.
+#
+# `reset` is the per-generation reset hook. A module that keeps top-level state
+# defines one and init.scm calls it once per generation — and it is deliberately
+# NOT API: no config has any business resetting another module. Leaving it
+# unexported is also what keeps it out of the API tools' picture of what a module
+# publishes, since they read `module-public-interface`. init.scm finds it with
+# `module-local-variable`, which sees own bindings whether or not they are
+# exported, and sees ONLY own ones.
+UNEXPORTED = {'reset': 'the per-generation reset hook; private by design'}
+
 # the ENTRY POINT: the one file the host loads, which loads everything else by
 # name. Every module must be named here or it is never loaded at all.
 ENTRY_PATH = 'src/config/scheme/init.scm'
@@ -60,7 +80,7 @@ ENTRY_PATH = 'src/config/scheme/init.scm'
 SHARED = {KERNEL, CORE, ENUMS, VALUES}
 # the modules that are NOT families — the count in the summary, and the ones
 # exempt from the family-only rules below
-FREE = {KERNEL, CORE, ENUMS, VALUES, EXTRAS, EMACS_KEYMAPS}
+FREE = {KERNEL, CORE, ENUMS, VALUES, EXTRAS, EMACS_KEYMAPS, INOTIFY, WATCH}
 
 
 def read(path):
@@ -136,7 +156,11 @@ def main():
             return own | exports_of(read(fams[KERNEL]))
         if name == VALUES:
             return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[ENUMS]))
-        if name in (EXTRAS, EMACS_KEYMAPS):
+        if name == INOTIFY:
+            # binds libc through (system foreign) and imports nothing of ours —
+            # it may call nothing of ours either
+            return own
+        if name in (EXTRAS, EMACS_KEYMAPS, WATCH):
             return own | {n for p in fams.values() for n in exports_of(read(p))}
         return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[CORE])) \
                    | exports_of(read(fams[ENUMS])) | exports_of(read(fams[VALUES]))
@@ -154,13 +178,13 @@ def main():
         code = strip_prose(text)
         for callee in sorted(calls_of(code)):
             src = owner.get(callee)
-            if src and src not in ({name} | SHARED) and name not in (EXTRAS, EMACS_KEYMAPS):
+            if src and src not in ({name} | SHARED) and name not in (EXTRAS, EMACS_KEYMAPS, WATCH):
                 print('CALL:    (hyprscheme %s) calls %s, which belongs to '
                       '(hyprscheme %s)' % (name, callee, src))
                 bad = 1
         # is every definition reachable?
         if name not in (EXTRAS, EMACS_KEYMAPS):
-            for d in sorted(defines_of(text) - exports_of(text)):
+            for d in sorted(defines_of(text) - exports_of(text) - set(UNEXPORTED)):
                 print('EXPORT:  (hyprscheme %s) defines %s but does not export it'
                       % (name, d))
                 bad = 1

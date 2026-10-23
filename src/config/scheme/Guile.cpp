@@ -231,11 +231,16 @@ namespace hl {
         SCM fn, a1, a2, a3, a4;
     };
 
+    static SCM callThunk0(void* d) { return scm_call_0(((CallArgs*)d)->fn); }
     static SCM callThunk1(void* d) { return scm_call_1(((CallArgs*)d)->fn, ((CallArgs*)d)->a1); }
     static SCM callThunk2(void* d) { return scm_call_2(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2); }
     static SCM callThunk3(void* d) { return scm_call_3(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2, ((CallArgs*)d)->a3); }
     static SCM callThunk4(void* d) { return scm_call_4(((CallArgs*)d)->fn, ((CallArgs*)d)->a1, ((CallArgs*)d)->a2, ((CallArgs*)d)->a3, ((CallArgs*)d)->a4); }
 
+    SCM call0(SCM fn) {
+        CallArgs a{fn, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED};
+        return scm_c_catch(SCM_BOOL_T, callThunk0, &a, callHandler, NULL, NULL, NULL);
+    }
     SCM call1(SCM fn, SCM a1) {
         CallArgs a{fn, a1, SCM_UNDEFINED, SCM_UNDEFINED, SCM_UNDEFINED};
         return scm_c_catch(SCM_BOOL_T, callThunk1, &a, callHandler, NULL, NULL, NULL);

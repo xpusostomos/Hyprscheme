@@ -41,15 +41,23 @@
 (define dir (machinery-dir))
 
 ;; every module init.scm names, read FROM init.scm rather than repeated here —
-;; a list in this file would be the same drift the umbrella had
+;; a list in this file would be the same drift the umbrella had.
+;;
+;; Matched on the form being `use-modules` AND its first module being OURS:
+;; init.scm also imports the standard library with plain `use-modules`, and those
+;; are not machinery.
 (define (named-modules)
   (call-with-input-file (string-append dir "/init.scm")
     (lambda (port)
       (let loop ((acc '()))
         (let ((form (read port)))
           (cond ((eof-object? form) (reverse acc))
-                ((and (pair? form) (eq? (car form) 'use-or-reload-modules))
-                 ;; (use-or-reload-modules (hyprscheme a) (hyprscheme b) ...)
+                ((and (pair? form)
+                      (eq? (car form) 'use-modules)
+                      (pair? (cdr form))
+                      (pair? (cadr form))
+                      (eq? (car (cadr form)) 'hyprscheme))
+                 ;; (use-modules (hyprscheme a) (hyprscheme b) ...)
                  (loop (append (reverse (cdr form)) acc)))
                 (else (loop acc))))))))
 
@@ -125,13 +133,26 @@
          (not (string-suffix? "-rtd" n))
          (not (string-prefix? "make-hl-" n)))))
 
-(define (kernel? m)
-  (equal? (cadr m) 'kernel))
+;; Modules excluded WHOLESALE, by the same argument that excludes the kernel:
+;; they are BOUNDARIES, not API. The kernel is the C++ boundary — gsubrs and the
+;; machinery around them. (hyprscheme inotify) is the libc boundary in exactly
+;; the same shape: a table of foreign bindings, opened and driven entirely by
+;; (hyprscheme watch), which nothing else imports and which no config should be
+;; calling. Its names are `c-read`, `IN-CLOSE-WRITE` and so on — the inotify(7)
+;; spellings, deliberately, because reading like the man page is the point of it.
+;; Renaming them all to hl--inotify-* to satisfy the naming convention would make
+;; the one module whose job is to mirror C harder to check against the header,
+;; which is the wrong trade for a module this narrow.
+;;
+;; ONE MORE HERE NEEDS A REASON. The test is that the module is a foreign
+;; BINDING TABLE, not that it is new or awkward.
+(define (boundary-module? m)
+  (memq (cadr m) '(kernel inotify)))
 
 (define api
   (apply lset-union eq?
          (map (lambda (m)
-                (if (kernel? m)
+                (if (boundary-module? m)
                     '()
                     (filter api-name? (public-names m))))
               (named-modules))))

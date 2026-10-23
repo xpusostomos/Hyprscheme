@@ -54,3 +54,42 @@ done
 sed -i '$ d' "$REAL"
 sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' "$REAL"
 [[ "$($SCHEME '(hl-state-ref (quote cfg-reload-marker) 0)')" == "1" ]] || { echo "restore reloaded oddly"; }
+
+# ---- and a file loaded from ANOTHER DIRECTORY reloads when edited ------------
+# The whole point of (hyprscheme watch). The host loads ONE file — the config —
+# and nothing in it says what it reached, so a (hl-load "…") pointing outside the
+# config's directory was invisible: no watch, no reload, silent. The interpreter
+# knows what it loaded (%load-hook), and this asserts the behaviour end to end:
+# inotify watch -> event loop -> reload -> the config re-run.
+#
+# The scratch file is OUTSIDE the config's directory on purpose. A file beside
+# the config proves nothing here — the host watched those already.
+SCRATCH_DIR=$(mkdir -p "$WORK/extra" && readlink -f "$WORK/extra")
+printf ';; nothing yet\n' > "$SCRATCH_DIR/scratch.scm"
+
+# the config has to reach it; that is what puts it in the watched set
+printf '\n(hl-load "%s")\n' "$SCRATCH_DIR/scratch.scm" >> "$REAL"
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME "(member \"$SCRATCH_DIR/scratch.scm\" (hl-loaded-files))")
+  [[ -n "$out" && "$out" != "#f" ]] && break
+  sleep 0.5
+done
+[[ -n "$out" && "$out" != "#f" ]] || { echo "a file the config loaded is not in hl-loaded-files (got [$out])"; exit 1; }
+
+# Now edit THAT file — not the config, and not in the config's directory. The
+# marker it writes is how the reload is observed: the config re-runs on reload,
+# re-loads this file, and therefore runs this line.
+printf '(hl-state-set! (quote scratch-reload) 1)\n' >> "$SCRATCH_DIR/scratch.scm"
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(hl-state-ref (quote scratch-reload) 0)')
+  [[ "$out" == "1" ]] && break
+  sleep 0.5
+done
+[[ "$out" == "1" ]] || { echo "editing a loaded file OUTSIDE the config dir did not reload (marker=$out)"; exit 1; }
+
+# restore the config FIRST: $WORK goes away with this run, and a config still
+# loading a file that no longer exists logs an error, which t-zzzz-exit counts
+sed -i '$ d' "$REAL"
+sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' "$REAL"

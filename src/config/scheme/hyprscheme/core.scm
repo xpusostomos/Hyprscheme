@@ -17,7 +17,7 @@
            hl--window-listen hl--window-rule-mk hl--workspace-listen
            hl--ws-arg hl-after hl-box hl-box-h hl-box-rtd hl-box-w
            hl-box-x hl-box-y hl-current-submap hl-group?
-           hl-layer? hl-layout-add! hl-monitor? hl-notification?
+           hl-layer? hl-layout-add! hl-load hl-monitor? hl-notification?
            hl-plist-get hl-state-keys hl-state-ref hl-state-remove!
            hl-state-set! hl-window? hl-workspace? make-hl-bind
            make-hl-event make-hl-rule make-hl-timer))
@@ -437,11 +437,62 @@ DEFAULT (#f when omitted) when the key is missing."
 
 
 ;; the after-gc-hook that pumps the collector's finalizer queue is installed
-;; ONCE by the host (Host.cpp), with the finalizer gsubr itself as the thunk:
-;; this file is rebuilt on every reload, so a hook registered here would stack
-;; a fresh closure per reload.
+;; ONCE by the host (Host.cpp), with the finalizer gsubr itself as the thunk.
+;; It cannot be registered here: a hook is process-global, so one per generation
+;; would stack a fresh closure on every reload.
 
-;; hl--ready is the KERNEL's flag and the host sets it once every module has
-;; loaded — a set! of an imported binding is a syntax error in a declarative
-;; module, and the host is the one that actually knows loading finished.
+;; hl--ready is the KERNEL's flag and the HOST owns it — it clears the flag
+;; before init.scm is read and sets it once every module has loaded. Clearing it
+;; matters now that the kernel is loaded once: on the second generation on the
+;; flag would still be #t from last time, and the host's check would pass
+;; without the API having loaded at all. Nothing here sets it — a set! of an
+;; imported binding is a syntax error in a declarative module, and the host is
+;; the one that actually knows loading finished.
+
+;; ---- loading a file into the generation --------------------------------------
+;; A config's (load "x.scm") has to land in the CURRENT GENERATION, not in
+;; whichever module the interpreter happened to start in. That is the whole
+;; reason this exists — and it is a plain function rather than a redefinition of
+;; Guile's `load`, because silently redefining a core binding for every later
+;; file is a trap, and nobody needs it: the one call that must aim at the
+;; generation says so by name.
+;;
+;; The host keeps the generation reachable through hl--c-generation, which is
+;; the only correct answer when this is called from a callback rather than from
+;; the config body — the current module is the generation then too, but relying
+;; on that would be relying on a detail of how the host leaves the interpreter.
+(define (hl-load path)
+  "Load the Scheme file PATH into the current config generation; #t when it
+   loaded, #f when it raised.
+
+   This is the call to use when a config has files to pull in. Guile's own
+   (load PATH) is not intercepted — it evaluates into whatever module is
+   current, which during a config load is the generation anyway — so this is
+   the same load said out loud, with the target named rather than assumed.
+
+   What the file defines lands in the generation and is discarded on the next
+   reload, like everything else a config sets up. An error in it is reported to
+   the compositor log and does NOT stop the rest of the config — but it IS a
+   failure here, and this answers #f for it. That is what lets hl-load-config
+   tell a file that died halfway through from one that loaded.
+
+   PATH is used exactly as given: no search, and no \".scm\" appended.
+   hl-load-config is the one that resolves a NAME under the config directory."
+  (let ((ok (guard (e (#t (hl--report e) #f))
+              (save-module-excursion
+                (lambda ()
+                  (let ((gen (hl--c-generation)))
+                    ;; No generation means the plugin is not up — a plain `guile`
+                    ;; running the machinery, a lint harness — and then there is
+                    ;; no module to aim at, so the file goes into whatever is
+                    ;; current. primitive-load, not `load`: this module is
+                    ;; DECLARATIVE, and using `load` in one is a compile warning
+                    ;; ("bindings may be added at runtime", which is exactly what
+                    ;; load does). The cost of that choice is only that a
+                    ;; RELATIVE path is not searched for on %load-path — these
+                    ;; callers pass a path they built.
+                    (when gen (set-current-module gen))
+                    (primitive-load path))))
+              #t)))
+    (and ok #t)))
 

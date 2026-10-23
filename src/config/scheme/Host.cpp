@@ -396,18 +396,20 @@ namespace Config::Scheme {
                 const auto*       ev = reinterpret_cast<const struct inotify_event*>(&buf[off]);
                 const std::string named{ev->name, strnlen(ev->name, ev->len)};
 
-                // The config itself (resolved, so a symlinked config counts)…
+                // The config itself (resolved, so a symlinked config counts).
+                //
+                // NOT "any .scm beside it" any more. That heuristic existed
+                // because the host could not know what a config loaded — but the
+                // interpreter can, and (hyprscheme watch) now watches exactly the
+                // files it reported, wherever they live. Keeping the heuristic
+                // as well would fire a SECOND reload for every edit to a split
+                // config that sits beside hyprland.scm, which is the documented
+                // arrangement and so the common case.
                 const bool isConfig = !g_watchDir.empty() &&
                                       (std::filesystem::path(g_watchDir) / named).string() == g_configReal;
-                // …or ANY .scm beside it. A config's `(load "keybinds.scm")`
-                // pulls in a file in its own directory, and an edit to that has
-                // to reload too — that is the arrangement the docs recommend.
-                // (A load from OUTSIDE the config's directory is still not
-                // seen; following the paths a load touched is a bigger change.)
-                const bool isScmSibling = std::filesystem::path(named).extension() == ".scm";
 
                 if ((ev->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE)) && ev->len > 0 &&
-                    (isConfig || isScmSibling))
+                    isConfig)
                     dirty = true;
                 off += (ssize_t)sizeof(struct inotify_event) + ev->len;
             }
@@ -451,6 +453,45 @@ namespace Config::Scheme {
         }
 
         armWatch();
+    }
+
+    /*
+        Arm an event-loop waiter on FD that calls THUNK on each wakeup and
+        re-arms: waiters here are one-shot. The fd is dup'd per arming, as
+        armWatch does, and the CFileDescriptor owns that copy.
+    */
+    static void armReader(int fd, SCM thunk) {
+        g_pEventLoopManager->doOnReadable(CFileDescriptor(dup(fd)), [fd, thunk] {
+            hl::call0(thunk);
+            armReader(fd, thunk);
+        });
+    }
+
+    /*
+        Call a Scheme thunk whenever FD becomes readable.
+
+        THE ONE PRIMITIVE THE MACHINERY CANNOT SUPPLY FOR ITSELF. Waiting on a
+        file descriptor means the compositor's event loop — doOnReadable, which
+        is C++ — and a Scheme loop around read(2) on this thread would block the
+        thread that draws the screen. Everything else about inotify (opening it,
+        adding and removing watches, decoding events, deciding what an event
+        means) is Scheme: see (hyprscheme inotify) and (hyprscheme watch).
+
+        Deliberately knows nothing about inotify or about config files, so it is
+        reusable for any other fd.
+
+        The thunk is PINNED for the life of the registration — a Scheme closure
+        held by C++ would otherwise be collected out from under us — and is
+        called on the event-loop thread under the usual containment, since an
+        exception escaping into C++ corrupts the compositor heap.
+    */
+    static int hlSchemeOnReadable(int fd, SCM thunk) {
+        if (!g_pEventLoopManager || fd < 0 || scm_is_false(scm_procedure_p(thunk)))
+            return -1;
+
+        hl::lock(thunk);
+        armReader(fd, thunk);
+        return 0;
     }
 
     // the plugin's own directory: where the .scm machinery and the boot
@@ -691,6 +732,9 @@ namespace Config::Scheme {
         // the generation pointer and the survive list's storage (the host owns
         // both values; see above)
         hl::bind<hlSchemeGeneration>("hl--c-generation");
+        // the one thing the machinery cannot do for itself about fds: wait on
+        // one. See armReader above — the inotify work is all Scheme.
+        hl::bind<hlSchemeOnReadable>("hl--c-on-readable");
         hl::bind<hlSchemeStateGet>("hl--c-state-get");
         hl::bind<hlSchemeStateSet>("hl--c-state-set");
 
@@ -828,10 +872,10 @@ namespace Config::Scheme {
             LOG(Log::ERR, "[scheme] could not put the machinery on %load-compiled-path");
 
         // 1. the KERNEL: created first, then given the whole C++ surface.
-        //    init.scm reaches the file by name; `use-modules` and
-        //    `reload-module` both reuse a module that already exists rather
-        //    than replacing it, so the gsubrs registered here survive every
-        //    generation.
+        //    init.scm reaches the file by name; `use-modules` loads a module
+        //    once per PROCESS and reuses it after that, so there is ONE kernel
+        //    for the life of the plugin and the gsubrs registered here survive
+        //    every generation.
         //
         //    NOTE what `makeModule` actually does: it resolves the name, and
         //    resolve AUTOLOADS, so the kernel's FILE IS READ HERE — before
@@ -885,6 +929,15 @@ namespace Config::Scheme {
         //    through scm_primitive_load: a list in C++ that had to be kept in
         //    step with the module tree, and no compilation at all, since the
         //    primitive bypasses the Scheme-level loader.
+        // CLEAR THE READY FLAG BEFORE init.scm IS READ. Load-bearing now that the
+        // machinery is loaded ONCE rather than re-read: on every generation after
+        // the first the kernel still holds the #t the host set at the end of the
+        // previous one, so the check a few lines below would pass without the API
+        // having loaded at all, and the guard would be vacuous. Cleared here, it
+        // means what it says.
+        if (!hl::setModuleVariable(kernel, "hl--ready", SCM_BOOL_F))
+            LOG(Log::ERR, "[scheme] could not clear hl--ready");
+
         if (!hl::evalFile(schemePath("init.scm").c_str())) {
             LOG(Log::ERR, "[scheme] init.scm failed to load");
             scm_set_current_module(prevModule);

@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Live-load examples/hyprland.scm through the plugin. hl--load is guarded:
+# Live-load examples/hyprland.scm through the plugin. hl-load is guarded:
 # a failing top-level form is reported to the COMPOSITOR LOG, not the eval
 # reply, so the log is diffed around the load, then the example's visible
 # side effects (config writes, the registered master-stack layout's
 # layout-msg callback) are asserted.
+#
+# hl-load, not a bare (load ...): Guile's own `load` is no longer intercepted
+# (the kernel used to shadow it), so its errors — and a raise would come back
+# in the eval reply instead of the log, which is what this file diffs. What the
+# load TARGETS is unchanged either way: both land in the generation.
 FAILED=0
 ok()  { out=$($SCHEME "$1" 2>&1); [[ "$out" == "#t" ]] || { echo "FAIL: $1 => [$out]"; FAILED=1; }; }
 val() { out=$($SCHEME "$1" 2>&1); [[ "$out" == "$2" ]] || { echo "FAIL: $1 => [$out] want [$2]"; FAILED=1; }; }
 
 before=$( { grep -c 'scheme] error' "$WORK/compositor.log" 2>/dev/null || echo 0; } )
-out=$($SCHEME "(load \"$(pwd)/examples/hyprland.scm\")" 2>&1)
+out=$($SCHEME "(hl-load \"$(pwd)/examples/hyprland.scm\")" 2>&1)
 sleep 0.3
 after=$( { grep -c 'scheme] error' "$WORK/compositor.log" 2>/dev/null || echo 0; } )
 [[ "$after" == "$before" ]] || {

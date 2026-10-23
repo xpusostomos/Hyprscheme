@@ -258,13 +258,27 @@ it — unlike hl-kbd, a shifted character is not expanded."
 ;; "global keymap", the default map is just the binds tagged "". So a submap is
 ;; a MODE: while one is active every bind outside it is dead.
 ;;
-;; Two tables, both rebuilt every generation (the wipe re-reads this file, so a
-;; fresh table is what a fresh generation gets). Hyprland's own hasSubmap() is
+;; Three tables, empty at the start of every generation — `reset` (below) is
+;; what empties them, this file being loaded once and never re-read. Hyprland's
+;; own hasSubmap() is
 ;; not reachable from a plugin, and we do not need it: we are the only thing
 ;; creating these submaps, so remembering them here is sufficient and cheaper.
 (define hl--submaps-made (make-hash-table))   ; prefix submaps already built
 (define hl--exit-bound (make-hash-table))     ; submaps already given our s-G
 (define hl--catchall-bound (make-hash-table)) ; submaps already given our catchall
+
+;; Called ONCE PER GENERATION by init.scm (see the note there). Those three
+;; tables are module state and this file is loaded ONCE, so without emptying
+;; them a submap built before a reload would still count as built after it and
+;; define-key! would decline to rebuild the binds it holds. Emptied rather than
+;; replaced, so anything holding a reference to one sees the same table.
+;;
+;; UNEXPORTED: not API, and init.scm finds it with `module-local-variable`,
+;; which sees own bindings whether or not they are exported.
+(define (reset)
+  (hash-clear! hl--submaps-made)
+  (hash-clear! hl--exit-bound)
+  (hash-clear! hl--catchall-bound))
 
 (define (hl--seq-chords sequence) "Normalise SEQUENCE to a list of chords:
 hl-kbd returns a flat token list for a one-key spec and a list of chords for
