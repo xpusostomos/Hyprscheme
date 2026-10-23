@@ -380,7 +380,12 @@
         (hl--c-error-overlay body))))
   #f)
 
-;; a config load finished without a config error: take the banner down
+;; a config load finished with NOTHING recorded: take the banner down.
+;; The host calls this only when hl--load-config answered #t, and that now means
+;; hl--config-errors was already empty — so the set! below is belt-and-braces
+;; rather than the mechanism. The CALL is not redundant, though: taking the
+;; overlay down is this function's real job, and only the host knows that the
+;; whole config finished (a config is many files, one load each).
 (define (hl--report-config-ok)
   (set! hl--config-errors '())
   (guard (e (#t #f)) (hl--c-error-overlay "")))
@@ -412,16 +417,35 @@
 ;; PLUGIN bug rather than a config error, so the banner would be the wrong
 ;; surface anyway.
 ;;
-;; Answers #t when the load finished and #f when it raised. The host uses that
-;; only to decide whether to clear the banner. (Guile's primitive-load returns
-;; #<unspecified> on success, which is TRUTHY but not #t, so this normalises it —
-;; a bare (and ok ...) would work, but returning a real boolean is what the
-;; host's scm_is_true asks for and what a reader expects.)
+;; Answers #t when the config loaded CLEANLY and #f when it did not. The host uses
+;; that to decide whether to clear the banner, so what "cleanly" means here is the
+;; whole of the contract — and it is NOT "the load did not raise".
+;;
+;; IT IS "NOTHING WAS RECORDED", and the difference is the nested config. A file
+;; pulled in by hl-load-config is loaded by hl-load, which GUARDS the error itself
+;; (it has to: the rest of the config must still load). So the raise never reaches
+;; this function, this returns #t, and the host called hl--report-config-ok —
+;; clearing the banner hl--report-config had just raised, one call earlier. The
+;; user saw a notification and no overlay. (Reported by Chris, with garbage at the
+;; end of a file loaded via (hl-load-config "bindings").)
+;;
+;; So the list is cleared HERE, at the START, and the answer is whether anything
+;; was put back. That makes the nested case fall out for free: hl-load recorded
+;; the error while this load was running, so the list is non-empty and this
+;; answers #f, so the host does not clear. Nothing in C++ had to change.
+;;
+;; Clearing at the start rather than at the end is what makes this work, and it
+;; loses nothing: hl--report-config-ok did exactly the same thing, one call later
+;; and without the ability to see what happened in between.
+;;
+;; (Guile's primitive-load returns #<unspecified> on success, which is TRUTHY but
+;; not #t. Returning a real boolean is what the host's scm_is_true asks for and
+;; what a reader expects.)
 (define (hl--load-config path)
-  (let ((ok (guard (e (#t (hl--report-config e) #f))
-              (primitive-load path)
-              #t)))
-    (and ok #t)))
+  (set! hl--config-errors '())
+  (guard (e (#t (hl--report-config e)))
+    (primitive-load path))
+  (null? hl--config-errors))
 
 ;; ---- wall clock --------------------------------------------------------------
 ;; Milliseconds since the epoch, used for the watchdog's budget (a wall-clock

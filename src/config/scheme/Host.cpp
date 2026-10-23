@@ -407,7 +407,11 @@ namespace Config::Scheme {
         if (!loaded) {
             LOG(Log::ERR, "[scheme] failed to load {}", g_configPath);
             // the banner was raised by hl--report-config while the load failed
-            // — one line per failing file, accumulating (see kernel.scm)
+            // — one line per failing file, accumulating (see kernel.scm).
+            // NOT only the config file itself: a file the config pulled in
+            // through hl-load/hl-load-config failing makes the whole load count
+            // as failed, which is what keeps the banner up for it (the nested
+            // case reported by Chris — see hl--load-config in kernel.scm).
         } else {
             LOG(Log::INFO, "[scheme] loaded {}", g_configPath);
             // THE CONFIG LOADED CLEANLY, so take down any banner left by the

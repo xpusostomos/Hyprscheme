@@ -802,6 +802,50 @@ C++ apis, nothing else should be in C."**
   plus a new "Reloading" section for the auto-reload and `hl-loaded-files`.
 - 20/20 on the suite.
 
+== A NESTED CONFIG FAILURE RAISED THE BANNER AND THEN ERASED IT ==
+
+Chris: *"I put garbage at the end of my bindings.scm and I got the brief
+notification but I thought I would get the permanent overlay."* His
+`hyprland.scm` is one line, `(hl-load-config "bindings")`, so the broken
+file is loaded NESTED — a different route from the one the previous pass
+tested, and the route where the fix did not hold.
+
+- THE BUG IS ONE LINE OF ORDERING, not an uncaught error. Nothing was
+  lost: `hl-load` GUARDS the raise (it must — the rest of the config has to
+  still load), so the raise never reached `hl--load-config`; that answered
+  `#t`; the host saw `#t` and called `hl--report-config-ok`, which did
+  `(set! hl--config-errors '())` and cleared the overlay — **one call after
+  `hl--report-config` had raised it**. The only surviving signal was
+  `hl-load-config`'s own notification, exactly as reported.
+- THE FIX INVERTS WHERE "CLEAN" IS DECIDED, in `hl--load-config`
+  (kernel.scm): it clears the list at the START and answers whether anything
+  was RECORDED — `(null? hl--config-errors)` — instead of whether the load
+  itself raised. A nested failure now records while the load is running, so
+  the answer is `#f` and nothing clears the banner.
+  **NO C++ CHANGED**, which is the point of the shape: the host's
+  `if (!loaded)` was already right, it just could not be told the truth.
+  `hl--report-config-ok` keeps its `set!` as belt-and-braces; its real job
+  is taking the overlay down, and only the host knows the whole config
+  finished (a config is many files, one load each).
+- TESTS: `t-config.sh` gains the nested case — a file with an unbalanced
+  paren loaded via `hl-load-config` — asserting the banner RISES, that it is
+  STILL UP after a 2s wait (the old code cleared it synchronously, so no poll
+  could ever catch it), that the broken file is still in `hl-loaded-files`
+  (so fixing it can reload), and that fixing it clears the banner.
+  **Verified to fail on the old code**: `a broken file loaded via
+  hl-load-config did not raise the banner (hl--config-errors=0)`.
+  `t-zzzz-exit`'s allowance is now any `.scm` rather than `hyprland.scm`
+  alone, and notes why the line can appear twice (two inotify events land in
+  one buffer, so the loop reloads twice — the watcher working, not the
+  duplicate-watcher bug this check found last time).
+- DOCS: core.md's Errors says the banner covers ANY file the config loads,
+  not just the main one, and `hl-load`/`hl-load-config` no longer say a
+  failure "goes to the compositor log". scheme-utilities.md splits the two
+  `#f` cases: a MISSING file is a notification alone; a file that FAILS also
+  raises the banner.
+- The temporary probe used to reproduce this (`tests/t-probe-nested.sh`) is
+  deleted. 20/20 on the suite, `make check` 7/7.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

@@ -33,12 +33,22 @@ log_clean() {
   # notification (and that a repeat is suppressed). Both messages are asserted by
   # that test, so their log lines are asked for too.
   intended="$intended|^\[scheme\] error: probe: (a different failure|deliberate failure)$"
-  # t-config's deliberate SYNTAX error — an unbalanced paren appended to the
-  # config, which proves the READER half reaches the config banner (the half the
-  # C loader used to swallow). Quoted loosely because the path is a temp dir.
-  # ONE line, not two: this check is what noticed that the host's own inotify
-  # watcher and (hyprscheme watch) were BOTH reloading on one edit.
-  intended="$intended|^\[scheme\] error: .*hyprland\.scm:.*unexpected end of input while searching for: \)$"
+  # t-config's deliberate SYNTAX errors — unbalanced parens appended to a config
+  # file, which prove the READER half reaches the config banner (the half the C
+  # loader used to swallow). Quoted loosely because the path is a temp dir, and
+  # matched for ANY file rather than naming hyprland.scm: that test now breaks
+  # two of them, the main config and a NESTED file loaded through hl-load-config
+  # (the case where the banner was raised and then erased by the same load).
+  #
+  # It can appear TWICE for the nested one, and that is the watcher rather than a
+  # bug: the test creates the nested file and appends the hl-load-config line to
+  # the config, both land in one inotify buffer, and the loop reloads on each
+  # event — by the second, the nested file IS recorded, so it matches. Two
+  # events, two reloads, which is what the watcher is supposed to do. (This check
+  # is also what once noticed reloads happening twice per edit for the OPPOSITE
+  # reason — a duplicate C++ watcher — so the count here is worth reading rather
+  # than assuming.)
+  intended="$intended|^\[scheme\] error: .*\.scm:.*unexpected end of input while searching for: \)$"
   local unexpected
   unexpected=$(grep '^\[scheme\] error:' "$log" | grep -vE "$intended")
   if [[ -n $unexpected ]]; then

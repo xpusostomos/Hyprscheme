@@ -235,7 +235,9 @@ ships them **beside** the `.scm`.
 with the **generation** current, so its `use-modules` ARE the generation's
 environment, and the standard library a config has always had is imported there
 too. `buildGeneration` therefore has no module list at all: kernel (created and
-given the gsubrs), then the generation made current, then one `evalFile`. The
+given the gsubrs), then the generation made current, then `init.scm` loaded
+through `scm_c_public_ref("guile", "primitive-load")` (it was a file-loading
+entry point in C++ until that was deleted — see THE BOUNDARY). The
 order is load-bearing — read with the kernel current, as it once was, the
 imports land in the *kernel* and the generation has to be assembled by hand,
 which is how a 23-line list in C++ came to duplicate `init.scm`'s and drift from
@@ -600,8 +602,8 @@ to reach a Hyprland C++ API that Scheme cannot. Anything else belongs in
 Scheme.*** A `.cpp` edit that is not touching a compositor API is a smell, and
 the answer to "where should this live?" is Scheme until proven otherwise.
 
-It is not a style preference; the code has twice been made worse by ignoring it,
-and both times the cost was a *bug*, not untidiness:
+It is not a style preference; the code has thrice been made worse by ignoring it,
+and each time the cost was a *bug*, not untidiness:
 
 - **The config loader.** `hl::evalFile` in `Guile.cpp` loaded the config in C
   and caught errors with `scm_c_catch`, writing them to fd 2 from C. But a
@@ -612,6 +614,16 @@ and both times the cost was a *bug*, not untidiness:
   Loading is now `hl--load-config` in the kernel, where ONE `guard` covers
   reader and evaluator alike. `tests/t-config.sh` pins it and was **verified to
   fail on the old code** (`hl--config-errors=0`).
+- **The same function again, from the Scheme side.** Deleting the C loader was
+  necessary and not sufficient: `hl--load-config` answered "did the load raise",
+  and a NESTED file (`hl-load-config` → `hl-load`) guards its own raise, so the
+  answer was `#t` and the host cleared the banner one call after it was raised.
+  The fix is a *definition*, not a deletion — "clean" means NOTHING WAS
+  RECORDED (`(null? hl--config-errors)`), not "it did not raise" — and it is the
+  general lesson for this boundary: **when responsibility moves to Scheme, the
+  CONTRACT it answers with has to move with it.** Moving a call without moving
+  what it means is how the same bug comes back wearing a Scheme hat. Also pinned
+  by `tests/t-config.sh`, also verified to fail before the fix.
 - **The inotify watcher.** The host kept its own fd, watched the config's
   directory and drained events in `drainWatch()`. Once `(hyprscheme watch)`
   existed — fed by `%load-hook`, so it knows every file the config *actually*
@@ -758,12 +770,24 @@ Hyprland answers two different questions with two different surfaces
   *different* message from the same callback still gets through.
 - **WHO is what the user reads**, so name the thing that failed, not the
   internal function.
-- **A CONFIG error is the BANNER, and it is cleared by a successful load**
-  (`hl--report-config-ok`, called by the HOST after `evalFile` succeeds — the
-  Scheme side cannot know the whole config finished, since a config is many
-  files). The banner ACCUMULATES across failing files and is capped at 12 lines
-  like the compositor's own (~15), so a config that fails on every form cannot
-  build a banner taller than the screen.
+- **A CONFIG error is the BANNER, and what clears it is "nothing was
+  RECORDED" — not "the load did not raise".** The host asks `hl--load-config`
+  and clears on `#t`; that function clears the list at the START and answers
+  `(null? hl--config-errors)`. **The distinction is the nested config**, and
+  getting it wrong cost a second bug: a file pulled in by `hl-load-config` is
+  loaded by `hl-load`, which GUARDS the raise itself (it must — the rest of the
+  config has to still load). So the raise never reaches `hl--load-config`, a
+  naive "did it raise" answer is `#t`, and the host's `hl--report-config-ok`
+  then clears the banner `hl--report-config` raised one call earlier: the user
+  sees a notification and no overlay. Reported by Chris with garbage at the end
+  of a file loaded via `(hl-load-config "bindings")`, and pinned by `t-config`.
+  The other half of "clean" is still the host's: `hl--report-config-ok` takes the
+  overlay down, and only the host knows the whole config finished, since a config
+  is many files with one load each. The banner ACCUMULATES across failing files
+  and is capped at 12 lines like the compositor's own (~15), so a config that
+  fails on every form cannot build a banner taller than the screen. **A failure
+  in ANY file the config loaded raises it, not just the main config's** — so a
+  message about "your config" should name the file, which is the one to open.
 - **The notification call is GUARDED AND SILENT ON FAILURE.** It runs inside
   error handlers, and a raise there would replace the error being reported with a
   new one — the one thing an error reporter must never do.

@@ -135,3 +135,67 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 [[ "$out" == "0" ]] || { echo "fixing the config did not clear the banner (hl--config-errors=$out)"; exit 1; }
+
+# ---- a BROKEN FILE PULLED IN BY THE CONFIG raises the banner TOO -------------
+# THE NESTED CASE, and the one Chris actually hit: his hyprland.scm is one line,
+# (hl-load-config "bindings"), and garbage at the end of bindings.scm produced a
+# notification but NO OVERLAY. The cause was not who caught the error — it was
+# that the banner was raised and then ERASED by the same load:
+#
+#   hl-load guards the raise (it must: the rest of the config has to still load),
+#   so the raise never reached hl--load-config, which answered #t;
+#   the host saw #t and called hl--report-config-ok, clearing the list
+#   hl--report-config had filled one call earlier.
+#
+# Fix: hl--load-config clears the list at the START and answers "nothing was
+# RECORDED", so the nested failure makes it answer #f and nothing clears the
+# banner. The host was already right — it just needed an answer it could trust.
+# See hl--load-config in kernel.scm.
+NESTED=$XDG_CONFIG_HOME/hypr/cfg-nested-broken.scm
+printf '(define cfg-nested-ok #t)\n\n(define (cfg-nested-half\n' > "$NESTED"
+printf '\n(hl-load-config "cfg-nested-broken")\n' >> "$REAL"
+
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(length hl--config-errors)')
+  [[ "$out" != "0" ]] && break
+  sleep 0.5
+done
+[[ "$out" != "0" ]] || { echo "a broken file loaded via hl-load-config did not raise the banner (hl--config-errors=$out)"; exit 1; }
+
+# AND IT STAYS UP. This is the assertion the old code fails: it cleared the list
+# synchronously inside the same load, so no poll could ever see it — a
+# notification and no overlay, exactly as reported.
+sleep 2
+out=$($SCHEME '(length hl--config-errors)')
+[[ "$out" != "0" ]] || { echo "the banner raised for a nested broken file was CLEARED again"; exit 1; }
+
+# a file that fails to load is still WATCHED, which is what lets you fix it in
+# place and get a reload — worth pinning, and the next step depends on it
+out=$($SCHEME "(member \"$NESTED\" (hl-loaded-files))")
+[[ -n "$out" && "$out" != "#f" ]] || { echo "a broken file is not in hl-loaded-files, so fixing it cannot reload (got [$out])"; exit 1; }
+
+# FIXING it clears the banner, the same as for the main config
+printf '(define cfg-nested-ok #t)\n' > "$NESTED"
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(length hl--config-errors)')
+  [[ "$out" == "0" ]] && break
+  sleep 0.5
+done
+[[ "$out" == "0" ]] || { echo "fixing a nested file did not clear the banner (hl--config-errors=$out)"; exit 1; }
+
+# restore, the way the tests above do: drop the appended line, then the blank
+# line before it. Then remove the nested file — nothing is left loading it, but a
+# stray half-broken file in the config directory is a trap for the next reader.
+sed -i '$ d' "$REAL"
+sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' "$REAL"
+rm -f "$NESTED"
+# let that reload land, so the next file in the suite starts from a clean state
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(length hl--config-errors)')
+  [[ "$out" == "0" ]] && break
+  sleep 0.5
+done
+[[ "$out" == "0" ]] || { echo "the config did not come back clean after the nested test (hl--config-errors=$out)"; exit 1; }
