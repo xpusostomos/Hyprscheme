@@ -802,6 +802,60 @@ C++ apis, nothing else should be in C."**
   plus a new "Reloading" section for the auto-reload and `hl-loaded-files`.
 - 20/20 on the suite.
 
+== THE TREE IS cpp/ + hyprscheme/ NOW, NOT src/config/scheme/ ==
+
+Chris: *"I don't know why the source code is so many levels down in the
+hierarchy."* He moved the files himself and asked for the Makefile and
+everything else to follow.
+
+- WHY IT WAS THAT DEEP: `src/config/scheme/` is a FORK PATH. This plugin
+  began as a copy of Hyprland's own scheme backend, which lives at exactly
+  that path in the Hyprland tree (`../Hyprland/src/config/scheme/` still
+  exists, holding a stray Emacs autosave file from Sep 16). The plugin moved
+  out; the path stayed — and it had grown to hold the `.cpp`, the `.hpp` AND
+  the `.scm` in ONE directory, plus `.o`/`.d`/`.go` build junk.
+- NOW: `cpp/` (18 family `.cpp` + headers + `plugin-main.cpp`) and
+  `hyprscheme/` (the 22 modules), with `init.scm` at the repo ROOT beside
+  the module directory. `src/` is gone entirely — it only ever held
+  `config/scheme`.
+- **`hyprscheme/` CANNOT BE RENAMED, and that is the one hard constraint.**
+  `(hyprscheme kernel)` resolves as `hyprscheme/kernel.scm` against
+  `%load-path`, so the directory name IS the module name. `init.scm` must
+  also stay OUTSIDE it, since `%load-path` points at the directory
+  CONTAINING the module directory. `tests/t-generation.sh` guards this.
+- WHAT CHANGED: the Makefile (`INCLUDES`, `SCM_ENTRY`, `SCM_SRC`,
+  `COMMON_OBJS`, `HOST_GUILE`, `SCM_DIR`, `HYPRPM_SRCS`, the `plugin-main.o`
+  rule, both install targets, the `load-check` `-L` flag); 8 tools
+  (`api-names`, `load-check`, `compile-lint`, `doc-exercise`,
+  `module-audit`, `doc-audit`, `bind-audit`); `tests/run.sh` and
+  `tests/soak.sh` (`HYPRSCHEME_SCM_DIR`); and one string in `Host.cpp`'s
+  "no machinery found" message. **No `#include` line changed** — every one
+  is relative and unqualified, so moving the `.cpp` and `.hpp` together
+  needed no edit. That is why this was safe to do in one pass.
+- CHRIS'S MOVE WAS RIGHT EXCEPT FOR ONE FILE: `init.go` had gone into
+  `cpp/`, but it is the COMPILED FORM OF `init.scm` — a Scheme artifact, not
+  C++. Moved to the root beside `init.scm`. (It is gitignored, so nothing
+  was lost; `make scm-compile` regenerates it.) Two gitignored leftovers
+  were also cleared: a stale `src/plugin-main.{o,d}` and a `hyprscheme/
+  enums.scm~`.
+- `bind-audit` now reports **19 translation units** where it said 18:
+  `plugin-main.cpp` lives in `cpp/` with the rest, so it is counted. The
+  total registered is unchanged at 315, which is the number that matters.
+- VERIFIED: `make` 7/7 lints; **20/20** suite; `make scm-compile` (23 files,
+  `init.go` at the root); `make hyprpm-machinery` (installs `init.scm` +
+  `hyprscheme/`); `make install` into a throwaway `DESTDIR` (correct staged
+  layout, then removed).
+- **SIDE EFFECT WORTH KNOWING**: refreshing the installed machinery was
+  already needed for the stale-copy bug Chris hit (`#:submap` unrecognised),
+  and this pass did it — the installed `bind.scm` now carries `#:submap`.
+- DOCS: CLAUDE.md gained the layout (both in the build-environment list and
+  at the head of "The C++ layout"), including WHY the directory is named
+  `hyprscheme` and why `init.scm` sits outside it. API.md's §10, which
+  listed the move as "not done", now says done. DONE.txt/TODO.txt entries
+  that mention the old path are HISTORICAL LEDGERS and were left alone —
+  they describe what was true when written, and rewriting them would be
+  worse than the stale path.
+
 == "Unrecognized keyword" DID NOT NAME THE KEYWORD ==
 
 Chris hit this in his live overlay: *"unfortunately it doesn't say what

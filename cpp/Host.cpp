@@ -829,7 +829,7 @@ namespace Config::Scheme {
             // Nothing found. Say so against the location that WOULD have
             // worked, since the fix differs by how the plugin was installed.
             LOG(Log::ERR, "[scheme] no machinery beside the plugin ({}), nor in {}; "
-                          "set HYPRSCHEME_SCM_DIR=<tree>/src/config/scheme to test a source tree, "
+                          "set HYPRSCHEME_SCM_DIR=<tree> to test a source tree, "
                           "run `make install`, or `make hyprpm-machinery` for a hyprpm build",
                 beside, userLevel);
             return beside;

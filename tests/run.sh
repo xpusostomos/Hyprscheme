@@ -44,7 +44,7 @@ case $PLUGIN in /*) ;; *) PLUGIN=$PWD/$PLUGIN ;; esac
 #   HYPRSCHEME_SCM_DIR= PLUGIN=/usr/local/lib/hyprscheme/scheme-plugin-guile.so \
 #     BIN=/usr/local/bin/Hyprscheme tests/run.sh
 if [[ -z ${HYPRSCHEME_SCM_DIR+set} ]]; then
-  export HYPRSCHEME_SCM_DIR=$PWD/src/config/scheme
+  export HYPRSCHEME_SCM_DIR=$PWD
 fi
 
 # freshness warning: plugin and .scm are independent halves, and either can be
@@ -53,7 +53,7 @@ fi
 #   - a .scm edited after the last `make` (the plugin may register entry points
 #     the .scm no longer calls: C-calling APIs say "Unbound variable")
 #   - a plugin older than the .scm it will load (the same, from the other side)
-newest_scm=$(ls -t "$PWD"/src/config/scheme/*.scm 2>/dev/null | head -1)
+newest_scm=$(ls -t "$PWD"/*.scm 2>/dev/null | head -1)
 if [[ -n ${newest_scm:-} && "$newest_scm" -nt "$PLUGIN" ]]; then
   echo "warn: $(basename "$newest_scm") is newer than the plugin under test"
   echo "warn:   (expected for a Scheme-only edit; if the change touched C++ too, run make)"

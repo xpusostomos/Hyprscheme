@@ -32,9 +32,9 @@ import sys
 
 # the machinery as modules: the kernel and the API. There is no umbrella file —
 # the public set is derived by introspection, not read from a list.
-SCM_FILES = sorted(glob.glob('src/config/scheme/hyprscheme/*.scm'))
-CPP_FILES = sorted(glob.glob('src/config/scheme/*.cpp'))
-HPP_FILES = sorted(glob.glob('src/config/scheme/*.hpp'))
+SCM_FILES = sorted(glob.glob('hyprscheme/*.scm'))
+CPP_FILES = sorted(glob.glob('cpp/*.cpp'))
+HPP_FILES = sorted(glob.glob('cpp/*.hpp'))
 PLUGIN = 'scheme-plugin-guile.so'
 
 REG = re.compile(r'hl::bind<([\w:]+)>\("([^"]+)"\)')
@@ -43,7 +43,7 @@ REG = re.compile(r'hl::bind<([\w:]+)>\("([^"]+)"\)')
 # spaces of indent, a return type, a name, a parameter list, a semicolon — and
 # no body. `virtual`/`explicit`/`inline`/`static`/`template` are excluded
 # because those are members, constructors, or definitions with other rules.
-RUNTIME_HPP = 'src/config/scheme/Guile.hpp'
+RUNTIME_HPP = 'cpp/Guile.hpp'
 DECL = re.compile(r'^    (?!virtual|explicit|inline|static|template)'
                   r'([A-Za-z_][\w:<>,\*& ]*?)\s+([a-zA-Z_]\w*)\s*\([^;{]*\)\s*;\s*$', re.M)
 

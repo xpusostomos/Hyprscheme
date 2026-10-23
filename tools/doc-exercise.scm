@@ -59,7 +59,7 @@
                            (string-append (getcwd) "/" self)))))
     (string-append dir "/..")))
 
-(define (machinery-dir) (string-append (repo-dir) "/src/config/scheme"))
+(define (machinery-dir) (repo-dir))
 (define (wiki-dir) (string-append (repo-dir) "/../Hyprscheme.wiki"))
 
 (define (own-config-dir!)

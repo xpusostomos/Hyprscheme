@@ -36,7 +36,7 @@
          (dir (dirname (if (string-prefix? "/" self)
                            self
                            (string-append (getcwd) "/" self)))))
-    (string-append dir "/../src/config/scheme")))
+    (string-append dir "/..")))
 
 (define dir (machinery-dir))
 

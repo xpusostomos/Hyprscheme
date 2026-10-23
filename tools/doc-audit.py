@@ -39,7 +39,7 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WIKI = os.path.normpath(os.path.join(REPO, '..', 'Hyprscheme.wiki'))
 AWK = os.path.join(REPO, 'tests', 'wiki-examples.awk')
-MODULES = os.path.join(REPO, 'src/config/scheme/hyprscheme')
+MODULES = os.path.join(REPO, 'hyprscheme')
 
 # a maximal run of name characters, so hl-group is NOT pulled out of
 # hl-group-cycle!: `-` is in the class, and the lookbehind stops a match

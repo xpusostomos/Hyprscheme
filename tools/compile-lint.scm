@@ -61,7 +61,7 @@
   (let ((self (car (command-line))))
     (dirname (dirname (if (string-prefix? "/" self) self (string-append (getcwd) "/" self))))))
 
-(define scm-dir (string-append repo "/src/config/scheme"))
+(define scm-dir repo)
 
 ;; The load order is READ FROM init.scm, not repeated here.
 ;;

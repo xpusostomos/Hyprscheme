@@ -44,7 +44,7 @@ import os
 import re
 import sys
 
-DIR = 'src/config/scheme/hyprscheme'
+DIR = 'hyprscheme'
 KERNEL = 'kernel'
 CORE = 'core'
 ENUMS = 'enums'
@@ -72,7 +72,7 @@ UNEXPORTED = {'reset': 'the per-generation reset hook; private by design'}
 
 # the ENTRY POINT: the one file the host loads, which loads everything else by
 # name. Every module must be named here or it is never loaded at all.
-ENTRY_PATH = 'src/config/scheme/init.scm'
+ENTRY_PATH = 'init.scm'
 # the LEAF modules every family may import: the kernel (the C++ boundary), core
 # (shared plumbing), enums (the enum MACHINERY) and values (the concrete enums
 # more than one family speaks). They hold no compositor knowledge of their own,

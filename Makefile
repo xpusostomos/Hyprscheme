@@ -35,7 +35,7 @@ HYPR_COMMIT ?= c26dbf93
 HYPRLAND_VERSION := $(shell git -C $(HYPRLAND_SRC) describe --tags --always 2>/dev/null || echo $(HYPR_COMMIT))
 CXXFLAGS += -std=c++2b -g -O2 -fPIC -DHYPRLAND_VERSION='"$(HYPRLAND_VERSION)"'
 INCLUDES = -I$(HYPRLAND_SRC) -I$(HYPRLAND_SRC)/src -I$(HYPRLAND_SRC)/protocols \
-           -Isrc/config/scheme \
+           -Icpp \
            `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils`
 LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 
@@ -50,9 +50,9 @@ LIBS = -lpthread -lm -ldl -lrt -lcurses -llz4 -lz `pkg-config --libs lua55`
 # else by name. Its presence is what schemeDir() probes for. There is no
 # umbrella file: the public API is derived by introspecting the modules, not
 # read from a list, and the module SET is a glob (see SCM_ALL, below).
-SCM_ENTRY = src/config/scheme/init.scm
-SCM_SRC   = $(wildcard src/config/scheme/*.scm) \
-            $(wildcard src/config/scheme/hyprscheme/*.scm)
+SCM_ENTRY = init.scm
+SCM_SRC   = $(wildcard *.scm) \
+            $(wildcard hyprscheme/*.scm)
 
 # the compiled forms, built beside the .scm by `make scm-compile` and shipped by
 # install. They are an ACCELERATOR, never a replacement: `reload-module` (the
@@ -66,16 +66,16 @@ INCLUDES   += `pkg-config --cflags guile-3.0`
 GUILIBS     = `pkg-config --libs guile-3.0`
 
 # one translation unit per object family; each owns its entry points and their
-# registration (see src/config/scheme/SchemeInternals.hpp)
-COMMON_OBJS = src/config/scheme/Host.o src/config/scheme/SchemeLayout.o \
-              src/config/scheme/Layer.o src/config/scheme/Timer.o \
-              src/config/scheme/Notification.o src/config/scheme/Gesture.o \
-              src/config/scheme/Rule.o src/config/scheme/Bind.o \
-              src/config/scheme/Config.o src/config/scheme/Workspace.o src/config/scheme/Monitor.o \
-              src/config/scheme/Query.o src/config/scheme/Window.o src/config/scheme/Group.o \
-              src/config/scheme/Exec.o src/config/scheme/Event.o \
-              src/config/scheme/Handles.o src/plugin-main.o
-HOST_GUILE  = src/config/scheme/Guile.o
+# registration (see cpp/SchemeInternals.hpp)
+COMMON_OBJS = cpp/Host.o cpp/SchemeLayout.o \
+              cpp/Layer.o cpp/Timer.o \
+              cpp/Notification.o cpp/Gesture.o \
+              cpp/Rule.o cpp/Bind.o \
+              cpp/Config.o cpp/Workspace.o cpp/Monitor.o \
+              cpp/Query.o cpp/Window.o cpp/Group.o \
+              cpp/Exec.o cpp/Event.o \
+              cpp/Handles.o cpp/plugin-main.o
+HOST_GUILE  = cpp/Guile.o
 OBJ         = $(COMMON_OBJS) $(HOST_GUILE)
 
 TARGET       = scheme-plugin-guile.so
@@ -106,7 +106,7 @@ hyprland:
 $(TARGET): $(COMMON_OBJS) $(HOST_GUILE) $(HYPRLAND_SRC)/build/Hyprland
 	$(CXX) -shared -fPIC -o $@ $(filter %.o,$^) $(LIBS) $(GUILIBS)
 
-src/plugin-main.o: plugin-main.cpp
+cpp/plugin-main.o: cpp/plugin-main.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 %.o: %.cpp
@@ -138,7 +138,7 @@ src/plugin-main.o: plugin-main.cpp
 # `cd` (into its cache dir), so that was every hyprpm build: the machinery was
 # never installed and hyprpm still reported success (it checks only that the
 # declared output exists, never a step's exit status).
-SCM_DIR     = $(CURDIR)/src/config/scheme
+SCM_DIR     = $(CURDIR)
 
 # THE FILE LIST IS A GLOB, from the filesystem, not a hand-kept list. There was
 # one (`SCM_FAMILIES`) and it silently omitted a module: `enums` was added and
@@ -184,10 +184,11 @@ scm-compile:
 #
 # Output the SAME artifact name: hyprpm's manifest declares it, and it is what
 # the compositor dlopens.
-# the sources, spelled out. Deriving them from $(OBJ) cannot work: plugin-main.o
-# sits at the repo ROOT while every other object is under src/, so a blanket
-# .o→.cpp mapping produces a path that does not exist.
-HYPRPM_SRCS := plugin-main.cpp $(filter-out src/plugin-main.cpp,$(COMMON_OBJS:.o=.cpp)) $(HOST_GUILE:.o=.cpp)
+# the sources, spelled out. Deriving them from $(OBJ) cannot work: every object
+# is under cpp/ now, but the .cpp names must still be mapped explicitly rather
+# than by a blanket rule, since HYPRPM_OBJS must not collide with the tree
+# build's .o files (they are built from a DIFFERENT header set).
+HYPRPM_SRCS := $(COMMON_OBJS:.o=.cpp) $(HOST_GUILE:.o=.cpp)
 HYPRPM_OBJS := $(HYPRPM_SRCS:.cpp=.hyprpm.o)
 HYPRPM_DEPS := $(HYPRPM_OBJS:.o=.d)
 
@@ -209,7 +210,7 @@ hyprpm-plugin: hyprpm-clean
 	ver="$$(pkg-config --modversion hyprland)"; \
 	echo "building against: $$ver ($$(pkg-config --variable=prefix hyprland))"; \
 	for src in $(HYPRPM_SRCS); do \
-	    $(CXX) $(CXXFLAGS) -DHYPRLAND_VERSION="\"$$ver\"" $$pc -Isrc/config/scheme \
+	    $(CXX) $(CXXFLAGS) -DHYPRLAND_VERSION="\"$$ver\"" $$pc -Icpp \
 	        `pkg-config --cflags pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon hyprutils` \
 	        `pkg-config --cflags guile-3.0` -MMD -MP -c "$$src" -o "$${src%.cpp}.hyprpm.o" || exit 1; \
 	done; \
@@ -240,10 +241,10 @@ HYPRSCHEME_SCM  := $(HYPRSCHEME_DATA)/hyprscheme/scm
 hyprpm-machinery: scm-compile
 	@rm -rf $(HYPRSCHEME_SCM)
 	@install -d $(HYPRSCHEME_SCM)/hyprscheme
-	@install -m 644 src/config/scheme/init.scm $(HYPRSCHEME_SCM)/
-	@install -m 644 src/config/scheme/hyprscheme/*.scm $(HYPRSCHEME_SCM)/hyprscheme/
-	@install -m 644 src/config/scheme/init.go $(HYPRSCHEME_SCM)/
-	@install -m 644 src/config/scheme/hyprscheme/*.go $(HYPRSCHEME_SCM)/hyprscheme/
+	@install -m 644 init.scm $(HYPRSCHEME_SCM)/
+	@install -m 644 hyprscheme/*.scm $(HYPRSCHEME_SCM)/hyprscheme/
+	@install -m 644 init.go $(HYPRSCHEME_SCM)/
+	@install -m 644 hyprscheme/*.go $(HYPRSCHEME_SCM)/hyprscheme/
 	@echo "machinery installed to $(HYPRSCHEME_SCM)"
 	@echo "(the plugin finds it automatically when nothing is beside the .so)"
 
@@ -270,10 +271,10 @@ install: $(TARGET) scm-compile
 	fi
 	install -d $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme
 	install -m 644 $(TARGET) $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-	install -m 644 src/config/scheme/init.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-	install -m 644 src/config/scheme/hyprscheme/*.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
-	install -m 644 src/config/scheme/init.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/
-	install -m 644 src/config/scheme/hyprscheme/*.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
+	install -m 644 init.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 hyprscheme/*.scm $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
+	install -m 644 init.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/
+	install -m 644 hyprscheme/*.go $(DESTDIR)$(PREFIX)/lib/hyprscheme/hyprscheme/
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(HYPRLAND_SRC)/build/Hyprland $(DESTDIR)$(PREFIX)/bin/Hyprscheme
 	install -m 755 $(HYPRLAND_SRC)/build/start/start-hyprland $(DESTDIR)$(PREFIX)/bin/start-hyprscheme
@@ -360,7 +361,7 @@ install-local:
 check: $(TARGET)
 	@echo "== syntax-check"; guile -s tools/syntax-check.scm $(SCM_SRC)
 	@echo "== module-audit"; python3 tools/module-audit.py
-	@echo "== load-check";   guile --no-auto-compile -L src/config/scheme -s tools/load-check.scm >/dev/null 2>&1 \
+	@echo "== load-check";   guile --no-auto-compile -L . -s tools/load-check.scm >/dev/null 2>&1 \
 	  && echo "ok: the machinery loads" || { echo "load-check FAILED"; exit 1; }
 	@echo "== compile-lint"; guile --no-auto-compile -s tools/compile-lint.scm \
 	  || { echo "compile-lint FAILED"; exit 1; }

@@ -26,7 +26,7 @@
          (dir (dirname (if (string-prefix? "/" self)
                            self
                            (string-append (getcwd) "/" self)))))
-    (string-append dir "/../src/config/scheme")))
+    (string-append dir "/..")))
 
 (define (form-line form)
   (or (assq-ref (source-properties form) 'line) 0))

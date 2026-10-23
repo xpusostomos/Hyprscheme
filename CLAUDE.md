@@ -42,6 +42,13 @@ can fix should be fixed before a piece of work is complete.
   headers). The Chez build lives frozen in `chez/` with its own
   Makefile (and `BUILDCHEZ.md`); its paths point at the SAME
   `../../ChezScheme` / `../../Hyprland` trees.
+- **The tree layout is `cpp/` + `hyprscheme/`, with `init.scm` at the
+  root.** The C++ is `cpp/` (families, headers, `plugin-main.cpp`); the
+  Scheme modules are `hyprscheme/`, and BOTH names matter: `hyprscheme/` IS
+  the Guile module name (see "The C++ layout"), while `cpp/` is a plain
+  directory that must stay on the include path (`-Icpp`). `init.scm` must
+  sit at the root, beside the module directory — `%load-path` points at the
+  directory CONTAINING it, and the host probes for `init.scm` there.
 - The compositor **binary is a make prerequisite** of the plugin — a
   Hyprland rebuild forces a plugin relink automatically (the plugin
   resolves Hyprland symbols at load time).
@@ -528,7 +535,26 @@ relying on that.
 
 ## The C++ layout: one translation unit per object family
 
-`src/config/scheme/` is split by object family (FABLE §4.7 Step G), not
+**The tree is two top-level directories: `cpp/` and `hyprscheme/`.** It used
+to be `src/config/scheme/` holding the `.cpp`, the `.hpp` AND the `.scm`
+together — a fork path inherited from when this was Hyprland's own scheme
+backend, and two languages that have nothing to do with each other at the
+filesystem level. `init.scm` sits at the repo ROOT, beside `hyprscheme/`,
+because `%load-path` must point at the directory CONTAINING the module
+directory (see below).
+
+```
+cpp/          the 18 family .cpp + their .hpp + plugin-main.cpp
+hyprscheme/   the 22 modules  ← THIS NAME IS THE MODULE NAME, see below
+init.scm      the entry point — beside hyprscheme/, not inside it
+```
+
+**`hyprscheme/` cannot be renamed.** `(hyprscheme kernel)` resolves as
+`hyprscheme/kernel.scm` against `%load-path`, so the directory name IS the
+module name; `make scm-compile` and both install targets depend on it.
+`tests/t-generation.sh` is what catches a mistake here.
+
+`cpp/` is split by object family (FABLE §4.7 Step G), not
 by layer. Each family file **owns its entry points and registers them**
 (`void registerX()`), and `attachInterp` calls each one — so nothing
 outside a family needs its entry points declared:
@@ -1050,7 +1076,7 @@ that `fullscreen-handler` was one of them. Neither was true:
   `../Hyprland/build/Hyprland` (never an installed one — testing what is
   installed is a different question), the plugin is this directory's
   `scheme-plugin-guile.so`, and `HYPRSCHEME_SCM_DIR` is exported at the
-  tree's `src/config/scheme` so the machinery that runs is the machinery
+  tree's repo ROOT so the machinery that runs is the machinery
   under test. `BIN=`/`PLUGIN=` override; both harnesses fail loudly rather
   than silently exec a missing binary.
   `t-coverage` fails if a public API lacks a test.

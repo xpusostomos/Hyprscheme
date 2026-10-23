@@ -50,7 +50,7 @@ PLUGIN="${PLUGIN:-$REPO/scheme-plugin-guile.so}"
 case $PLUGIN in /*) ;; *) PLUGIN=$REPO/$PLUGIN ;; esac
 [[ -f $PLUGIN ]] || { echo "FAIL: no plugin at $PLUGIN — run make"; exit 1; }
 # the machinery comes from the tree, named explicitly (not a compiled-in path)
-export HYPRSCHEME_SCM_DIR=$REPO/src/config/scheme
+export HYPRSCHEME_SCM_DIR=$REPO
 
 WORK=/tmp/hyprscheme-soak.$$
 mkdir -p "$WORK"
