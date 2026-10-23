@@ -1023,6 +1023,51 @@ tested, and the route where the fix did not hold.
 - The temporary probe used to reproduce this (`tests/t-probe-nested.sh`) is
   deleted. 20/20 on the suite, `make check` 7/7.
 
+== BIND FLAGS: a values enum, spelled the way Bind.hpp spells them ==
+- `bind-flag-enum` (in (hyprscheme core), PUBLIC) names the 16
+  BIND_FLAG_* bits: locked release repeat long-press non-consuming
+  auto-consuming transparent ignore-mods dont-inhibit click drag
+  submap-universal allow-input-capture device-inclusive catch-all mouse.
+  Declared in Bind.hpp's ORDER and written `(ash 1 N)` beside its
+  `(1 << N)`, so the two tables can be compared line by line — which is
+  the whole point: the day they stop matching is the day an option
+  silently lands on the wrong flag.
+- hl--bind-flags now combines them with enum-value + logior instead of
+  adding decimal literals. The three DERIVED bits (click/drag imply
+  release; #:devices implies device-inclusive unless opted out; the key
+  name "catchall" implies catch-all) are each named at the point they are
+  set and sit beside the line of Bind.hpp that does the same thing.
+- BUG FOUND WHILE DOING THIS, and the reason logior is load-bearing
+  rather than tidy: the old code combined the bits with `+`, and click
+  and drag EACH imply RELEASE — so `(hl--bind-flags #:click #t
+  #:release #t)` added 2+2 = 4 = BIND_FLAG_REPEAT. Asking to bind a click
+  silently armed autorepeat. Measured: the call answered 516 and
+  `(logand 516 4)` was 4. logior cannot collide however the options
+  overlap.
+- core may now import (hyprscheme enums) — core is a leaf like enums, so
+  this is leaf-to-leaf and not core reaching into a family. module-audit's
+  CORE clause updated (and its docstring says why). core's #:export gained
+  bind-flag-enum.
+- TESTS (t-api.sh): the individual values against Bind.hpp's shifts
+  (locked 1 … catch-all 16384, mouse 32768, ignore-mods 128), the table's
+  LENGTH (16 — a bit added upstream and not here is an option that cannot
+  be expressed), and the combination the old `+` got wrong. All three
+  verified to fail on the old code: with `+` restored the probe reports
+  `click+release = 516 want 514` and `logand 4 = 4 want 0`.
+- RULES written into CLAUDE.md, as Chris asked, in a new "COPIED
+  CONSTANTS — the original's FORM, and a NAME for the set" section before
+  ENUMS: (a) a value copied from Hyprland is written the way Hyprland
+  writes it, because a copied table has to be diffable by eye — and the
+  spelling follows the ORIGINAL, not the tree (inotify.scm keeps padded
+  hex because <sys/inotify.h> lists hex); (b) where the copied set is a
+  set, NAME it — a values enum when the API speaks the values; and for a
+  bitMASK specifically, the bits are the named set and they combine with
+  logior, never +, with the bug above as the worked example. The ENUMS
+  section gained the "used by core" placement case for bind-flag-enum.
+- WIKI: bind-flags.md gained "The flag bits are a named set" — the
+  symbol list, two enum-value examples, and why you still write the
+  keywords.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

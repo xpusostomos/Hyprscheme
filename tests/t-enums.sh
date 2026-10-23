@@ -119,4 +119,46 @@ val '(enum-value key-state-enum (quote down))'   '1'
 val '(enum-value key-state-enum (quote repeat))' '2'
 err '(enum-value key-state-enum (quote sideways))' "not a value of this enum"
 
+# ---- an enum used by CORE itself --------------------------------------------
+# bind-flag-enum belongs to (hyprscheme core): the BIND_FLAG_* bits are core's
+# own data — hl--bind-flags turns an hl-bind-add! option set into the one
+# integer the boundary takes, and core builds the table from it. Core is a leaf
+# like (hyprscheme enums), so it may import the machinery; core is NOT in
+# (hyprscheme values), which is for a set more than one FAMILY speaks.
+#
+# The bits are pinned against Bind.hpp's own shifts, because a table shifted by
+# one would still be a perfectly coherent enum and would put every option on its
+# neighbour's flag. The ORDER matters as much as the values — Bind.hpp lists
+# them locked (1 << 0) through mouse (1 << 15), and this must read the same way,
+# which is what makes the two lists comparable line by line.
+val '(enum-value bind-flag-enum (quote locked))'                '1'
+val '(enum-value bind-flag-enum (quote release))'               '2'
+val '(enum-value bind-flag-enum (quote repeat))'                '4'
+val '(enum-value bind-flag-enum (quote long-press))'            '8'
+val '(enum-value bind-flag-enum (quote non-consuming))'         '16'
+val '(enum-value bind-flag-enum (quote auto-consuming))'        '32'
+val '(enum-value bind-flag-enum (quote transparent))'           '64'
+val '(enum-value bind-flag-enum (quote ignore-mods))'           '128'
+val '(enum-value bind-flag-enum (quote dont-inhibit))'          '256'
+val '(enum-value bind-flag-enum (quote click))'                 '512'
+val '(enum-value bind-flag-enum (quote drag))'                  '1024'
+val '(enum-value bind-flag-enum (quote submap-universal))'      '2048'
+val '(enum-value bind-flag-enum (quote allow-input-capture))'   '4096'
+val '(enum-value bind-flag-enum (quote device-inclusive))'      '8192'
+val '(enum-value bind-flag-enum (quote catch-all))'             '16384'
+val '(enum-value bind-flag-enum (quote mouse))'                 '32768'
+# the declaration ORDER, which is Bind.hpp's order — the whole point of writing
+# the shifts out rather than computing them. Read through enum-values->enum, so
+# this uses only public API and is the same route a config has.
+ok  '(equal? (enum-set->list (enum-values->enum bind-flag-enum))
+             (quote (locked release repeat long-press non-consuming
+                     auto-consuming transparent ignore-mods dont-inhibit
+                     click drag submap-universal allow-input-capture
+                     device-inclusive catch-all mouse)))'
+# ...and the set is COMPLETE at 16. A flag added in the compositor and not here
+# is an option that cannot be expressed at all; one removed and left here is a
+# bit that silently means something else. Both are this line.
+val '(length (enum-set->list (enum-values->enum bind-flag-enum)))' '16'
+err '(enum-value bind-flag-enum (quote sideways))' "not a value of this enum"
+
 exit $FAILED

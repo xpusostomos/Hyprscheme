@@ -891,6 +891,55 @@ the string path into a hex passthrough.
 **A colour argument's absent value is `#f`, not 0**, in `hl-notify!`: 0 is a
 legal colour (transparent black).
 
+### COPIED CONSTANTS — the original's FORM, and a NAME for the set
+
+**When a value is copied from Hyprland, write it the way Hyprland writes it.**
+Not a tidier equivalent, not the decimal it works out to — the same tokens.
+The reason is the only one that matters: the copied table has to be **diffable
+by eye** against the original, because the day it stops matching is the day a
+silent misbehaviour starts. `(ash 1 11)` sits next to `(1 << 11)` and a reader
+can compare the two columns; `2048` cannot be compared to anything.
+
+- `hyprscheme/core.scm`'s `bind-flag-enum` is the model: `Bind.hpp`'s
+  `BIND_FLAG_*` are `(1 << 0) … (1 << 15)` in declaration order, and the enum
+  is `(locked . ,(ash 1 0)) … (mouse . ,(ash 1 15))` in the same order — so the
+  two lists align line for line and a flag inserted upstream in the middle
+  shows up as an off-by-one you can SEE.
+- The spelling follows the ORIGINAL, not the tree: `inotify.scm` uses padded
+  hex (`#x00000800`) because that is how `<sys/inotify.h>` lists its masks, and
+  `1 << n` is written `(ash 1 n)` in Scheme because `ash` is Scheme's shift.
+  Where the original is decimal, the copy is decimal.
+- **A comment is part of the form when the original has one** — the derived
+  bits in `hl--bind-flags` (click/drag imply RELEASE, `#:devices` implies
+  DEVICE_INCLUSIVE, the `"catchall"` key name implies CATCH_ALL) are each
+  written next to the line of the original that does the same thing.
+
+**And where a copied set of values is a SET — one value out of a fixed list, or
+a mask of named bits — name it.** A bare integer in the code is a value with no
+name, and a name is what makes the wrong value visible at the call site. Prefer,
+in order: a **values enum** (`define-enum-values`, the ENUMS section below) when
+the API speaks these values, a plain `enum`/`define` when it is internal, and a
+bare literal only when it is genuinely a single one-off number.
+
+A **bitmask** is the case worth being explicit about, because it is not one
+value out of a set — it is a *combination* of them, and that changes the rule:
+
+- the BITS are the named set (`bind-flag-enum`, one entry per `BIND_FLAG_*`);
+- they combine with **`logior`, never `+`**. This is not style: `+` lets two
+  names for the same bit ACCUMULATE, and that was a real bug — `click` and
+  `drag` each imply `RELEASE`, so `(+ …)` with both set produced `2+2 = 4`,
+  which is `BIND_FLAG_REPEAT`, and `(hl-bind-add! … #:click #t #:release #t)`
+  silently armed autorepeat. `logior` cannot collide however the options
+  overlap, which is what a set of bits wants.
+- the DERIVED bits (those three above) are named at the point they are set, not
+  inlined, so the set the caller ends up with stays complete and readable.
+
+`tests/t-enums.sh` pins the SET — all sixteen values against `Bind.hpp`'s
+shifts, the declaration ORDER, and the LENGTH (a bit added in the compositor and
+not here is an option that silently cannot be expressed) — and `tests/t-api.sh`
+pins the COMBINING behaviour, including the `click`+`release` case the old `+`
+got wrong.
+
 ### ENUMS — a rule, not a preference
 **A function that takes or returns ONE VALUE OUT OF A FIXED SET speaks in
 symbols, and that set is a named enum.** It does not take a bare integer and it
@@ -922,6 +971,11 @@ Where a concrete enum GOES, which is the thing to get right when adding one —
 
 - **used by ONE family** → that family. `fullscreen-mode`
   (`keep none maximized fullscreen`) is defined in `window.scm`.
+- **used by core, or by core and a family** → `(hyprscheme core)`, which may
+  import `(hyprscheme enums)` for exactly this reason. `bind-flag-enum` lives
+  there: the flag bits are core's own data (`hl--bind-flags` builds the integer
+  every `hl-bind-add!` option set reaches the boundary as), and core is a leaf
+  like enums, so this is leaf-to-leaf and not core reaching into a family.
 - **used by MORE THAN ONE family** → `(hyprscheme values)`. A family may not
   import another family, so a shared set has nowhere else both can reach.
   `direction-enum` (`up right down left`), `direction-or-none-enum` (the same

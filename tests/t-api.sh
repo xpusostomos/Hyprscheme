@@ -884,6 +884,19 @@ val '(hl--bind-flags #:devices (quote ("k1")))' '8192'
 val '(hl--bind-flags #:devices (quote ("k1")) #:device-inclusive #f)' '0'
 val '(hl--bind-flags #:device-inclusive #t)' '8192'
 val '(hl--bind-flags)' '0'
+# THE BUG THIS PASS FIXED, and the reason the bits are combined with logior
+# rather than `+`. click and drag each imply RELEASE, so `+` added 2+2 = 4 —
+# which is BIND_FLAG_REPEAT. Asking to bind a click therefore armed autorepeat
+# as well (measured: this answered 516, and `(logand 516 4)` was 4). logior
+# cannot collide however the options overlap.
+#
+# The VALUES of the flag bits — the enum itself — are pinned in t-enums.sh,
+# which is where every concrete enum's set lives; what is here is the combining
+# behaviour, which is an hl-bind-add! option concern.
+val '(hl--bind-flags #:click #t #:release #t)' '514'
+val '(logand (hl--bind-flags #:click #t #:release #t) 4)' '0'
+val '(logand (hl--bind-flags #:click #t #:release #t) 512)' '512'
+val '(hl--bind-flags #:key "catchall")' '16384'
 # exclusivity rules (upstream's three checks at the binding layer)
 bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:click #t #:drag #t))))')
 [[ "$bad_bf" == *"click and drag are exclusive"* ]] || { echo "FAIL: click+drag not rejected => [$bad_bf]"; FAILED=1; }

@@ -83,9 +83,16 @@ def visible_names():
     for one here even before, since a name the wiki uses only has to EXIST."""
     names = set()
     for f in os.listdir(MODULES):
-        if f.endswith('.scm'):
-            for body in EXPORT.findall(open(os.path.join(MODULES, f)).read()):
-                names |= set(body.split())
+        # SKIP DOTFILES. Emacs writes a lock file beside a file being edited —
+        # `.#core.scm`, a dangling symlink to user@host.pid — and it ENDS WITH
+        # .scm, so a suffix test alone accepts it and `open()` then raises
+        # FileNotFoundError, which killed this tool (and so `make check`) for
+        # no reason at all. Nothing in a module directory that starts with a
+        # dot is machinery.
+        if f.startswith('.') or not f.endswith('.scm'):
+            continue
+        for body in EXPORT.findall(open(os.path.join(MODULES, f)).read()):
+            names |= set(body.split())
     return {n for n in names if n.startswith('hl-')}
 
 

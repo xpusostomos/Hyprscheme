@@ -27,8 +27,13 @@
             inotify-close inotify-read-events
             inotify-event-mask inotify-event-name inotify-event-wd
             IN-NONBLOCK IN-CLOEXEC
-            IN-CLOSE-WRITE IN-MOVED-TO IN-CREATE IN-DELETE-SELF
-            IN-IGNORED IN-Q-OVERFLOW IN-ISDIR
+            IN-ACCESS IN-MODIFY IN-ATTRIB IN-CLOSE-WRITE
+            IN-CLOSE-NOWRITE IN-OPEN IN-MOVED-FROM IN-MOVED-TO
+            IN-CREATE IN-DELETE IN-DELETE-SELF IN-MOVE-SELF
+            IN-UNMOUNT IN-Q-OVERFLOW IN-IGNORED
+            IN-CLOSE IN-MOVE IN-ALL-EVENTS
+            IN-ONLYDIR IN-DONT-FOLLOW IN-EXCL-UNLINK
+            IN-MASK-CREATE IN-MASK-ADD IN-ISDIR IN-ONESHOT
             libc libc-procedure
             c-inotify-init c-inotify-init1 c-inotify-add-watch
             c-inotify-rm-watch c-read c-close
@@ -61,21 +66,47 @@
 (define c-read  (libc-procedure ssize_t "read" (list int '* size_t)))
 (define c-close (libc-procedure int "close" (list int)))
 
+(define IN-ACCESS        #x00000001)    ;; File was accessed
+(define IN-MODIFY        #x00000002)    ;; File was modified
+(define IN-ATTRIB        #x00000004)    ;; Metadata changed
+(define IN-CLOSE-WRITE   #x00000008)    ;; Writable file was closed
+(define IN-CLOSE-NOWRITE #x00000010)    ;; Unwritable file closed
+(define IN-OPEN          #x00000020)    ;; File was opened
+(define IN-MOVED-FROM    #x00000040)    ;; File was moved from X
+(define IN-MOVED-TO      #x00000080)    ;; File was moved to Y
+(define IN-CREATE        #x00000100)    ;; Subfile was created
+(define IN-DELETE        #x00000200)    ;; Subfile was deleted
+(define IN-DELETE-SELF   #x00000400)    ;; Self was deleted
+(define IN-MOVE-SELF     #x00000800)    ;; Self was moved
+
+;; the following are legal events.  they are sent as needed to any watch
+(define IN-UNMOUNT       #x00002000)    ;; Backing fs was unmounted
+(define IN-Q-OVERFLOW    #x00004000)    ;; Event queued overflowed
+(define IN-IGNORED       #x00008000)    ;; File was ignored
+
+;; helper events
+(define IN-CLOSE         (logior IN-CLOSE-WRITE IN-CLOSE-NOWRITE)) ;; close
+(define IN-MOVE          (logior IN-MOVED-FROM IN-MOVED-TO))       ;; moves
+
+;; special flags
+(define IN-ONLYDIR       #x01000000)    ;; only watch the path if it is a directory
+(define IN-DONT-FOLLOW   #x02000000)    ;; don't follow a sym link
+(define IN-EXCL-UNLINK   #x04000000)    ;; exclude events on unlinked objects
+(define IN-MASK-CREATE   #x10000000)    ;; only create watches
+(define IN-MASK-ADD      #x20000000)    ;; add to the mask of an already existing watch
+(define IN-ISDIR         #x40000000)    ;; event occurred against dir
+(define IN-ONESHOT       #x80000000)    ;; only send event once
+
+(define IN-ALL-EVENTS (logior IN-ACCESS IN-MODIFY IN-ATTRIB IN-CLOSE-WRITE
+                              IN-CLOSE-NOWRITE IN-OPEN IN-MOVED-FROM
+                              IN-MOVED-TO IN-DELETE IN-CREATE IN-DELETE-SELF
+                              IN-MOVE-SELF))
+
 ;; ---- flags, straight from inotify(7) ------------------------------------------
 ;; inotify_init1
-(define IN-NONBLOCK #x00000800)
-(define IN-CLOEXEC  #x00080000)
+(define IN-NONBLOCK #o00004000)
+(define IN-CLOEXEC  #o02000000)
 
-;; watch masks
-(define IN-DELETE-SELF #x00000400)
-(define IN-CLOSE-WRITE #x00000008)
-(define IN-MOVED-TO    #x00000080)
-(define IN-CREATE      #x00000100)
-
-;; masks the KERNEL sets on an event rather than the caller
-(define IN-IGNORED    #x00008000)
-(define IN-Q-OVERFLOW #x00004000)
-(define IN-ISDIR      #x40000000)
 
 ;; ---- the wrappers -------------------------------------------------------------
 (define (inotify-init)

@@ -8,9 +8,15 @@ The machinery is modules, and the split is only worth having if it stays true:
   - a FAMILY module imports only the SHARED set — (hyprscheme kernel),
     (hyprscheme core) and (hyprscheme enums) — and nothing else of ours: it
     never reaches into another family;
-  - (hyprscheme core) and (hyprscheme enums) are LEAF modules: each imports the
-    kernel only, and holds no compositor knowledge of its own. That is what
-    separates them from a family, and why every family may import them;
+  - (hyprscheme core) and (hyprscheme enums) are LEAF modules: neither imports a
+    FAMILY, and neither holds compositor knowledge of its own. That is what
+    separates them from a family, and why every family may import them.
+    (hyprscheme enums) imports the kernel only — it is the enum MACHINERY, all
+    mechanism and no data. (hyprscheme core) ALSO imports (hyprscheme enums),
+    which is not a weakening of the rule but the same one applied: enums is a
+    leaf like core, and core needs it to build a NAMED SET of values from data
+    it already owns (the eBindFlags bits — see bind-flag-enum in core.scm). The
+    rule that matters is the one below, that neither reaches into a family;
   - (hyprscheme extras) and (hyprscheme emacs-keymaps) are the modules allowed
     to compose the raw API, so they may import families;
   - nothing calls a name a FAMILY owns from outside a family, except extras;
@@ -151,7 +157,11 @@ def main():
         if name == KERNEL:
             return own
         if name == CORE:
-            return own | exports_of(read(fams[KERNEL]))
+            # core may reach enums as well as the kernel: it builds a named set
+            # of values (bind-flag-enum) and so needs the enum machinery. enums
+            # is a leaf like core — it imports the kernel and nothing else — so
+            # this is leaf-to-leaf, not core reaching into a family.
+            return own | exports_of(read(fams[KERNEL])) | exports_of(read(fams[ENUMS]))
         if name == ENUMS:
             return own | exports_of(read(fams[KERNEL]))
         if name == VALUES:

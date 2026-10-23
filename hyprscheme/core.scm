@@ -7,6 +7,7 @@
 
 (define-module (hyprscheme core)
   #:export (
+           bind-flag-enum
            hl--bind-flags hl--bool-act hl--chord-key hl--chord-mods
            hl--modifier-token? hl--modifier-tokens
            hl--gesture-mode
@@ -24,6 +25,7 @@
            string->color))
 
 (use-modules (hyprscheme kernel))
+(use-modules (hyprscheme enums))
 
 (use-modules (ice-9 exceptions)
              (rnrs io ports)
@@ -181,12 +183,48 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
         (let ((tail (hl--plist-cdr l)))
           (cons (car l) (cons (f (car l) (car tail)) (loop (cdr tail))))))))
 
-;; eBindFlags bits from src/keybinds/Bind.hpp
-;; keyword options → eBindFlags bits, mirrored from upstream Keybinds/Bind.hpp
-;; (BIND_FLAG_* = 1 << n). Derived bits are added separately in hl--bind-flags:
-;; click/drag imply RELEASE, #:device-inclusive defaults from the devices list,
-;; and the key name "catchall" implies CATCH_ALL (upstream LuaBindingsToplevel.cpp).
+;; ---- eBindFlags — the bind option bits ---------------------------------------
+;;
+;; THESE ARE MIRRORED FROM C++ BY HAND, and they are the one place in the
+;; Scheme tree that has to be. `hl--bind-flags` combines them into the single
+;; integer the boundary takes, and a Scheme function cannot read a C++ enum — so
+;; the values are copied, and the job is to make a MISMATCH VISIBLE.
+;;
+;; So the spellings below deliberately match src/keybinds/Bind.hpp line for
+;; line: same names (modulo the case a symbol forces), SAME ORDER, and the same
+;; (ash 1 N) rather than a decimal literal. A number like 32768 tells you
+;; nothing; (ash 1 15) sits next to Bind.hpp's (1 << 15) and can be diffed by
+;; eye. That is the whole reason this is written out rather than computed.
+;;
+;; The `,` before each (ash ...) is what makes this a table rather than an
+;; expression: the shifts are evaluated, the pairs are written the way Bind.hpp
+;; writes them, and the two can be compared line by line.
+(define-enum-values bind-flag-enum
+  `((locked              . ,(ash 1 0))
+    (release             . ,(ash 1 1))
+    (repeat              . ,(ash 1 2))
+    (long-press          . ,(ash 1 3))
+    (non-consuming       . ,(ash 1 4))
+    (auto-consuming      . ,(ash 1 5))
+    (transparent         . ,(ash 1 6))
+    (ignore-mods         . ,(ash 1 7))
+    (dont-inhibit        . ,(ash 1 8))
+    (click               . ,(ash 1 9))
+    (drag                . ,(ash 1 10))
+    (submap-universal    . ,(ash 1 11))
+    (allow-input-capture . ,(ash 1 12))
+    (device-inclusive    . ,(ash 1 13))
+    (catch-all           . ,(ash 1 14))
+    (mouse               . ,(ash 1 15))))
 
+;; Combine the option keywords into the single integer the boundary takes.
+;;
+;; COMBINED WITH logior, NOT +, and that is load-bearing rather than tidy. Two
+;; options that mean the same bit used to ACCUMULATE: click and drag each imply
+;; RELEASE, so `(+ ... )` with both set added 2+2 = 4 — which is BIND_FLAG_REPEAT,
+;; so `(hl-bind-add! ... #:click #t #:release #t)` silently armed autorepeat.
+;; (Measured: that call answered 516, and `(logand 516 4)` is 4.) logior is what
+;; a set of bits wants and cannot collide however the options overlap.
 (define* (hl--bind-flags #:key (click #f) (drag #f) (devices #f)
                          (device-inclusive 'unset) (locked #f) (release #f)
                          (repeat #f) (long-press #f) (non-consuming #f)
@@ -200,18 +238,40 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
     (error "hl-bind-add!: long-press / release is incompatible with repeat"))
   (when (and mouse (or repeat locked release))
     (error "hl-bind-add!: mouse is exclusive with repeat/locked/release"))
-  (+ (if (or click drag) 2 0)                    ; click/drag imply release: upstream also sets BIND_FLAG_RELEASE for them
-     (if (cond ((eq? device-inclusive 'unset) (pair? devices))  ; absent: inclusive when devices are listed (upstream default true)
-               (device-inclusive #t)                          ; explicit #t
-               (else #f))                                     ; explicit #:device-inclusive #f opts OUT of inclusivity
-         8192
-         0)
-     (if (equal? key "catchall") 16384 0)      ; upstream: key "catchall" ⇒ BIND_FLAG_CATCH_ALL
-     (+ (if locked 1 0) (if release 2 0) (if repeat 4 0) (if long-press 8 0)
-        (if non-consuming 16 0) (if auto-consuming 32 0) (if transparent 64 0)
-        (if ignore-mods 128 0) (if dont-inhibit 256 0) (if click 512 0)
-        (if drag 1024 0) (if submap-universal 2048 0)
-        (if allow-input-capture 4096 0) (if mouse 32768 0))))
+  ;; the option keywords, one bit each
+  (logior (if locked               (enum-value bind-flag-enum 'locked)               0)
+          (if release              (enum-value bind-flag-enum 'release)              0)
+          (if repeat               (enum-value bind-flag-enum 'repeat)               0)
+          (if long-press           (enum-value bind-flag-enum 'long-press)           0)
+          (if non-consuming        (enum-value bind-flag-enum 'non-consuming)        0)
+          (if auto-consuming       (enum-value bind-flag-enum 'auto-consuming)       0)
+          (if transparent          (enum-value bind-flag-enum 'transparent)          0)
+          (if ignore-mods          (enum-value bind-flag-enum 'ignore-mods)          0)
+          (if dont-inhibit         (enum-value bind-flag-enum 'dont-inhibit)         0)
+          (if click                (enum-value bind-flag-enum 'click)                0)
+          (if drag                 (enum-value bind-flag-enum 'drag)                 0)
+          (if submap-universal     (enum-value bind-flag-enum 'submap-universal)     0)
+          (if allow-input-capture  (enum-value bind-flag-enum 'allow-input-capture)  0)
+          (if mouse                (enum-value bind-flag-enum 'mouse)                0)
+          ;; DERIVED BITS. These are not options a caller passes; they follow
+          ;; from one, and each is named here rather than inlined so the set
+          ;; stays complete.
+          ;;
+          ;; click and drag imply RELEASE (upstream sets BIND_FLAG_RELEASE for
+          ;; both) — logior, so it cannot double-count when the caller also asked
+          ;; for #:release explicitly.
+          (if (or click drag)      (enum-value bind-flag-enum 'release)             0)
+          ;; device-inclusive is ABSENT by default and DERIVED from whether a
+          ;; devices list was given: listed devices are inclusive unless the
+          ;; caller opts out (upstream's default is true).
+          (if (cond ((eq? device-inclusive 'unset) (pair? devices))
+                    (device-inclusive #t)
+                    (else #f))
+              (enum-value bind-flag-enum 'device-inclusive)
+              0)
+          ;; the KEY NAME "catchall" implies CATCH_ALL — a value of the key
+          ;; argument, not a flag the caller sets (upstream LuaBindingsToplevel.cpp)
+          (if (equal? key "catchall") (enum-value bind-flag-enum 'catch-all) 0)))
 
 (define (hl-after ms thunk) "Run THUNK once after MS milliseconds.
 Returns an hl-timer handle for later control
