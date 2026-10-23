@@ -22,7 +22,7 @@
   ;; forgotten export from being invisible) — not because anything outside
   ;; uses them.
   #:export (hl-loaded-files
-            hl--watch-loaded hl--watch-dirs hl--watch-fd
+            hl--watch-loaded hl--watch-dirs hl--watch-fd hl--watch-armed?
             hl--watch-canonical hl--watch-join
             hl--watch-dir-watched? hl--watch-dir-of-wd
             hl--watch-dir! hl--watch-note-loaded!
@@ -133,10 +133,38 @@
 ;; THIS FILE IS READ ONCE — the machinery is loaded once per process — so the fd
 ;; is opened once and the hook is installed once, with no guard needed. If that
 ;; ever stops being true (a module re-read per generation), this needs one.
-(set! hl--watch-fd (inotify-init1 (logior IN-NONBLOCK IN-CLOEXEC)))
+;;
+;; NO GSBR AT THIS FILE'S TOP LEVEL, and that is not tidiness — it is what keeps
+;; the machinery COMPILABLE. `guild compile` runs with the machinery directory on
+;; GUILE_LOAD_PATH (it has to: modules resolve each other by name from there),
+;; and Guile evaluates `<load-path>/init.scm` at startup, so compiling ANY module
+;; evaluates init.scm and therefore this whole file. hl--c-on-readable exists
+;; only inside the compositor, so calling it here made `make scm-compile` — and
+;; so `make install` and `make hyprpm-machinery` — die with
+;;
+;;     guile: uncaught exception: Unbound variable: hl--c-on-readable
+;;     Cannot exit gracefully when init is in progress; aborting.
+;;     Aborted (core dumped)
+;;
+;; which hyprpm reported as a successful build. The kernel's note about keeping
+;; its top level to `define`s is the same rule, one module earlier.
+;;
+;; So the fd is opened and the arming is ATTEMPTED, guarded. Outside the
+;; compositor the attempt fails harmlessly and the fd is closed again, leaving
+;; hl--watch-armed? #f (and the hook below inert).
+(define hl--watch-fd (inotify-init1 (logior IN-NONBLOCK IN-CLOEXEC)))
 
-(when (and (exact-integer? hl--watch-fd) (> hl--watch-fd 0))
-  (hl--c-on-readable hl--watch-fd hl--watch-on-readable))
+(define hl--watch-armed?
+  (guard (e (#t #f))
+    (and (exact-integer? hl--watch-fd)
+         (> hl--watch-fd 0)
+         (begin (hl--c-on-readable hl--watch-fd hl--watch-on-readable) #t))))
+
+(unless hl--watch-armed?
+  ;; not in the compositor: nothing will ever read the fd, so do not hold it
+  (when (and (exact-integer? hl--watch-fd) (> hl--watch-fd 0))
+    (inotify-close hl--watch-fd))
+  (set! hl--watch-fd #f))
 
 ;; %load-hook is Guile's own "a file is being loaded" notification. It fires for
 ;; load / load-from-path / primitive-load and does NOT fire for use-modules —
@@ -153,5 +181,5 @@
       (when (procedure? previous)
         (previous file))
       (guard (e (#t #f))
-        (when (and (string? file) (exact-integer? hl--watch-fd) (> hl--watch-fd 0))
+        (when hl--watch-armed?
           (hl--watch-note-loaded! file))))))
