@@ -1174,6 +1174,56 @@ ok '(hl-config-reload!)'
 ok '(hl-state-ref (quote api-unload))'
 val '(+ 40 2)' '42'
 
+# ---- a callback error POPS A NOTIFICATION ----------------------------------
+# This is the whole point of the change: an error used to go only to stderr, and
+# the compositor log does not carry scheme lines in every session, so a bind
+# thunk that raised looked exactly like a key that does nothing. A scratchpad key
+# raised on every press for weeks with only a log line to show for it.
+#
+# The probe is a bind whose thunk raises, fired directly — the harness has no way
+# to press a key, and hl--bind-fire-rec is the same entry point the keybind
+# manager calls, so this exercises the real path minus the keypress.
+ok '(begin
+       (define notify-probe
+         (hl-bind-add! (hl-kbd "s-F19") (lambda () (error "probe: deliberate failure"))))
+       #t)'
+# count only OUR notification, by its prefix — the harness makes others
+probe-notifs() {
+  $SCHEME '(length (filter (lambda (t) (and (string? t)
+                                            (>= (string-length t) 20)
+                                            (string=? (substring t 0 20) "scheme error in bind")))
+                           (map hl-notification-text (hl-notifications))))'
+}
+before=$(probe-notifs)
+noerr '(hl--bind-fire-rec notify-probe)'
+after=$(probe-notifs)
+[[ "$after" -gt "$before" ]] || { echo "FAIL: a raising callback produced NO notification (before=$before after=$after)"; FAILED=1; }
+# the fire path answers #f for a failed callback — that is the bind-result
+# contract (a raise DECLINES the key), so this is asserted, not just tolerated
+val '(hl--bind-fire-rec notify-probe)' '#f'
+WAIT_FOR 8 '(let ((t (map hl-notification-text (hl-notifications))))
+              (exists (lambda (x) (and (string? x)
+                                       (>= (string-length x) 20)
+                                       (string=? (substring x 0 20) "scheme error in bind"))) t))' >/dev/null 2>&1 \
+  || { echo "FAIL: the notification did not appear"; FAILED=1; }
+# AND DEDUPLICATION: a second failure of the same callback+message is silent.
+# Without this a broken window-open handler would toast on every window.
+noerr '(hl--bind-fire-rec notify-probe)'
+sleep 0.3
+after2=$(probe-notifs)
+[[ "$after2" == "$after" ]] || { echo "FAIL: the same error notified twice (after=$after after2=$after2)"; FAILED=1; }
+# a DIFFERENT error from the same callback still gets through
+ok '(begin (hl-unbind! notify-probe) #t)'
+ok '(begin
+       (define notify-probe2
+         (hl-bind-add! (hl-kbd "s-F19") (lambda () (error "probe: a different failure"))))
+       #t)'
+noerr '(hl--bind-fire-rec notify-probe2)'
+sleep 0.3
+after3=$(probe-notifs)
+[[ "$after3" -gt "$after2" ]] || { echo "FAIL: a different message in the same callback was suppressed (after2=$after2 after3=$after3)"; FAILED=1; }
+ok '(begin (hl-unbind! notify-probe2) #t)'
+
 # ---- the wipe: nothing else survives a reload --------------------------------
 # The deliberate bridge (hl-state) survives, above. Everything else does not:
 # a definition, and a set! of a machinery variable, belong to the generation

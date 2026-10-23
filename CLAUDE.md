@@ -661,7 +661,7 @@ that point. Two things to carry forward:
   and Arabic keysyms, so it "validates" names that are on no loaded keymap;
   `resolveKeycode` checks the keymap).
 
-### ERRORS — plain `(error …)`, and the function names itself
+### ERRORS — plain `(error …)`, the function names itself, and the user SEES it
 
 **There is no `hl--error` and no `hl--record-field`.** Both were helpers for jobs
 Guile already does, and both are gone:
@@ -698,6 +698,52 @@ Guile already does, and both are gone:
 back the raw `"~A: ~S"` template with the parts as irritants — printing it
 unformatted says `~A: ~S` and names nothing. `tools/syntax-check.scm` did
 exactly that, which is how a real read error once came out as noise.
+
+**AN ERROR IS NOT JUST A LOG LINE — and the split is the compositor's own.**
+Errors went only to stderr, and the compositor log does not carry `[scheme]`
+lines in every session (measured: zero in a live one), so a raising bind thunk
+looked exactly like a key that does nothing. A scratchpad key raised on every
+press for weeks; the only trace was a line nobody was reading.
+
+Hyprland answers two different questions with two different surfaces
+(`CConfigManager::addError`, ConfigManager.cpp:829), and we route the same way:
+
+| the error | surface | our path |
+|---|---|---|
+| at **runtime**, in a callback — "that key press failed" | a **notification**, transient | `hl--report e "bind"` → `hl--notify-error` |
+| during **config load** — "your config is broken, go fix the file" | the persistent full-width **ErrorOverlay** banner | `hl--report-config` → `hl--c-error-overlay` |
+
+- **RUNTIME errors are DEDUPLICATED PER (WHO, MESSAGE)**, which is the
+  load-bearing part — a broken callback raises on EVERY event, so an unthrottled
+  toast would be worse than the silence. `markReported` in Lua's `LuaCaller.cpp`
+  is the model; ours is `hl--reported`, keyed by the WHO each call site passes
+  ("bind", "event handler", "timer", "layout", "gesture", "module reset"). A
+  *different* message from the same callback still gets through.
+- **WHO is what the user reads**, so name the thing that failed, not the
+  internal function.
+- **A CONFIG error is the BANNER, and it is cleared by a successful load**
+  (`hl--report-config-ok`, called by the HOST after `evalFile` succeeds — the
+  Scheme side cannot know the whole config finished, since a config is many
+  files). The banner ACCUMULATES across failing files and is capped at 12 lines
+  like the compositor's own (~15), so a config that fails on every form cannot
+  build a banner taller than the screen.
+- **The notification call is GUARDED AND SILENT ON FAILURE.** It runs inside
+  error handlers, and a raise there would replace the error being reported with a
+  new one — the one thing an error reporter must never do.
+- **It calls the GSUBR, not `hl-notification-add!`** — that name lives in
+  `(hyprscheme notification)`, a FAMILY, and the kernel may not reach into one.
+- **`hl--print-exception` renders a plain STRING as itself.** The watchdog
+  reports a finished message, not a condition; `~s`-quoting it would change a log
+  line `t-zzzz-exit` matches on.
+- **No max-recursion guard, deliberately.** Lua needs one (a C `lua_State` stack,
+  `MAX_CALL_DEPTH`); Scheme recursion is bounded by the VM's own stack and
+  re-entering a callback is ordinary, so a depth cap would break correct configs.
+  The timeout half IS implemented — `hl--report-watchdog`.
+
+`t-api` asserts all of it (notification appears; the SAME message in the same
+callback is suppressed; a DIFFERENT message is not) and was **verified to fail**
+with `hl--notify-error` neutered. `t-zzzz-exit` needed the deliberate probe
+messages added to its allowance list — which is that check working.
 
 ### COLOURS — a number, and alpha is FIRST
 

@@ -29,6 +29,10 @@ log_clean() {
   local intended='watchdog: (eval|layout callback|callback) abandoned|^\[scheme\] error: boom$'
   # t-api's deliberate broken config: the error IS the thing under test
   intended="$intended|^\[scheme\] error: .*Unbound variable: hl-this-does-not-exist"
+  # t-api's deliberate RAISING CALLBACKS, which prove an error in a thunk pops a
+  # notification (and that a repeat is suppressed). Both messages are asserted by
+  # that test, so their log lines are asked for too.
+  intended="$intended|^\[scheme\] error: probe: (a different failure|deliberate failure)$"
   local unexpected
   unexpected=$(grep '^\[scheme\] error:' "$log" | grep -vE "$intended")
   if [[ -n $unexpected ]]; then

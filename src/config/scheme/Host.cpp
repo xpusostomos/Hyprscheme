@@ -89,6 +89,9 @@
 #include <src/animation/AnimationManager.hpp>
 #include <src/pointer/PointerManager.hpp>
 #include <src/plugins/PluginSystem.hpp>
+// the compositor's own "your config is broken" banner — the surface it uses for
+// config errors, as opposed to the notifications it uses for runtime ones
+#include <src/errorOverlay/Overlay.hpp>
 #include <xkbcommon/xkbcommon.h>
 #include <sys/inotify.h>
 #include <unistd.h>
@@ -377,10 +380,22 @@ namespace Config::Scheme {
         if (!buildGeneration())
             return;
 
-        if (!hl::evalFile(g_configPath.c_str()))
+        if (!hl::evalFile(g_configPath.c_str())) {
             LOG(Log::ERR, "[scheme] failed to load {}", g_configPath);
-        else
+            // the error banner is raised by hl--report-config, from the Scheme
+            // side, as the load fails — one line per failing file, accumulating
+            // (see kernel.scm)
+        } else {
             LOG(Log::INFO, "[scheme] loaded {}", g_configPath);
+            // THE CONFIG LOADED CLEANLY, so take down any banner left by the
+            // previous one. Called by name rather than from inside the load: the
+            // Scheme side cannot know that the WHOLE config finished, since a
+            // config is many files and each load is a separate call. The host is
+            // the only thing that knows this was the last one. Guarded and
+            // best-effort — a banner we failed to clear must not fail a reload
+            // that otherwise worked.
+            hl::call0(hl::globalRef("hl--report-config-ok"));
+        }
     }
 
     static void drainWatch() {
@@ -491,6 +506,38 @@ namespace Config::Scheme {
 
         hl::lock(thunk);
         armReader(fd, thunk);
+        return 0;
+    }
+
+    /*
+        Show (or clear, with an empty MESSAGE) the compositor's full-width error
+        banner at the top of the screen.
+
+        This is the surface Hyprland itself uses for "your config is broken":
+        ConfigManager::addError collects config-time errors into m_errors and
+        renders them through this overlay, capped at ~15 lines with "... more",
+        while a RUNTIME error pops an ordinary notification instead. The two
+        answer different questions — a config error means "go and fix the file"
+        and has to persist, a callback error means "that key press failed" and
+        should be transient — so we route the same way (kernel.scm hl--report
+        versus hl--report-config).
+
+        Empty MESSAGE DESTROYS the banner, which is how a reload that succeeds
+        clears one raised by the load before it.
+    */
+    static int hlSchemeErrorOverlay(const char* message) {
+        if (!g_up)
+            return -1;
+        // guarded: this is called from an error path, and an exception here
+        // would replace the error being reported
+        try {
+            if (message && *message)
+                ErrorOverlay::overlay()->queueCreate(std::string(message), ErrorOverlay::Colors::ERROR);
+            else
+                ErrorOverlay::overlay()->destroy();
+        } catch (...) {
+            return -1;
+        }
         return 0;
     }
 
@@ -735,6 +782,8 @@ namespace Config::Scheme {
         // the one thing the machinery cannot do for itself about fds: wait on
         // one. See armReader above — the inotify work is all Scheme.
         hl::bind<hlSchemeOnReadable>("hl--c-on-readable");
+        // the compositor's own "your config is broken" banner
+        hl::bind<hlSchemeErrorOverlay>("hl--c-error-overlay");
         hl::bind<hlSchemeStateGet>("hl--c-state-get");
         hl::bind<hlSchemeStateSet>("hl--c-state-set");
 

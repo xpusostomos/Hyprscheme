@@ -517,7 +517,7 @@ DEFAULT (#f when omitted) when the key is missing."
 
    PATH is used exactly as given: no search, and no \".scm\" appended.
    hl-load-config is the one that resolves a NAME under the config directory."
-  (let ((ok (guard (e (#t (hl--report e) #f))
+  (let ((ok (guard (e (#t (hl--report-config e) #f))
               (save-module-excursion
                 (lambda ()
                   (let ((gen (hl--c-generation)))

@@ -139,7 +139,11 @@
             (when m
               (let ((v (module-local-variable m 'reset)))
                 (when (and v (variable-bound? v) (procedure? (variable-ref v)))
-                  (guard (e (#t (hl--report e)))
+                  ;; named, so a failing reset pops a notification rather than
+                  ;; only writing to a log nobody reads — and the name says it is
+                  ;; the MACHINERY that broke, not the config (a config error is
+                  ;; the banner; see hl--report-config in the kernel)
+                  (guard (e (#t (hl--report e "module reset")))
                     ((variable-ref v))))))))))
     (module-uses (current-module))))
 

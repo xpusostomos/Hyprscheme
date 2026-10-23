@@ -700,6 +700,67 @@ and TODO.txt's archived sections.)
   compositor — where t-config's watcher test covers it (verified to fail with
   the registration neutered).
 
+== ERRORS ARE NOW VISIBLE: a notification at runtime, a banner at load ==
+- THE PROBLEM: an error went only to stderr, and the compositor log does not
+  carry [scheme] lines in every session (measured: ZERO in a live one), so a
+  raising bind thunk looked exactly like a key that does nothing. The scratchpad
+  key this session started on had been raising on every press for weeks; the only
+  trace was a log line nobody was reading.
+- THE SPLIT IS HYPRLAND'S OWN, taken from CConfigManager::addError
+  (ConfigManager.cpp:829), which already answers two different questions with two
+  different surfaces:
+    * a RUNTIME error (in a callback, config already loaded) -> an ordinary
+      NOTIFICATION, transient, ICON_WARNING, prefixed "Runtime error in lua:"
+      on their side.
+    * a CONFIG error (raised while loading) -> the persistent full-width
+      ErrorOverlay BANNER, accumulated and capped at ~15 lines with "... more".
+  Ours routes the same way: hl--report e WHO -> notification;
+  hl--report-config -> ErrorOverlay via a new hl--c-error-overlay gsubr.
+- RUNTIME ERRORS ARE DEDUPLICATED PER (WHO, MESSAGE), which is the load-bearing
+  part — a broken callback raises on EVERY event, so an unthrottled toast would
+  be worse than the silence. Modelled on LuaCaller.cpp's markReported (a
+  per-function table of already-reported messages). Ours is hl--reported, keyed
+  by the WHO each call site passes: bind, event handler, timer, layout, gesture,
+  module reset. A DIFFERENT message from the same callback still gets through
+  (asserted).
+- All 14 fire trampolines now pass a WHO, named for what the USER would
+  recognise ("bind", "event handler", "layout"), not the internal function.
+- The watchdog reports through hl--report-watchdog and DOES notify: the desktop
+  was frozen for the whole budget. hl--print-exception now renders a plain STRING
+  as itself, since that path passes a finished message rather than a condition,
+  and ~s-quoting it would have changed a log line t-zzzz-exit matches on.
+- NO MAX-RECURSION GUARD, deliberately, at the user's direction: Lua needs one (a
+  C lua_State stack), but Scheme recursion is bounded by the VM's own stack and a
+  callback re-entering is ordinary, so a depth cap would break correct configs.
+  The timeout half IS implemented (already was, as the SIGALRM watchdog).
+- THE CONFIG BANNER IS CLEARED BY A SUCCESSFUL LOAD: hl--report-config-ok, called
+  by the HOST after evalFile succeeds — the Scheme side cannot know the whole
+  config finished, since a config is many files and each load is a separate call.
+  It accumulates across failing files, capped at 12 lines like the compositor's
+  own, so a config that fails on every form cannot build a banner taller than the
+  screen.
+- THE NOTIFICATION CALL IS GUARDED AND SILENT ON FAILURE: it runs inside error
+  handlers, and a raise there would replace the error being reported with a new
+  one. It calls the GSUBR rather than hl-notification-add!, because that name
+  lives in (hyprscheme notification) — a FAMILY — and the kernel may not reach
+  into one.
+- ErrorOverlay reachability VERIFIED before relying on it: nm -DC shows
+  ErrorOverlay::overlay(), queueCreate and queueError all exported (T), so the
+  plugin links them exactly as it links ParserUtils.
+- Tests: t-api fires a deliberately raising bind through hl--bind-fire-rec (the
+  same entry the keybind manager calls), asserts a notification appears, that the
+  SAME message in the same callback is suppressed, and that a DIFFERENT one is
+  not. VERIFIED TO FAIL — with hl--notify-error neutered it reports "a raising
+  callback produced NO notification (before=0 after=0)" and both follow-ups.
+  t-zzzz-exit then failed on the new deliberate probe messages, which is that
+  check working; they are in its allowance list now. 20/20; make check 7/7; 317
+  gsubrs registered/called.
+- One gotcha hit on the way: `(define (f x #:optional y))` is a SYNTAX ERROR —
+  `#:optional` needs define*, and the failure reads as the unhelpful "source
+  expression failed to match any pattern". The fix uses a plain rest arg, which
+  also avoids a keyword parser on a path called from inside guards. (`take` IS
+  available: the kernel imports srfi-1.)
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

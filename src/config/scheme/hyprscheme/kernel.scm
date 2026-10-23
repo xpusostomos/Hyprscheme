@@ -87,7 +87,7 @@
            hl--c-monitor-set-special hl--c-monitor-transform
            hl--c-monitor-vrr hl--c-monitor-width hl--c-monitor-x
            hl--c-monitor-y hl--c-monitor? hl--c-mouse
-           hl--c-notification-add hl--c-notification-age
+           hl--c-error-overlay hl--c-notification-add hl--c-notification-age
            hl--c-notification-alive hl--c-notification-color
            hl--c-notification-color-set hl--c-notification-dismiss
            hl--c-notification-elapsed hl--c-notification-font-size
@@ -174,7 +174,10 @@
            hl--layout-recalculate hl--layout-resize
            hl--layout-window-close hl--layout-window-open
            hl--now-ms hl--plist-cdr hl--plist-get hl--plist-has? hl--print-exception
-           hl--ready hl--report hl--target-env
+           hl--already-reported? hl--config-errors hl--loaded-files
+           hl--notify-error hl--reported hl--ready hl--report
+           hl--report-config hl--report-config-ok hl--report-watchdog
+           hl--target-env
            hl--timer-fire hl--timer-interval hl--timer-thunk
            hl--watchdog-ms hl--wd-aborted hl--wd-alarm hl--wd-enter
            hl--wd-exit hl--wd-handler hl--wd-handler-set hl--wd-rearm
@@ -243,20 +246,144 @@
 ;; the raw template; the default handler is what normally formats it), so it is
 ;; formatted here the same way, guarded — a bad escape in a message must not
 ;; kill the report. A condition with no usable message is written whole.
+;;
+;; A PLAIN STRING is rendered as itself, not through `~s`: the watchdog reports
+;; its timeout as a finished message ("watchdog: eval abandoned after 5000ms")
+;; rather than as a condition, and quoting it would both read wrong and change a
+;; log line the exit test matches on.
 (define (hl--print-exception e port)
-  (let ((msg (guard (e2 (#t #f)) (exception-message e)))
-        (irr (guard (e2 (#t #f)) (exception-irritants e))))
-    (cond ((not (string? msg)) (format port "~s" e))
-          ((and (pair? irr) (string-index msg #\~))
-           (guard (e3 (#t (display msg port)))
-             (apply simple-format port msg irr)))
-          (else (display msg port)))))
+  (if (string? e)
+      (display e port)
+      (let ((msg (guard (e2 (#t #f)) (exception-message e)))
+            (irr (guard (e2 (#t #f)) (exception-irritants e))))
+        (cond ((not (string? msg)) (format port "~s" e))
+              ((and (pair? irr) (string-index msg #\~))
+               (guard (e3 (#t (display msg port)))
+                 (apply simple-format port msg irr)))
+              (else (display msg port))))))
 
-(define (hl--report e)
+;; ---- reporting an error to the user -------------------------------------------
+;; An error used to go ONLY to stderr, and that is nearly invisible: the
+;; compositor log does not carry scheme lines in every session (measured: zero
+;; "[scheme]" lines in a live one), so a bind thunk that raised looked like a key
+;; that simply does nothing. It cost real time — a scratchpad key raised on every
+;; press for weeks and the only trace was a log line nobody was reading.
+;;
+;; SO AN ERROR NOW ALSO POPS A NOTIFICATION. That is what the Lua side does, and
+;; this is modelled on it (ConfigManager::addError): a RUNTIME error — one that
+;; happens in a callback, with the config already loaded — is a transient
+;; notification, while a CONFIG error (one raised while the config is being
+;; loaded) is the persistent banner instead. Two questions, two surfaces: "that
+;; key press failed" versus "your config is broken, go and fix the file". The
+;; banner half is hl--report-config, below.
+;;
+;; DEDUPLICATED PER (WHO, MESSAGE), which is the load-bearing part. A callback
+;; that is broken raises on EVERY event — every window open, every keypress — and
+;; an unthrottled notification would be worse than the silent log. The Lua caller
+;; keeps a per-function table of already-reported messages (markReported,
+;; LuaCaller.cpp); this keeps the same thing keyed by WHO — the name of the thing
+;; that failed ("handler", "bind", ...), which callers already pass.
+;;
+;; The table is WEAK-KEYED on the inner tables only in the Lua version (whose key
+;; is a function pointer). Here the key is a symbol or string, so it is a plain
+;; table: the set of distinct `who` values is tiny and bounded by the number of
+;; call sites.
+(define hl--reported (make-hash-table))
+
+(define (hl--already-reported? who message)
+  (let ((seen (hash-ref hl--reported who '())))
+    (if (member message seen)
+        #t
+        (begin
+          (hash-set! hl--reported who (cons message seen))
+          #f))))
+
+;; Pop a warning notification. GUARDED AND SILENT ON FAILURE: this is called from
+;; inside error handlers, and a raise here would replace the error being reported
+;; with a new one — the one thing an error reporter must never do. It is also the
+;; reason it calls the GSUBR rather than hl-notification-add!: (hyprscheme
+;; notification) is a FAMILY, and the kernel may not reach into one.
+(define (hl--notify-error text)
+  (guard (e (#t #f))
+    (hl--c-notification-add (list 'text text 'timeout 5000 'icon "warn"
+                                 'color #xFFFF6666))))
+
+;; The one error sink. Reports to the log always; ALSO pops a notification,
+;; deduplicated, unless WHO is #f (which is how a caller says "this is expected,
+;; log it quietly" — a config probe, a test's deliberate error).
+;; The one error sink. Reports to the log always; ALSO pops a notification,
+;; deduplicated, unless WHO is absent (which is how a caller says "this is
+;; expected, log it quietly" — a config probe, a test's deliberate error).
+;;
+;; A rest arg rather than define*'s #:optional: this is a hot-ish path called
+;; from inside guards, and #:optional needs define*, which builds a keyword
+;; parser. Two fixed arities are all it has.
+(define (hl--report e . who-opt)
+  (let ((who (if (pair? who-opt) (car who-opt) #f)))
+    (display "[scheme] error: " (current-error-port))
+    (hl--print-exception e (current-error-port))
+    (newline (current-error-port))
+    (when who
+      (let ((text (guard (e2 (#t #f))
+                    (call-with-string-output-port (lambda (p) (hl--print-exception e p))))))
+        (when (string? text)
+          (unless (hl--already-reported? who text)
+            (hl--notify-error (format #f "scheme error in ~a: ~a" who text))))))
+    #f))
+
+;; Report a WATCHDOG ABANDONMENT. Separate from hl--report only because what it
+;; has is a finished message rather than a condition — and it DOES notify, which
+;; is the point: the desktop was frozen for the whole budget, and the log line
+;; alone is what nobody reads.
+(define (hl--report-watchdog text)
+  (hl--report text "a callback"))
+
+;; ---- config errors: the BANNER, not a notification ----------------------------
+;; A file that fails to load is the other half of the Lua split (see hl--report):
+;; not "that key press failed" but "your config is broken, go and fix the file".
+;; Hyprland answers that with its full-width ErrorOverlay banner, persistent until
+;; the config loads cleanly — which is us, via hl--c-error-overlay.
+;;
+;; The banner ACCUMULATES rather than replaces, so two broken files both show.
+;; It is cleared when a config load SUCCEEDS (hl--report-config-ok), which is the
+;; only way it should ever go away: a banner left up after you have fixed the
+;; file is worse than no banner.
+(define hl--config-errors '())
+
+(define (hl--report-config e)
   (display "[scheme] error: " (current-error-port))
   (hl--print-exception e (current-error-port))
   (newline (current-error-port))
+  (guard (e2 (#t #f))
+    (let ((text (call-with-string-output-port (lambda (p) (hl--print-exception e p)))))
+      (set! hl--config-errors
+        (if (member text hl--config-errors) hl--config-errors
+            (cons text hl--config-errors)))
+      ;; CAPPED LIKE THE COMPOSITOR'S OWN (which stops at ~15 lines), so a config
+      ;; that fails on every form cannot build a banner taller than the screen.
+      ;; hl--config-errors is NEWEST FIRST, so the newest 12 are its first 12 —
+      ;; taking from the reversed list would show the OLDEST and read backwards.
+      ;; "... more" goes LAST, where the truncated tail is.
+      ;;
+      ;; Counted with a loop rather than `take`, which ERRORS when asked for more
+      ;; elements than the list has — so a config with three errors would have
+      ;; crashed the banner that was trying to report it.
+      (let* ((newest (let loop ((l hl--config-errors) (n 12) (acc '()))
+                       (if (or (null? l) (= n 0)) (reverse acc)
+                           (loop (cdr l) (- n 1) (cons (car l) acc)))))
+             (truncated? (> (length hl--config-errors) 12))
+             (lines (reverse newest))
+             (body (string-append "Your scheme config has errors:\n"
+                                  (string-join
+                                    (if truncated? (append lines (list "... more")) lines)
+                                    "\n"))))
+        (hl--c-error-overlay body))))
   #f)
+
+;; a config load finished without a config error: take the banner down
+(define (hl--report-config-ok)
+  (set! hl--config-errors '())
+  (guard (e (#t #f)) (hl--c-error-overlay "")))
 
 ;; ---- wall clock --------------------------------------------------------------
 ;; Milliseconds since the epoch, used for the watchdog's budget (a wall-clock
@@ -318,7 +445,7 @@
         (let ((ms (- (hl--now-ms) t0)))
           (if (> ms budget)
               (begin
-                (hl--report (format #f "watchdog: ~a abandoned after ~ams" what ms))
+                (hl--report-watchdog (format #f "watchdog: ~a abandoned after ~ams" what ms))
                 (escape hl--wd-aborted))
               (hl--wd-alarm hl--wd-rearm)))))))
 
@@ -468,20 +595,20 @@
 ;; extract the thunk and run it. Contract: #f = declined, otherwise the
 ;; normalized result plist. Normalization runs INSIDE the guard.
 (define (hl--bind-fire-rec b)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "bind") hl--wd-aborted)))
                   (hl--guarded-run "callback"
                     (lambda () (hl--bind-result ((hl--bind-thunk b))))))))
     (and (not (eq? result hl--wd-aborted)) result)))
 
 (define (hl--event-fire b)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "event handler") hl--wd-aborted)))
                   (hl--guarded-run "callback" (hl--event-thunk b)))))
     (not (eq? result hl--wd-aborted))))
 
 ;; timer-record fire: extract (hl--timer-thunk b) and run it zero-arg under the
 ;; bind result protocol (repeating timers stop on ok #f)
 (define (hl--timer-fire b)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "timer") hl--wd-aborted)))
                   (hl--guarded-run "callback"
                     (lambda () (hl--bind-result ((hl--timer-thunk b))))))))
     (and (not (eq? result hl--wd-aborted)) result)))
@@ -490,49 +617,49 @@
   ;; same shape as its siblings: #t when the handler ran, #f when it errored or
   ;; was aborted. It used to return the handler's value on success and #f on
   ;; error, which reads as "failed" for a handler that legitimately returns #f.
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "event handler") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () (apply (hl--event-thunk b) lst))))))
     (not (eq? result hl--wd-aborted))))
 
 (define (hl--fire-str-rec b arg)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "window event") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) arg))))))
     (not (eq? result hl--wd-aborted))))
 
 (define (hl--fire-bool-rec b arg)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "event") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) arg))))))
     (not (eq? result hl--wd-aborted))))
 
 (define (hl--fire-ws-rec b arg)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "workspace event") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) arg))))))
     (not (eq? result hl--wd-aborted))))
 
 (define (hl--fire-mon-rec b arg)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "monitor event") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) arg))))))
     (not (eq? result hl--wd-aborted))))
 
 (define (hl--fire-ws-mon-rec b ws mon)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "workspace event") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) ws mon))))))
     (not (eq? result hl--wd-aborted))))
 
 ;; window payloads: the id crosses and becomes a real window record here
 (define (hl--fire-win-rec b window)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "window event") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) window))))))
     (not (eq? result hl--wd-aborted))))
 
 (define (hl--fire-win-state-rec b window state)
-  (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+  (let ((result (guard (e (#t (begin (hl--report e "window event") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) window state))))))
     (not (eq? result hl--wd-aborted))))
 
 ;; bare-thunk list fire for GESTURES (the thunk travels directly, no record)
 (define (hl--fire-list fn lst)
-  (guard (e (#t (begin (hl--report e) #f)))
+  (guard (e (#t (begin (hl--report e "gesture") #f)))
     (hl--guarded-run "handler" (lambda () (apply fn lst)))))
 
 ;; ---- the current generation ---------------------------------------------------
@@ -605,7 +732,7 @@
 (define (hl--layout-call spec tag . args)
   (let ((cb (hl--plist-get spec tag #f)))
     (and cb
-         (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+         (let ((result (guard (e (#t (begin (hl--report e "layout") hl--wd-aborted)))
                          (hl--guarded-run "layout callback"
                            (lambda () (apply cb args))))))
            (and (not (eq? result hl--wd-aborted)) result)))))
@@ -637,7 +764,7 @@
          (corner     (list-ref payload 4))
          (cb         (or (hl--plist-get spec 'resize #f) (hl--plist-get spec 'recalculate #f))))
     (and cb
-         (let ((result (guard (e (#t (begin (hl--report e) hl--wd-aborted)))
+         (let ((result (guard (e (#t (begin (hl--report e "layout") hl--wd-aborted)))
                          (hl--guarded-run "layout resize callback"
                            (lambda () (cb area placements dx dy corner))))))
            (and (not (eq? result hl--wd-aborted)) result)))))
