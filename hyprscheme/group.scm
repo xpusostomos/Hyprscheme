@@ -8,9 +8,10 @@
 (define-module (hyprscheme group)
   #:export (
            hl-group-cycle! hl-group-window-active!
-           hl-group-window-move-next! hl-groups-lock-set!
-           hl-groups-locked? hl-group-members hl-group-size
-           hl-group-current hl-group-current-index hl-group-locked?
+           hl-group-window-move-next! hl-group-lock-all-set! hl-group-lock-all?
+           hl-group-lock-set! hl-group-lock?
+           hl-group-members hl-group-size
+           hl-group-current hl-group-current-index
            hl-group-denied? hl-group-alive? hl-group=? hl-group-add!
            hl-group-remove!))
 
@@ -35,14 +36,30 @@
   "Move WINDOW within its group; #:prev #t moves backwards."
   (= 0 (hl--c-group-move-window w prev)))
 
-(define* (hl-groups-lock-set! #:key (on? 'unset))
-  "Lock or unlock ALL groups compositor-wide (no window involved). See
-   hl-groups-locked?."
-  (= 0 (hl--c-group-lock (hl--bool-act on?))))
+;; THE THREE LOCKS, and the names line up three ways:
+;;
+;;   hl-group-lock? / hl-group-lock-set!              one group, by its handle
+;;   hl-group-lock-all? / hl-group-lock-all-set!      every group, compositor-wide
+;;   hl-window-group-lock? / hl-window-group-lock-set!  the group a window is in
+;;
+;; The middle pair used to be hl-groups-locked? / hl-groups-lock-set!, which read
+;; as a fourth thing rather than as the "all" scope of the first, and the
+;; per-group setter did not exist at all — locking a group meant reaching it
+;; through one of its windows, which an empty group cannot offer.
 
-(define (hl-groups-locked? )
-  "#t when the compositor-wide group lock is active."
-  (= 1 (hl--c-groups-locked)))
+(define* (hl-group-lock-all-set! #:key (on? 'unset))
+  "Lock or unlock EVERY group compositor-wide — the compositor's own global
+switch, with no window involved, and the reason a lock is a property of the
+compositor as well as of a group. #:on? #t locks, #f unlocks, absent toggles.
+See hl-group-lock-all?.
+
+For one group use hl-group-lock-set!, which takes the group handle."
+  (= 0 (hl--c-group-lock-all-set (hl--bool-act on?))))
+
+(define (hl-group-lock-all?)
+  "#t when the compositor-wide group lock is active — the global switch, which
+applies to groups regardless of their own lock. See hl-group-lock-all-set!."
+  (= 1 (hl--c-group-lock-all)))
 
 (define (hl-group-members g)
   "The group's windows, as a list of window handles."
@@ -61,9 +78,24 @@
   "The 1-based position of the group's focused member."
   (hl--c-group-current-idx g))
 
-(define (hl-group-locked? g)
-  "#t when the group is locked."
-  (eq? (hl--c-group-locked g) #t))
+(define (hl-group-lock? g)
+  "#t when THIS group is locked. #:on? #t/#f sets, absent toggles — see
+hl-group-lock-set!.
+
+Distinct from hl-group-lock-all?, which is the compositor-wide switch: a group
+can be locked on its own with the global one off, and vice versa."
+  (eq? (hl--c-group-lock g) #t))
+
+(define* (hl-group-lock-set! g #:key (on? 'unset))
+  "Lock or unlock the group G, by its handle. #:on? #t locks, #f unlocks, absent
+toggles. Returns #t, or #f when G is not a live group.
+
+The same operation as hl-window-group-lock-set!, which reaches a group through
+one of its windows — that one is for a window you already hold, this one for a
+group you already hold, and this is the only one that works for a group with no
+windows in it. See hl-group-lock? for the read, and hl-group-lock-all-set! for
+the compositor-wide switch."
+  (= 0 (hl--c-group-lock-set g (hl--bool-act on?))))
 
 (define (hl-group-denied? g)
   "#t when the group denies new members."

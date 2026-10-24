@@ -65,6 +65,15 @@ ALLOWED = {
     # that to work — removing these entries would mean deleting the table.
     'hl-window-move-direction!':
         'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
+    # the group-lock renames (dispatchers.md): same reason as the move renames
+    # above — the renamed note is the only place a config that broke can find out
+    # what the name became, so the old name has to be spellable.
+    'hl-groups-lock-set!':
+        'a RETIRED name, named deliberately in the rename note (dispatchers.md)',
+    'hl-groups-locked?':
+        'a RETIRED name, named deliberately in the rename note (dispatchers.md)',
+    'hl-group-locked?':
+        'a RETIRED name, named deliberately in the rename note (dispatchers.md)',
     'hl-window-swap-direction!':
         'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
     'hl-window-group-move-in!':

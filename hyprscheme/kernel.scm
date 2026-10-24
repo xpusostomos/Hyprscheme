@@ -53,10 +53,11 @@
            hl--c-global hl--c-group-add
            hl--c-group-alive hl--c-group-current hl--c-group-current-idx
            hl--c-group-cycle hl--c-group-denied hl--c-group-index
-           hl--c-group-lock hl--c-group-locked hl--c-group-members
+           hl--c-group-lock hl--c-group-lock-all hl--c-group-lock-all-set
+           hl--c-group-lock-set hl--c-group-members
            hl--c-group-move-window hl--c-group-remove hl--c-group-same
            hl--c-group-set hl--c-group-size hl--c-group-toggle
-           hl--c-group? hl--c-groups-locked hl--c-is-key-down
+           hl--c-group? hl--c-is-key-down
            hl--c-key-logical-to-physical hl--c-key-physical-to-logical
            hl--c-key-regularise hl--c-keyboard-key-listen hl--c-last-window
            hl--c-last-workspace hl--c-layer-above-fs hl--c-layer-address

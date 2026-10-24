@@ -17,12 +17,16 @@
 
 #include <src/desktop/view/Group.hpp>
 #include <src/desktop/view/window/Window.hpp>
+// hlSchemeGroupLockSet refreshes each member's decoration, and Window.hpp only
+// FORWARD-DECLARES CWindowPresentation — calling presentation().refreshValues()
+// on it needs the definition.
+#include <src/desktop/view/window/WindowPresentation.hpp>
 
 namespace Config::Scheme {
 
     using namespace Internals;
 
-    static int hlSchemeGroupsLocked() {
+    static int hlSchemeGroupLockAll() {
         if (!g_up)
             return 0;
         return Desktop::windowState()->groupsLocked() ? 1 : 0;
@@ -65,23 +69,31 @@ namespace Config::Scheme {
         return actionResult("group-move-window", Config::Actions::moveGroupWindow(prev == 0));
     }
 
-    static int hlSchemeGroupLock(int act) {
+    static int hlSchemeGroupLockAllSet(int act) {
         if (!g_up)
             return -1;
-        // The group lock actions come in two scopes, and the GLOBAL one is
-        // `lockGroups` (ConfigActions.hpp:100) — it flips the compositor-wide
-        // groupsLocked flag and posts the lockgroups IPC event for every
-        // window. `lockActiveGroup` (ConfigActions.hpp:101) is the other one:
-        // the FOCUSED window's own group, erroring when there is no focused
-        // window or it is ungrouped.
+        // The group lock actions come in two scopes, and BOTH WERE RENAMED —
+        // the names in this comment when it was written no longer compile, which
+        // is the sort of churn this plugin lives with:
         //
-        // This function is hl-groups-lock-set!, the global one, so it follows
-        // lockGroups. The per-window lock is a separate entry point
-        // (hl--c-window-group-lock, Window.cpp) and does not go through this
-        // action at all — it takes an explicit window and calls setLocked() on
-        // that group directly, which is why the rename below only showed up
-        // here.
-        return actionResult("group-lock", Config::Actions::lockGroups(sc<Config::Actions::eTogglableAction>(act)));
+        //   lockAllGroups(action)                     was lockGroups    (global)
+        //   lockGroup(action, optional<PHLWINDOW>)    was lockActiveGroup (one group)
+        //
+        // lockAllGroups flips the compositor-wide groupsLocked flag and posts the
+        // lockgroups IPC event for every window. lockGroup acts on ONE window's
+        // group, taking the window as an argument that defaults to the focused
+        // one, and errors when there is no window or it is ungrouped.
+        //
+        // This function is hl-group-lock-all-set!, the GLOBAL one, so it follows
+        // lockAllGroups — note that a compiler guessing at the new name offers
+        // lockGroup, which is the OTHER scope and would compile happily while
+        // meaning something else entirely.
+        //
+        // The per-GROUP lock is hl-group-lock-set!, a few lines below, and the
+        // per-WINDOW one is hl--c-window-group-lock in Window.cpp. Neither goes
+        // through an action: both call setLocked() on the group object directly,
+        // which is why this rename surfaced only here.
+        return actionResult("group-lock", Config::Actions::lockAllGroups(sc<Config::Actions::eTogglableAction>(act)));
     }
 
     static int hlSchemeGroupAlive(SCM id) {
@@ -154,6 +166,38 @@ namespace Config::Scheme {
         return group->locked() ? SCM_BOOL_T : SCM_BOOL_F;
     }
 
+    // GROUP-SCOPED group lock: toggle/set the lock on a group HANDLE.
+    // The mirror of hlSchemeGroupLocked above, and of hlSchemeWindowGroupLock in
+    // Window.cpp — that one reaches a group THROUGH a window, which is why this
+    // exists: locking a group used to mean finding a member window first, which
+    // an empty group cannot offer.
+    //
+    // Upstream's lockGroup action is window-scoped too (it takes an optional
+    // PHLWINDOW, defaulting to the focused one), so there is nothing to call for
+    // a handle: this sets the flag on the CGroup directly, exactly as the
+    // window-scoped gsubr does.
+    static int hlSchemeGroupLockSet(SCM id, int act) {
+        if (!g_up)
+            return -1;
+        const auto group = hl::groupOf(id);
+        if (!group)
+            return -1;
+        switch (act) {
+            case 0: group->setLocked(!group->locked()); break;
+            case 1: group->setLocked(true); break;
+            default: group->setLocked(false); break;
+        }
+        // setLocked only flips a flag; the lock is DRAWN by each member's
+        // decoration, so the group's windows have to be told to redraw. Upstream's
+        // window-scoped lockGroup refreshes the one window it resolved — this
+        // refreshes the group's members, which is the same set by definition, and
+        // is why it does not take a window to lock a group.
+        for (const auto& member : group->windows())
+            if (const auto window = member.lock())
+                window->presentation().refreshValues();
+        return 0;
+    }
+
     static SCM hlSchemeGroupDenied(SCM id) {
         if (!g_up)
             return SCM_BOOL_F;
@@ -204,20 +248,21 @@ namespace Config::Scheme {
 
     // this family's Scheme-visible surface
     void registerGroup() {
-        hl::bind<hlSchemeGroupsLocked>("hl--c-groups-locked");
+        hl::bind<hlSchemeGroupLockAll>("hl--c-group-lock-all");
         hl::bind<hlSchemeGroupToggle>("hl--c-group-toggle");
         hl::bind<hlSchemeGroupSet>("hl--c-group-set");
         hl::bind<hlSchemeGroupCycle>("hl--c-group-cycle");
         hl::bind<hlSchemeGroupIndex>("hl--c-group-index");
         hl::bind<hlSchemeGroupMoveWindow>("hl--c-group-move-window");
-        hl::bind<hlSchemeGroupLock>("hl--c-group-lock");
+        hl::bind<hlSchemeGroupLockAllSet>("hl--c-group-lock-all-set");
+        hl::bind<hlSchemeGroupLockSet>("hl--c-group-lock-set");
         hl::bind<hlSchemeGroupAlive>("hl--c-group-alive");
         hl::bind<hlSchemeGroupSame>("hl--c-group-same");
         hl::bind<hlSchemeGroupMembers>("hl--c-group-members");
         hl::bind<hlSchemeGroupCurrent>("hl--c-group-current");
         hl::bind<hlSchemeGroupCurrentIdx>("hl--c-group-current-idx");
         hl::bind<hlSchemeGroupSize>("hl--c-group-size");
-        hl::bind<hlSchemeGroupLocked>("hl--c-group-locked");
+        hl::bind<hlSchemeGroupLocked>("hl--c-group-lock");
         hl::bind<hlSchemeGroupDenied>("hl--c-group-denied");
         hl::bind<hlSchemeGroupAdd>("hl--c-group-add");
         hl::bind<hlSchemeGroupRemove>("hl--c-group-remove");

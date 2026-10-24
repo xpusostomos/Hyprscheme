@@ -1617,6 +1617,68 @@ PASS 3 of 3.
   NOTHING EVER ACTIVATES — a keymap named after its tag double-gates its own
   binds and they never fire. It is #:submap "" and the page now says why.
 
+== HYPRLAND SYNC: the two lock actions were RENAMED ==
+- cpp/Group.cpp called Config::Actions::lockGroups, which no longer exists. The
+  upstream pair is now lockAllGroups(action) (the GLOBAL one: flips the
+  compositor-wide groupsLocked flag and posts the lockgroups IPC event for every
+  window) and lockGroup(action, optional<PHLWINDOW>) (ONE window's group, the
+  window defaulting to the focused one) — so lockGroups -> lockAllGroups and
+  lockActiveGroup -> lockGroup.
+- THE COMPILER'S SUGGESTION WAS THE WRONG FUNCTION. "did you mean lockGroup?"
+  names the OTHER SCOPE, and taking it would have compiled happily while
+  hl-groups-lock-set! locked one window's group instead of all of them — a wrong
+  behaviour that no build and no lint would have reported. The rename is only
+  obvious from reading what the two functions DO, which is why the comment at the
+  call site now carries both signatures.
+- Verified after the update: make builds clean, make check 7/7, suite 21/21 on
+  the new Hyprland. The per-window/per-group lock is unaffected — it does not go
+  through either action (Window.cpp calls group->setLocked() on the group object
+  directly), which is why only this one call site broke.
+
+== THE THREE GROUP LOCKS, named as one family, and the missing one built ==
+- ADDED: hl-group-lock-set! — lock/unlock ONE group by its HANDLE, with the same
+  #:on? toggle/set shape as every other setter. The gap it fills was half a pair:
+  hl-group-locked? could READ a group's lock but nothing could WRITE it, so the
+  only way to lock a group was through one of its windows
+  (hl-window-group-lock-set!) — the wrong instrument when you already hold the
+  group, and no instrument at all when the group is EMPTY, which is exactly when
+  you might want to freeze it.
+- AND THE RENAMES, so the three read as one family rather than as three unrelated
+  names (Chris's naming):
+      hl-groups-lock-set!  -> hl-group-lock-all-set!     (global switch)
+      hl-groups-locked?    -> hl-group-lock-all?         (its read)
+      hl-group-locked?     -> hl-group-lock?             (one group)
+  The table is now 2x3 — read and write, for one group / all groups / a window's
+  group — and every pair in it is named the same way. api-check reported all
+  three removals by name, which is what it is for; API.snapshot was rebaselined
+  with --update after the renames were written down here and in the wiki, as that
+  tool asks.
+- THE GSUBRS WERE RENAMED WITH THEM, because leaving them would have produced the
+  worst possible pair: hl--c-group-lock meaning ALL groups next to
+  hl--c-group-lock-set meaning ONE. Now hl--c-group-lock-all-set /
+  hl--c-group-lock-all / hl--c-group-lock-set / hl--c-group-lock, mirroring the
+  Scheme names.
+- NO NEW UPSTREAM CALL, and that is worth recording: upstream's own lockGroup is
+  WINDOW-scoped (it takes an optional window, defaulting to focused), so there is
+  nothing to call for a group handle. The gsubr sets the flag on the CGroup
+  directly, exactly as the window-scoped one already did, and refreshes each
+  MEMBER's decoration — setLocked only flips a flag, and the lock is drawn by the
+  windows. CGroup::windows() is what makes the handle sufficient.
+- TESTED and verified to fail: four assertions in t-api.sh cover set/read/unlock
+  through the handle, the bare toggle, and that the group handle and the window
+  form drive the SAME lock (write through one, read through the other). With the
+  new gsubr neutered, two of them fail — the third is deliberately blind to it,
+  reading the group while writing through the window.
+- ALSO: the per-group setter refuses a DISSOLVED group rather than taking the
+  lock somewhere else, pinned by a test beside the existing "stale records read
+  #f" one — that line only covered the read; this covers the write.
+- Docs: dispatchers.md's lock rows now list all three forms with the RENAMED note
+  api-check asks for, windows.md carries the group-handle pair, and the prose says
+  which one to reach for when.
+- NOTE FABLE.md:1482 still maps the Lua names to the OLD ones. It is a historical
+  design document and is not scanned by doc-audit, so it was left as written
+  rather than rewritten; the wiki is the current statement.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

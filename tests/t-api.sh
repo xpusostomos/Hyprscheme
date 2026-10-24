@@ -353,8 +353,8 @@ ok '(boolean? (hl-window-group-lock? w))'
 ok '(hl-window-group-lock-set! w #:on? #f)'
 ok '(boolean? (not (hl-window-group-lock? w)))'
 ok '(begin (hl-window-move-into-group! w2 #:direction (quote right)) #t)'
-ok '(hl-groups-lock-set! #:on? #t)'
-ok '(boolean? (hl-groups-locked?))'
+ok '(hl-group-lock-all-set! #:on? #t)'
+ok '(boolean? (hl-group-lock-all?))'
 ok '(hl-window-group-set! w #:on? #f)'
 ok '(hl-window-group-set! w #:on? #f)'
 ok '(boolean? (hl-group-window-active! w 1))'
@@ -364,7 +364,7 @@ ok '(hl-window-group-set! w)'
 # ---- groups as objects (upstream HL.Group parity) ----------------------------
 # deterministic start: release the global group lock (set above), force w and
 # w2 out of any group, then make w a group
-noerr '(begin (hl-groups-lock-set! #:on? #f) (hl-window-group-set! w #:on? #f) (hl-window-group-set! w2 #:on? #f) #t)'
+noerr '(begin (hl-group-lock-all-set! #:on? #f) (hl-window-group-set! w #:on? #f) (hl-window-group-set! w2 #:on? #f) #t)'
 ok '(begin (hl-window-group-set! w #:on? #t) #t)'
 ok '(let* ((gs (hl-workspace-groups (hl-window-workspace w)))
        (g (and (pair? gs) (car gs))))
@@ -380,7 +380,33 @@ ok '(let* ((g (car (hl-workspace-groups (hl-window-workspace w))))
      (or (not c) (hl-window? c)))'
 ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
      (and (integer? (hl-group-current-index g)) (>= (hl-group-current-index g) 1)
-       (boolean? (hl-group-locked? g)) (boolean? (hl-group-denied? g))))'
+       (boolean? (hl-group-lock? g)) (boolean? (hl-group-denied? g))))'
+# THE PER-GROUP LOCK, by group handle: the half that was missing. It used to be
+# reachable only through a member window (hl-window-group-lock-set!), which is
+# the wrong instrument for a group you already hold — and no instrument at all
+# for an empty one.
+#
+# Asserted through the READ rather than the return value, since the return value
+# only says the call was accepted: lock it, read it back, unlock it, read it back.
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (and (hl-group-lock-set! g #:on? #t)
+          (hl-group-lock? g)
+          (hl-group-lock-set! g #:on? #f)
+          (not (hl-group-lock? g))))'
+# toggling with no #:on? — the shape every other setter in the tree has
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (let ((was (hl-group-lock? g)))
+       (hl-group-lock-set! g)
+       (and (not (eq? was (hl-group-lock? g)))   ; it flipped
+            (begin (hl-group-lock-set! g)        ; ...and flips back
+                   (eq? was (hl-group-lock? g))))))'
+# it is the SAME lock the window-scoped setter drives, seen from the other end:
+# setting it through the window shows up on the handle
+ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+     (and (hl-window-group-lock-set! w #:on? #t)
+          (hl-group-lock? g)
+          (hl-window-group-lock-set! w #:on? #f)
+          (not (hl-group-lock? g))))'
 ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
      (begin (hl-group-remove! g w2)
        (and (= 1 (hl-group-size g))
@@ -395,6 +421,14 @@ ok '(let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
      (begin (hl-group-remove! g w2)          ; group is now {w} alone
             (hl-window-group-set! w #:on? #f)      ; ungroup the last member
             (not (hl-group-size g))))'       # -> dissolved, stale record reads #f
+# ...and a DISSOLVED group refuses the lock, rather than taking it somewhere
+# else: the handle no longer resolves to a live CGroup, so hl::groupOf answers
+# null and the gsubr declines. The write side of "stale records read #f", which
+# the line above only covers for the read.
+ok '(begin (hl-window-group-set! w #:on? #t)     ; a group to dissolve
+           (let ((g (car (hl-workspace-groups (hl-window-workspace w)))))
+             (hl-window-group-set! w #:on? #f)   ; ...and now it is gone
+             (not (hl-group-lock-set! g #:on? #t))))'
 
 # sacrificial window: kill, then close
 $SCHEME '(hl-exec! "foot -a api-kill")' >/dev/null
