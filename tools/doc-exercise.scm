@@ -7,7 +7,7 @@
 ;; tests/t-zzz-docs.sh already evaluates every ```scheme block in the wiki —
 ;; and that is not enough, for a reason worth stating plainly. Evaluating
 ;;
-;;   (hl-bind-add! (hl-kbd "s-G") (lambda () ... (hl-window-into-group #f "l") ...))
+;;   (hl-bind-add! (hl-make-bind (hl-kbd "s-G") (lambda () ... (hl-window-into-group #f "l") ...)))
 ;;
 ;; cannot fail. The lambda is registered and never called, so nothing inside it
 ;; is ever looked up. Five names that no longer existed sat in code-snippets.md
@@ -116,8 +116,74 @@ these for the same reason."
 (define api-modules
   (remove (lambda (m) (eq? m 'kernel)) (named-modules)))
 
+;; WHY THE STUB MUST ANSWER A NUMBER FOR SOME GSUBRS, and it is not a detail of
+;; this harness. The stub answers #f, which is fine for a gsubr whose value the
+;; machinery passes along — but the machinery COMPARES some of them against an
+;; integer ((= 0 (hl--c-bind ...))), and (= 0 #f) raises. A raise inside a
+;; `define`'s initial value leaves that name UNBOUND, so the failure does not
+;; show up where it happened: it shows up in whatever LATER block first reads
+;; the name, as an unbound-variable FAIL naming an innocent snippet. keymaps.md
+;; hit it through (define-keymap NAME ...) -> hl-keymap-add! -> hl-bind-add! ->
+;; (= 0 rc), rc being (hl--c-bind ...). Answering 0 for those is also simply
+;; more faithful — the compositor answers 0, not #f.
+(define (gsubr-symbol? s)
+  "True for SYMBOL hl--c-* — a C entry point, by the name convention. A STRING
+test, not symbol equality: every gsubr shares a prefix, not an identity."
+  (and (symbol? s)
+       (let ((name (symbol->string s)))
+         (and (> (string-length name) 6) (string=? (substring name 0 6) "hl--c-")))))
+
+(define (status-gsubrs files)
+  "The gsubrs that answer a STATUS CODE rather than a value — see the note above
+gsubr-symbol? for why that matters. THE COMPARISON IS OFTEN THROUGH A VARIABLE,
+so this looks for both shapes: (= 0 (hl--c-x ...)) directly, and (= 0 v) where v
+was bound to a gsubr call. Matching only the direct shape misses hl--c-bind."
+  ;; PER FILE, deliberately — the three tables are reset for each file rather
+  ;; than accumulated across all of them. A variable name is local to the form
+  ;; that binds it, and the same name is reused in unrelated files: `rc` is used
+  ;; in bind.scm for the bind call AND in several other modules for something
+  ;; else. Joined file-wide, the later binding wins and the gsubr we were
+  ;; actually after is lost. Both `by-var` and `cmp-var` therefore live inside
+  ;; the per-file loop, and only `direct` is accumulated.
+  (let ((direct (make-hash-table)))     ; gsubr compared against an integer
+    (define (scan! x by-var cmp-var)
+      (when (pair? x)
+        (when (and (eq? (car x) '=)
+                   (pair? (cdr x)) (integer? (cadr x))
+                   (pair? (cddr x)))
+          (let ((rhs (caddr x)))
+            (cond ((and (pair? rhs) (gsubr-symbol? (car rhs)))
+                   (hash-set! direct (car rhs) #t))
+                  ((symbol? rhs) (hash-set! cmp-var rhs #t)))))
+        ;; a binding `(name (gsubr ...))`: any two-element form whose first
+        ;; element is a symbol and whose second is a gsubr call. Deliberately
+        ;; loose — over-inclusion can only mark one extra gsubr as a status
+        ;; gsubr, and only for a variable separately seen compared against an
+        ;; integer.
+        (when (and (symbol? (car x)) (pair? (cdr x)) (pair? (cadr x))
+                   (gsubr-symbol? (car (cadr x))))
+          (hash-set! by-var (car x) (car (cadr x))))
+        (scan! (car x) by-var cmp-var)
+        (scan! (cdr x) by-var cmp-var)))
+    (for-each
+      (lambda (f)
+        (let ((by-var (make-hash-table)) (cmp-var (make-hash-table)))
+          (call-with-input-file f
+            (lambda (port)
+              (let loop ((form (read port)))
+                (unless (eof-object? form) (scan! form by-var cmp-var) (loop (read port))))))
+          ;; join WITHIN the file: every variable compared against an integer
+          ;; that was bound to a gsubr call marks that gsubr a status gsubr
+          (hash-for-each (lambda (v _)
+                           (let ((g (hash-ref by-var v)))
+                             (when g (hash-set! direct g #t))))
+                         cmp-var)))
+      files)
+    direct))
+
 (define (stub-c-entry-points files)
-  (for-each
+  (let ((status (status-gsubrs files)))
+    (for-each
     (lambda (f)
       (call-with-input-file f
         (lambda (port)
@@ -126,13 +192,14 @@ these for the same reason."
               (when (pair? form)
                 (let walk ((x form))
                   (cond ((symbol? x)
-                         (let ((name (symbol->string x)))
-                           (when (and (> (string-length name) 6)
-                                      (string=? (substring name 0 6) "hl--c-"))
-                             (module-define! (current-module) x (lambda args #f)))))
+                         (when (gsubr-symbol? x)
+                           (module-define! (current-module) x
+                             (if (hash-ref status x)
+                                 (lambda args 0)
+                                 (lambda args #f)))))
                         ((pair? x) (walk (car x)) (walk (cdr x))))))
               (loop (read port)))))))
-    files))
+    files)))
 
 (define (load-silently path)
   (let ((prev (current-module)))
@@ -185,10 +252,44 @@ these for the same reason."
 
 ;; ---- what a block registers -----------------------------------------------
 
+;; this script's OWN module does not import the machinery (it is a plain
+;; guile), so the bind record's type has to be resolved by hand to be compared
+;; against. Resolved lazily, at first use, because the kernel is not loaded
+;; until boot! runs.
+(define (bind-rtd)
+  (variable-ref (module-variable (resolve-module '(hyprscheme kernel))
+                                 'hl-bind-rtd)))
+
+;; THE THUNK IS READ BY FIELD INDEX, not through the kernel's accessor, and
+;; that is not laziness. `hl--bind-thunk` is a `record-accessor` the kernel
+;; creates; resolving that NAME out of the kernel module from here yields
+;; Guile's one-argument STRUCT-FALLBACK procedure instead of the accessor —
+;; the same object every time, for every record. A walk that called it would
+;; capture one bogus procedure and report every bind in the wiki as the same
+;; callback, which is exactly the failure this tool exists to catch, wearing a
+;; disguise. struct-ref asks the record directly and cannot be shadowed.
+;;
+;; The index is 1 because the record is (tokens thunk flags devices ...) and
+;; struct-ref counts the vtable as field 0. It is pinned by a check in this
+;; file rather than left as folklore: see check-bind-thunk-slot!, called once
+;; per run.
+(define (bind-thunk b) (struct-ref b 1))
+
 (define (walk-procedures x found)
   (cond ((procedure? x) (found x))
         ((pair? x) (walk-procedures (car x) found) (walk-procedures (cdr x) found))
-        ((vector? x) (for-each (lambda (e) (walk-procedures e found)) (vector->list x)))))
+        ((vector? x) (for-each (lambda (e) (walk-procedures e found)) (vector->list x)))
+        ;; A BIND IS A RECORD, and its thunk lives IN it — the registrar for
+        ;; binds is hl-bind-add!, which is now handed the whole object rather
+        ;; than the thunk as a separate argument. Without this arm the walk
+        ;; sees an opaque struct, finds no procedure, and every bind in the
+        ;; wiki silently stops being exercised: the callback count fell from
+        ;; 120 to 29 the moment the signature changed, with no failure.
+        ;;
+        ;; Tested by the RECORD TYPE rather than guessed at, so a record that
+        ;; merely happens to hold a procedure is not walked into.
+        ((and (struct? x) (eq? (struct-vtable x) (bind-rtd)))
+         (walk-procedures (bind-thunk x) found))))
 
 (define (registrar? name)
   (let ((s (symbol->string name)))
@@ -267,6 +368,12 @@ these for the same reason."
                       (loop (+ n 1))))))))
 
 (define (run-captured!)
+  (let ((seen '()))
+    (for-each (lambda (e)
+                (unless (memq (car e) seen)
+                  (set! seen (cons (car e) seen))
+                  (format #t "DISTINCT: ~a\n" (cdr e))))
+              captured))
   (let loop ((done '()) (n 0))
     (let ((todo (let r ((l captured) (acc '()))
                   (cond ((null? l) (reverse acc))
@@ -340,12 +447,28 @@ these for the same reason."
 
 ;; ---- main ------------------------------------------------------------------
 
+(define (check-bind-thunk-slot!)
+  "Pin the assumption bind-thunk's struct-ref index rests on: that field 1 of an
+hl-bind record IS the thunk. Built through the machinery's own constructor, so
+this fails if the record's fields are reordered — the failure mode being every
+bind in the wiki silently collapsing into one bogus callback, which is a
+SILENT one. Cheap, and it runs before any block does."
+  (let* ((probe (lambda () 'bind-thunk-slot-probe))
+         (b ((variable-ref (module-variable harness 'hl-make-bind))
+             '("F24") probe)))
+    (unless (eq? (bind-thunk b) probe)
+      (format #t "doc-exercise: hl-bind's field 1 is not the thunk — the record's\n\
+  fields were reordered and bind-thunk (struct-ref 1) is now wrong. Fix the\n\
+  index in tools/doc-exercise.scm before trusting the callback count.\n")
+      (exit 1))))
+
 (define (main)
   (if (not (file-exists? (wiki-dir)))
       (begin (format #t "doc-exercise: ~a not found — skipped\n" (wiki-dir)) (exit 0)))
   (own-config-dir!)
   (boot!)
   (set! harness (make-harness))
+  (check-bind-thunk-slot!)
   (shadow-registrars! harness)
   (let ((blocks 0) (skipped 0) (patterns (skip-patterns)))
     (for-each

@@ -121,7 +121,7 @@ err '(enum-value key-state-enum (quote sideways))' "not a value of this enum"
 
 # ---- an enum used by CORE itself --------------------------------------------
 # bind-flag-enum belongs to (hyprscheme core): the BIND_FLAG_* bits are core's
-# own data — hl--bind-flags turns an hl-bind-add! option set into the one
+# own data — hl--bind-flag-mask turns an hl-make-bind option set into the one
 # integer the boundary takes, and core builds the table from it. Core is a leaf
 # like (hyprscheme enums), so it may import the machinery; core is NOT in
 # (hyprscheme values), which is for a set more than one FAMILY speaks.

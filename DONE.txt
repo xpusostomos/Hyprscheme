@@ -1068,6 +1068,555 @@ tested, and the route where the fix did not hold.
   symbol list, two enum-value examples, and why you still write the
   keywords.
 
+== GROUP LOCK: a one-line Hyprland rename, and the comment that had it backwards ==
+- cpp/Group.cpp called Config::Actions::lockAllGroups, which no longer
+  exists — the tree stopped building entirely (every `make` died at
+  Group.o, so no plugin, no suite). Current Hyprland has TWO group-lock
+  actions and neither is named that: `lockGroups` (ConfigActions.hpp:100)
+  flips the compositor-wide groupsLocked flag and posts the lockgroups
+  IPC event for every window, and `lockActiveGroup` (:101) locks the
+  FOCUSED window's group, erroring when there is none or it is
+  ungrouped. Our call is hl-groups-lock-set!, the global one, so it
+  follows `lockGroups`.
+- THE OLD COMMENT ASSERTED THE OPPOSITE and was the reason nobody
+  noticed: it claimed "#16231 split the old global lockGroups() into two:
+  lockGroup() now locks ONE window's group, while lockAllGroups() keeps
+  the old global-flag behaviour". Replaced with what the header actually
+  says. Worth noting WHY only this file broke: the per-window entry point
+  (hl--c-window-group-lock, Window.cpp:512) never goes through the action
+  — it takes an explicit window and calls setGroupLocked/setLocked on
+  that group directly, so it touches a pointer rather than this API and
+  is unaffected by the rename. A family that hand-rolls a call does not
+  inherit the action API's churn, and does not inherit its breakage
+  either.
+- Verified: `make` builds, plugin relinks, suite 20/20 (t-zzz-monitors
+  flaked once on its topology teardown and passed on re-run — the known
+  monitor-timing flake, not this change).
+
+== BINDS ARE OBJECTS: hl-make-bind, and hl-bind-add! takes placement only ==
+PASS 1 of 3 (pass 2 is hl-keymap + define-keymap, pass 3 the emacs port).
+- <hl-bind> gained THREE FIELDS: flags, devices, description. The record
+  is now (tokens thunk flags devices description) — everything INTRINSIC
+  to a binding. C++ cannot tell: it uses the record opaquely, by pointer
+  (bindTag is "scheme:" + SCM_UNPACK(record)) and reads no field, so this
+  is a Scheme-only change. The C++-side comment in cpp/Bind.cpp still
+  describes the old two-field shape and should be refreshed in pass 2.
+- NEW PUBLIC (hl-make-bind TOKENS THUNK #:key ...) in (hyprscheme core):
+  the 18 option keywords moved here from hl-bind-add!, including the
+  three exclusivity checks — whose messages now say hl-make-bind, because
+  that is the call that raises them. hl--bind-flags (the COMBINER) was
+  renamed hl--bind-flag-mask, and hl--bind-flags is now the record
+  ACCESSOR — the name the field wants.
+- (hl-bind-add! BIND #:submap NAME #:submap-reset NAME) takes only
+  PLACEMENT and hands back the SAME record it was given. One bind object
+  can therefore be registered in several places, and the object IS the
+  handle (hl-unbind!, hl-bind-enabled-set!, and in pass 2 a keymap).
+- WHY THE SPLIT IS RIGHT, stated in the docstrings: everything intrinsic
+  is on the record, placement is per-REGISTRATION. It also makes the
+  handle unambiguous without a duplicate-tag guard, because a fresh
+  hl-make-bind call has a fresh address and the tag is the address.
+- SWEPT: 49 tree sites, 46 test sites, 102 wiki sites, and the README
+  example. chez/ deliberately untouched (frozen). tools: the two
+  mechanical rewriters are not committed — the work is done.
+- TWO HARNESSES HAD TO LEARN ABOUT THE RECORD, and both failed SILENTLY
+  before they did, which is the interesting part:
+  - tools/doc-exercise.scm walked a registrar's arguments looking for
+    procedures. The thunk is now INSIDE a record, so it found none: the
+    callback count fell 120 -> 29 with NO failure reported — the tool
+    went quiet rather than red. It now descends into an hl-bind, tested
+    by RECORD TYPE so an unrelated struct is not walked into.
+  - ***THE TRAP, worth not rediscovering: `hl--bind-thunk` resolved out
+    of the kernel module BY NAME is NOT the accessor.*** It is Guile's
+    one-argument STRUCT-FALLBACK procedure — the SAME object for every
+    record — so a walk that called it captured one bogus callback and
+    reported every bind in the wiki as identical. The working read is
+    (struct-ref b 1): ask the record directly, and it cannot be shadowed.
+    Pinned by check-bind-thunk-slot!, which builds a record through
+    hl-make-bind and refuses to run if field 1 is not the thunk —
+    verified to fail by changing the index to 0. (The same shape as the
+    load-check lesson: resolving a name is not the same as reaching the
+    value.)
+  - tests/doc-snippets.scm pulled the thunk from a bind form's argument
+    list and the KEYS from (cadr form); both moved inside hl-make-bind,
+    so t-zzz-snippets failed with "the minimize snippet did not park the
+    window" — a real test catching a real miss, not a silent one. Fixed
+    by descending into the inner form.
+- DOCS: binds.md basics rewritten (two steps: build, then place),
+  bind-flags.md says the options belong to the binding, naming-
+  conventions/scheme-utilities/bind-flags/README prose updated.
+- VERIFIED: make check 7/7 (doc-exercise back to 167 callbacks, 151
+  notes — above the 120 baseline, since the walker now reaches thunks it
+  never could before), suite 20/20, api-check reports TWO ADDITIONS and
+  no removals. bind-flag-enum is from the previous pass; hl-make-bind is
+  this one.
+
+== KEYMAPS: hl-keymap, and define-keymap for a top-level map ==
+PASS 2 of 3 (pass 3 is the emacs port onto it).
+- NEW: <hl-keymap> (submap, submap-reset, binds) in (hyprscheme bind),
+  with hl-make-keymap, hl-keymap-add!, hl-keymap-enable!/disable!, the
+  three readers and hl-keymap?. A keymap is NOT a compositor concept —
+  it is a list of binds plus a placement name, so the group can be armed
+  and disarmed in one call instead of one call per bind. That is exactly
+  what bindings.scm was already doing by hand with hl-bind-enabled-set!.
+- THE RECORD TYPE IS MADE IN THE FAMILY, not the kernel, unlike every
+  other handle: the kernel must not depend on a family, and a keymap is a
+  bundle OF BINDS, which bind.scm owns. Nothing in C++ names it and no
+  gsubr reads it — it never crosses the boundary at all.
+- define-keymap NAME SUBMAP (KEYS THUNK OPTIONS...) ... — the one form
+  that KNOWS it is building a top-level keymap, so it is the one form
+  that leaves what it made DISABLED. hl-make-keymap (a plain helper) has
+  no way to know that, and a SUBMAP keymap born disabled would be one
+  whose keys silently never fire, so it is born ENABLED. Documented as a
+  COMMENT BLOCK: define-syntax takes no docstring and a macro is not a
+  procedure, so procedure-documentation cannot read it (verified).
+- THE HANDLE IDENTITY IS WHAT MAKES THIS WORK, and t-keymap.sh pins it:
+  a bind's tag is its record's ADDRESS, so TWO hl-make-bind calls are two
+  records and two handles, while ONE record registered twice would share
+  one handle. Every example binds a fresh hl-make-bind, so disabling one
+  keymap touches only its own binds — asserted, not assumed.
+- DOCS: NEW ../Hyprscheme.wiki/keymaps.md (+ [[keymaps]] in _Sidebar).
+- VERIFIED: make check 7/7, suite 21/21 (t-keymap.sh is the new file),
+  t-coverage 350/350.
+- THE LINT THAT CAUGHT THIS PASS'S WORST BUG, worth recording:
+  tools/doc-exercise.scm failed on the new page with "unbound:
+  browser-keymap", which looked like a doc typo and was not. Two real
+  bugs, in this order:
+  1. MY DOC BUG: the page's examples used (hl-kbd "C-x C-t"), a
+     SEQUENCE of chords, where hl-make-bind wants ONE chord — so the
+     form raised and its define never completed. Fixed in the page.
+  2. THE HARNESS'S BUG, and the general lesson: the stub answers #f for
+     every gsubr, but the machinery COMPARES some of them against an
+     integer ((= 0 (hl--c-bind ...))). (= 0 #f) raises, and a raise
+     inside a `define`'s INITIAL VALUE leaves the name UNBOUND — so the
+     failure surfaced in a LATER block as an unbound-variable FAIL
+     naming an innocent snippet, one step removed from its cause. The
+     stub now answers 0 for the gsubrs whose result the machinery
+     compares with `=` (DERIVED by reading the machinery, 141 of them),
+     and #f for the rest. Two traps inside the derivation itself, both
+     hit: the comparison is often THROUGH A VARIABLE ((let ((rc
+     (hl--c-bind ...))) ... (= 0 rc))), and the by-name join must be
+     PER FILE — `rc` is reused across modules, and joined file-wide the
+     later binding clobbered hl--c-bind. Notes fell 155 -> 65 and the
+     FAILs are gone; neutering the derivation reproduces the original
+     failure exactly, so the check can fail.
+
+== THE EMACS LAYER ONTO KEYMAPS: define-key! takes an object ==
+PASS 3 of 3.
+- BREAKING: define-key!'s first argument is a KEYMAP, not a submap NAME.
+  A submap is a name stamped on the binds that carry it; the keymap is
+  what HOLDS them, so it is what gets passed, and the name comes from
+  the keymap's own `submap` field. A string is REFUSED BY NAME — the
+  refusal names hl-make-keymap — rather than falling through to a
+  record-accessor error several calls later. global-set-key! now binds
+  into `global-map`, the exported keymap whose submap is "", so the
+  default map is readable and drivable like any other.
+- THE THREE MODULE-LEVEL HASHTABLES ARE GONE. hl--submaps-made became
+  the keymap's own `children` alist (it is the assq the proposal asked
+  for: submap name -> sub-keymap), and hl--exit-bound / hl--catchall-bound
+  became a `marks` set on the keymap. Both live on the keymap record.
+  - A MARK, NOT A LOOK FOR A BIND. The obvious spelling — "does this map
+    already have an s-G bind?" — is WRONG: a config may bind s-G itself,
+    so it would answer yes for a map we never gave an exit to, and the
+    map would be left without one. Hence marks.
+  - children are keyed by the child's own SUBMAP NAME ("kid-probe C-y"),
+    which is the parent name EXTENDED by the key, not by the key alone.
+    Two sequences sharing a prefix therefore find the SAME child object
+    — asserted by identity in t-keymap.sh, since two maps with the same
+    submap name would each work alone and disagree about their binds.
+- `reset` STAYS, and is now one line: global-map is the only real module
+  state left, and it must be rebuilt empty per generation or a reloaded
+  config's global-set-key! lands on top of the previous generation's
+  binds, whose thunks point at a discarded generation. global-map is ALSO
+  built at load time, not only by reset, and that is load-bearing: reset
+  runs from init.scm's sweep, which a tool that loads the modules
+  directly (doc-exercise, load-check) never runs, so a #f there would
+  make every global-set-key! in the wiki fail while working in a config.
+  The call is to hl-make-keymap, which is plain Scheme — the top-level
+  rule is about GSUBRs.
+- ESCAPE HATCHES ARE IN THE GROUP, by decision: s-G and the catchall are
+  registered through hl-keymap-add!, so hl-keymap-enable!/disable!
+  controls the whole mode including its ways out.
+- NEW PUBLIC: hl-keymap-child, hl-keymap-marked?, hl-keymap-mark!,
+  global-map. The two mark functions are public deliberately — anything
+  building modes needs the same "have I already given this map an
+  exit?" test, and hiding it would push callers back to a global table.
+- t-api's reset assertion now reads global-map through the ORDINARY API
+  (length (hl-keymap-binds global-map)) instead of the
+  module-local-variable ritual the unexported tables needed — the thing
+  whose lifetime is asserted is now the thing a config can also see.
+- SWEPT: 9 test sites in t-keydesc.sh, the config examples needed none,
+  and 17 wiki sites in emacs-keymaps.md (which had been left on the old
+  string spelling — those blocks RAISED, but a raise is a NOTE, not a
+  FAIL, so doc-exercise would NOT have caught the stale docs; doc-audit
+  checks names, not signatures. Worth knowing: an API change must sweep
+  the wiki by hand.)
+- VERIFIED: make check 7/7, suite 21/21, api-check 15 additions and no
+  removals. Every new assertion was confirmed to FAIL when neutered —
+  child reuse (define-key! builds a rival), the string refusal, and
+  hl-keymap-mark! (duplicate exits accumulate) — then restored.
+  Two bugs in my own first cut were caught by the tests rather than by
+  review: the child lookup keyed by the chord instead of the full submap
+  name, and an apostrophe in a comment inside a shell-quoted Scheme
+  string (the quoting trap CLAUDE.md warns about).
+
+== hl-submap! DELETED, and module-audit's export reader FIXED ==
+- REMOVED FROM THE API: hl-submap!. It returned (lambda () (hl-submap-activate!
+  NAME)) and prevented nothing — any config can write that lambda and it is
+  trivially correct, so the name bought 20 characters and cost a public name
+  whose `!` claimed it ACTED when it returned a function. That is what made it
+  read plausibly and mislead anyway: hl-submap-exit! takes NO argument, so it
+  CAN be handed to a bind directly and really is the action, while ENTERING
+  needs an argument and so needed currying. One of the pair acted and the other
+  returned, under the same `!`. Entering is written out now, and t-keydesc.sh
+  pins BOTH halves — a bind whose thunk enters a submap, and hl-submap-exit!
+  passed as a bind action with no lambda at all. This is a deliberate REMOVAL,
+  so API.snapshot was rebaselined with tools/api-check.sh --update (see below).
+- tools/module-audit.py READ THE EXPORT LIST AS RAW TEXT, so a comment between
+  the names became whitespace-separated WORDS — every one of them an "exported
+  name". Not cosmetic: those names flow into all_names and visible_to, so a
+  module that documents its export list in a comment reported the comment's
+  words as things it defines, and every module that does not export them as
+  CALLING WHAT IT CANNOT SEE. A comment made the tool lie in both directions at
+  once. It also took the FIRST `#:export (`, so a comment MENTIONING the form
+  higher in the file could win over the real one. Both fixed by running the
+  text through the strip_prose that already existed (strings then comments, in
+  that order, for reasons documented there); defines_of now uses it too, having
+  had the same latent bug.
+- The fix is made LOAD-BEARING rather than merely verified: the comment
+  explaining WHY bind.scm's hl--keymap-* names are exported now sits INSIDE that
+  module's #:export list, where it belongs anyway, so `make check` exercises the
+  comment-stripping on every run. Verified by reverting just the strip: the tool
+  then reports "calls and, which it cannot see" across several modules at once.
+  (This was found in pass 2, where it forced the comment OUTSIDE the list; the
+  workaround is gone.)
+- VERIFIED: make check 7/7, suite 21/21, and this whole phase — the three
+  keymap passes, the hl-submap! removal, the module-audit fix and every doc
+  edit — landed together before one test cycle, at the user's request.
+  api-check after the rebaseline reports no removals.
+- ALSO FIXED, because it failed twice in a row once the suite was run in
+  full: t-zzz-monitors' teardown slept a FIXED 3 seconds and then asserted
+  the topology was back, which is exactly the flake ("teardown left the
+  primary at x=1920") — it passes alone and fails under full-suite load,
+  where reconfiguring takes longer. It polls for the state now, as the same
+  file already did when waiting for the second output to APPEAR, and leaves
+  as soon as the state is right rather than always waiting. Not caused by
+  anything in this phase; it was previously recorded as a known flake,
+  which was the wrong call — a fixed sleep asserting a timing-dependent
+  fact is a bug in the test, not weather.
+
+== IF A NOTIFICATION ARRIVES, IT IS DELIVERED: three events were dropping payloads ==
+- THE RULE, from Chris, and it is a rule rather than a case-by-case judgement:
+  "as far as I'm concerned, if a notification arrives there is never an excuse
+  to not pass it on". A missing object crosses the boundary as #f and the
+  handler is still CALLED. A dropped event is not one fewer call — it is a
+  state change the handler never learns about, which is strictly worse than a
+  call it has to null-check.
+- WHAT WAS WRONG, found by asking which C++ handlers guard their payload rather
+  than assuming any particular one was fine. The tell was `emit(m_self.lock())`
+  (an expired weak ref locks to null) as against an explicit `nullptr`, and the
+  three real cases were:
+  - window.active: FocusState.cpp:148 emits `nullptr` when focus is CLEARED,
+    and our handler required a window, so the one event that says "nothing is
+    focused any more" was the one we dropped. This is the bug Chris reported.
+  - window.move_to_workspace: the C++ captured the workspace and passed only
+    the window, so a handler could hear "it moved" and never "where to".
+  - window.destroy: the listener delivered NO argument at all.
+  Also fixed the same class where it was reachable: workspace.created (null
+  workspace), minimize (now propagates #f), and both layer listeners via a new
+  fireSchemeStrOrNull. fireSchemeWinWs / fireSchemeWinRef in cpp/Event.cpp and
+  hl--fire-win-ws-rec in the kernel are the new paths; each is a separate
+  function rather than a branch inside the existing one, because the arity of
+  the Scheme call is fixed per entry point.
+- EVERY CASE IS ASSERTED BY t-events.sh, and each new assertion was verified to
+  fail before its fix — destroy by asserting the argument is a HANDLE (a
+  zero-argument handler leaves the state unset, so the test reports that rather
+  than passing vacuously), move_to_workspace by asserting the workspace NAME
+  arrives, and active by asserting #f. The three blocks carry the reasoning in
+  comments because the failure mode of each is invisible.
+- THE window.active TEST TOOK THREE ATTEMPTS, and both intermediate reasons are
+  worth keeping:
+  - It failed only under the full suite and passed alone, which I first wrote
+    off as ordering. It was: the block that ran before it moved a window to
+    workspace "9", carried the session there and closed the window, so the
+    session was ALREADY unfocused when the test asked for "no focus".
+    **Hyprland emits window.active only when focus CHANGES** — FocusState.cpp
+    returns early on `if (m_focusWindow.expired() && !pWindow)` — so focusing an
+    empty workspace from a state of no focus emits nothing at all. The test now
+    forces the transition by focusing a window first and asserts THAT too, so a
+    silently-dead handler cannot be read as a passing clear.
+  - The clear then still did not arrive, and the workspace was still "1": a BARE
+    non-numeric name is not a way to reach a workspace that does not exist yet.
+    Resolver.cpp's fallback is `targetFor(query().input(in).run())`, a lookup
+    among EXISTING workspaces; an unknown bare name gives an invalid target and
+    changeWorkspace answers "Bad workspace" without switching. The spelling that
+    creates is `name:`. The block now uses `"name:ev-empty-ws"`, and a failure
+    message prints which workspace it actually ended up on, because "the event
+    did not fire" and "the setup never happened" are indistinguishable without
+    it. It also records the WHOLE delivery sequence rather than the last value,
+    which is what separated "the clear never fired" from "the clear fired and
+    something re-focused".
+- The workspace this file starts on is captured BEFORE anything moves windows,
+  and restored before the next block and again at the end: the previous capture
+  point was after the move test had already switched the session to workspace
+  9, so "restoring" restored 9 and left the rest of the suite there.
+- ALSO FIXED, caught by t-zzzz-exit — which is exactly what it is for: the
+  events.md block I wrote for the payload rule used the invented names arm-for
+  and disarm-all. Every wiki block is evaluated and its callbacks fired, so the
+  page raised on every focus change in every nested compositor. It uses
+  hl-notify! now. (doc-audit could not see it: it checks hl-* names, and these
+  were not hl-*.)
+- VERIFIED: make check 7/7 (the `failed: … risky-call` line in doc-exercise's
+  output is core.md's own `guard` example printing what it caught — failures
+  count is 0, which is why the target exits 0), suite 21/21.
+- FIXED (the reason the bullet above was worth writing down at all):
+  ../Hyprscheme.wiki/dispatchers.md's workspace selector table said
+  `"anything else"` means "a named workspace", and that "focusing a workspace
+  that does not exist yet creates it". For a bare name neither was true —
+  creation is `name:`, and the same table already lists `"name:web"`. The blanket
+  sentence was made true only by the relative/empty spellings it cites. The row
+  now reads "an EXISTING workspace with that name" and the paragraph names the
+  exception, says what the refusal looks like (`Bad workspace`, focus unmoved),
+  and points at `name:` as the spelling that creates. Worth noting HOW it was
+  found: not by reading the page, but by a test that followed it and silently
+  asserted nothing — which is the failure mode a doc typo has here, and the
+  reason the test now prints the workspace it actually ended up on.
+- The same two facts are in CLAUDE.md's trap list, since both cost time twice
+  in one session: window.active firing only on a CHANGE (with the early return
+  quoted), and a bare workspace name needing to already exist (with the
+  resolver's fallback quoted).
+
+== KEYMAPS FOLLOW THE FOCUSED WINDOW'S TAGS ==
+- NEW: hl-keymap-attach-to-tag!, Chris's proposal. (hl-keymap-attach-to-tag!
+  KEYMAP TAG) arms KEYMAP exactly while the focused window carries TAG and
+  disarms it otherwise, so a mode can belong to an APPLICATION instead of to a
+  key you press. The registry (tag -> keymaps) and the window.active listener
+  both live in (hyprscheme emacs-keymaps), because that is the module the whole
+  keymap layer lives in — it is a composer, so reaching (hyprscheme window) for
+  hl-window-tags / hl-active-window is allowed and is checked: module-audit's
+  can-it-see-everything-it-calls rule covers the new import.
+- THE REGISTRY IS THE DESIGN, not bookkeeping. Only keymaps an attach put under
+  this policy are ever armed or disarmed by it, so re-evaluating on every focus
+  change cannot touch a keymap the config armed itself — global-map included.
+  One attached keymap cannot silently disarm another; the listener's reach is
+  exactly what it owns.
+- THE LISTENER IS INSTALLED ON THE FIRST ATTACH and not before, and `reset`
+  FORGETS its handle rather than keeping it. That is not tidiness: on reload the
+  host tears every event handler down and the new generation re-registers, so a
+  guard still holding the old record would believe the listener was installed,
+  never install another, and freeze the registry at whatever the first focus
+  change made it. The opposite answer to the GC hook, which is installed once
+  for the process and must NOT be reinstalled — same class of trap, opposite
+  sign.
+- THE ATTACH RE-EVALUATES ONCE ITSELF, so a config that attaches during load is
+  right about the window already focused instead of waiting for a focus change
+  that may never come. Pinned by a test that DISARMS the keymap by hand and then
+  attaches with no event in between — without that disarm the assertion would
+  pass whatever attach did, because a fresh keymap is enabled at birth.
+- THE KEYMAP NOW KNOWS WHAT IT WAS LAST TOLD: a boolean `enabled` field, read by
+  hl-keymap-enabled?, written by hl-keymap-enable!/disable! and by nothing else.
+  hl-make-keymap makes one enabled, define-keymap's is disabled (it already
+  called hl-keymap-disable!, which now records it). Documented as what the keymap
+  was TOLD, not a probe of the compositor — a single bind can still be disarmed
+  with hl-bind-enabled-set! and the keymap would not know. It is what makes the
+  unconditional re-evaluation above cheap enough to not need a memory of what was
+  armed last time.
+- TESTS, and both halves of the mechanism were verified to fail SEPARATELY,
+  because one neutering would have hidden the other:
+  - with the tag matcher (`hl--tag-apply`) made a no-op, three assertions fail —
+    the attach-time arm, the binds following the flag, and the focus-driven arm;
+  - with the LISTENER never installed, a different two fail — the focus-driven
+    disarm and the focus-driven arm — while the attach-time assertion still
+    PASSES, which is exactly the distinction being drawn.
+  The test keeps its keymap in hl-state across the separate $SCHEME evals and
+  deliberately never unbinds its bind: the keymap stays in the registry for the
+  rest of the session, so a later focus change will arm it again, and arming an
+  UNBOUND record is not something to discover from a log line in t-zzzz-exit.
+  Focus transitions are forced with a focus-away-and-back, since window.active
+  fires only on a change.
+- ALSO FIXED: keymaps.md — a page written in the PREVIOUS pass — documented
+  `hl-make-keymap`'s option as "enabled; #:enabled #f to opt out". There is no
+  #:enabled option and never was: I wrote the claim, not the feature.
+  doc-audit could not have caught it (it checks hl-* NAMES, not keyword
+  arguments) and the doc tiers only evaluate the blocks. The row is corrected
+  rather than the option implemented — inventing an API surface to make a wrong
+  line true is backwards, and #:enabled would need hl-keymap-add! to disarm what
+  it registers into a disarmed map or the flag would lie the moment a bind was
+  added.
+- VERIFIED: make check 7/7 (155 blocks, 171 callbacks), suite 21/21, and
+  tools/api-check.sh reports exactly two additions and no removals
+  (hl-keymap-attach-to-tag!, hl-keymap-enabled?) — additions are allowed to pass
+  by that tool's design, and API.snapshot was NOT rebaselined.
+
+== A TAG IS READ THE WAY IT WAS WRITTEN: hl-window-tags strips the rule mark ==
+- CHRIS'S CALL, after the attach work below, and it fixed a real bug in it.
+  hl-window-tags now strips the trailing "*"; hl-window-tags-raw is the old
+  behaviour, verbatim. The split is the point: the mark is INFORMATION (it is
+  the only way to tell a tag the compositor will retire on its own from one only
+  you can remove), so it is not thrown away — it is just not what a caller
+  comparing a tag against a name means.
+- WHAT THE MARK IS, since this is the fact that cost the time. A window rule
+  applying `tag = "+browser"` goes through WindowRuleApplicator's
+  applyTag(effect, dynamic=true), which stores "browser*"; the mark is what ties
+  the tag to the rule so it can be retired by removeDynamicTag (which erases
+  "name*" and nothing else). hl-window-tag-add! goes through Actions::tag →
+  applyTag(tagStr), dynamic defaulting to false, and stores the name bare. Both
+  spellings are real and both are what the raw list holds.
+- THE BUG THIS EXPOSED, in hl-keymap-attach-to-tag!. It matched a window's tags
+  with `member`, i.e. exactly, so a registry keyed "browser" never matched a
+  window holding "browser*" — every attach on a rule-tagged window silently
+  never armed. No error, no log line, the keymap simply never came up. Matching
+  now goes through hl-window-tags, which is the spelling the config wrote.
+- MY OWN TEST WAS BLIND TO IT, and that is the part worth keeping. t-keymap.sh
+  tagged its window with hl-window-tag-add! — the STATIC path, stored bare — so
+  the test exercised the one path that avoids the real-world case and passed
+  against code that could not work on a real config. It now applies the tag with
+  a WINDOW RULE and asserts both spellings, which is the arrangement every real
+  config uses. Verified to fail both ways: with hl--tag-apply reading the raw
+  list, three assertions fail; with the tag matcher neutered, three fail; with
+  the listener never installed, a different two fail while the attach-time one
+  still passes.
+- ALSO FIXED, found by writing the test for it: hl-window-tag-add!'s docstring
+  said "Add the static TAG string". It does not add, it TOGGLES — Actions::tag →
+  applyTag with no +/- prefix flips the tag, so calling it twice removes it.
+  The docstring now says so, with the +/- prefixes spelled out, and t-api.sh
+  pins the toggle, the pair of spellings, and that exactly ONE trailing star is
+  stripped (not two, not one from the middle).
+- Docs: window-rules.md's Tags section now carries the whole story (why the mark
+  exists, which function to compare against, and the toggle), windows.md's rows
+  name both functions, and keymaps.md says the tag you attach is the name you
+  wrote. The two illustrative blocks are TABLES, not ```scheme blocks: a block
+  needs a window, and inventing one would have had the doc test mutate a live
+  window's tags — doc-exercise caught exactly that (unbound `w`) before it did.
+- VERIFIED: make check 7/7, suite 21/21, api-check 3 additions and no removals
+  (no rebaseline). The rename is an ADDITION by that tool's reckoning because
+  hl-window-tags still exists — its meaning changed, which is precisely what
+  api-check cannot see and the docs had to say.
+- ALSO CONVERTED, outside the repo: Chris's own ~/.config/hypr/bindings.scm →
+  bindings2.scm, which is what drove all of the above. Beyond the mechanical
+  hl-make-bind/define-key! conversion, its two SINGLE-POSITIVE-TAG translations
+  (M-% for LibreOffice, C-l for browsers) became keymaps attached to their tags
+  — that is what those two were always shaped like. The rest cannot follow them
+  and the file says why: attach arms the UNION over a window's tags, and the
+  common policy there is a NEGATION ("armed unless tagged terminal or
+  emacs-keys"), which is not a set anyone can be a member of. Verified by
+  loading it in a nested compositor against a REAL rule-applied tag: raw tags
+  ("browser*"), plain ("browser"), browser map armed, libreoffice map not, zero
+  scheme errors. That run also found a latent bug in the config — its initial
+  (refresh-app-translations) sits above the registrations and therefore walked
+  an empty list, leaving every translation disarmed until the first focus
+  change — which the converted copy fixes by moving the call to the end.
+- AND THE PREDICATES THOSE TWO BLOCKS EXISTED FOR WERE DELETED with them:
+  browser-window? and libreoffice-window? had exactly one caller each, the
+  bind-app-translation they were the enabled-when of, so converting those left
+  both defined and never called. emacs-window? went too, and it had been dead
+  BEFORE the conversion — nothing had ever called it, which is worth saying
+  because it looks like collateral damage and is not. A sweep of every top-level
+  definition in the file (reference count with identifier boundaries, so
+  not-emacs-window? does not inflate emacs-window?) now reports none unused.
+  rotate is the one deliberate exception left: nothing in the file calls it, but
+  the comment above it documents it as the manual form of SUPER+R, reachable
+  from hyprctl scheme, so deleting it would delete a documented entry point. The
+  comment on the surviving negated predicate says why the positive forms are
+  keymaps now rather than predicates.
+
+== ATTACHING TAKES A CONDITION, NOT A TAG — the general form, Chris's design ==
+- NEW: hl-keymap-attach-to-window-condition! (KEYMAP THUNK), where THUNK takes
+  the focused window — a handle, or #f when nothing is focused — and answers
+  whether the keymap should be armed. hl-keymap-attach-to-tag! is now written IN
+  TERMS of it: the tag call is the same machinery with the condition written for
+  you, so there is one mechanism and not two.
+- WHY IT HAD TO GENERALISE, and it was not a preference. A tag is a string a
+  window either has or has not, so the condition a real config wants is usually
+  NOT a membership test. Chris's own keymap is armed UNLESS the app speaks emacs
+  — a NEGATION, and there is no tag you can be a member of for it. The tag form
+  could not express it, and the negation is not an edge case: it is most of the
+  policy.
+- AND IT KILLED THE OTHER OBSTACLE. ekeys mode arms those same keys even in a
+  terminal, which is a MODE FLAG and not a window property at all — no tag
+  vocabulary could ever reach it, and it cannot be handled in the handler either,
+  because a DISARMED bind never fires and so never reaches one. A lambda closes
+  over the flag and reads it.
+- THE COST OF READING A FLAG IS STALENESS, and it is paid explicitly rather than
+  hidden: a condition is evaluated when the focused window CHANGES, so a mode
+  flag flipping is invisible to the registry. Hence NEW: hl-keymaps-recheck! —
+  re-evaluate every attached keymap against the window focused right now. The
+  mode setters call it. The alternative was re-running every condition on every
+  key press, which is the cost the whole design exists to avoid. t-keymap.sh
+  states the staleness AS A TEST — flip the flag, assert still disarmed, recheck,
+  assert armed — and was verified to fail with hl-keymaps-recheck! neutered.
+- ONE CONDITION PER KEYMAP, and attaching again REPLACES it. A lambda can say
+  "this tag OR that tag" itself, so the two readings cannot be confused; the test
+  that proves the replace is a recheck after re-attaching an always-#f condition
+  over an always-#t one — with both retained the keymap would re-arm.
+- reset clears the registry and forgets the listener handle, unchanged, and the
+  listener is still installed on the first attach only.
+- WHAT EKEYS MODE IS, settled by Chris, because the old code had answered it
+  three different ways at once: ekeys is a mode for driving HYPRLAND with
+  emacs-shaped keys — C-x <left> stepping through a tab group the way it steps
+  through emacs' tab line — even while sitting in emacs (or a terminal, where the
+  shell speaks emacs too). IT NEVER CHANGES WHAT THE APP RECEIVES. The mode only
+  ever ARMS keys that were disarmed, and every key it arms performs a Hyprland
+  action.
+- THE OLD CODE CONTRADICTED THAT THREE TIMES OVER, which is why it read as
+  incoherent: under ekeys with a terminal focused, the movement translations were
+  armed and then the handler re-tested the window and sent THE SAME KEY back (a
+  capture-and-re-inject that changed nothing), C-r did the same, and C-k sent
+  S-End + Delete — DIFFERENT KEYS to the app, which is the one thing the mode must
+  never do. The predicate that fed all of it was one shared not-emacs-window?,
+  which is how translation policy and mode policy came to be the same boolean.
+- SO THE TWO ARE SEPARATE KEYMAPS NOW, differing by exactly one term:
+  emacs-simulation-map (the translations) is armed only OUTSIDE an app that
+  speaks emacs; ekeys-map (the Hyprland actions) is armed there too, while ekeys
+  mode is on. That IS the mode, stated in one line, and it is why no handler
+  needs to re-test anything: being armed is the decision.
+- EVERY HANDLER RE-TEST IS DELETED — emacs-simulate, C-k, C-r, the C-x prefix,
+  M-% and C-l. They existed to undo an arming that should never have happened,
+  and each was justified in the file as a "race guard" for the window between a
+  key press and a focus change re-arming the bind. THERE IS NO SUCH WINDOW:
+  window.active is emitted synchronously inside the focus change, on the
+  compositor's thread, before the next key can be dispatched. emacs-simulate no
+  longer even takes the emacs chord, since the one thing it used it for was
+  sending it back.
+- BINDINGS2.SCM REWRITTEN IN FULL, and the old machinery is GONE from it:
+  emacs-translation, bind-app-translation, app-translations,
+  refresh-app-translations, the window.active listener they needed, the
+  hand-rolled re-evaluate in every mode setter, the end-of-file initial pass, and
+  every predicate that existed only to feed them. Nineteen top-level registrations
+  became nineteen clauses of emacs-simulation-map; C-k is a clause of it too (a
+  translation like the rest); ekeys-map is the C-x prefix, one clause and the door
+  new ekeys keys come in by; C-r is find-backward-map (the simulation's condition
+  plus LibreOffice); and set-mark-map uses the simulation's condition while
+  cancel-mark-map's is the mark flag alone, ignoring the window entirely — which
+  is a thing a lambda says and a tag cannot.
+- TWO MAPS FOR THE C-x CHORDS, for one mechanical reason, and the split is
+  load-bearing rather than tidy: a keymap has ONE submap and these binds live in
+  two. The key that ENTERS is in the default map and carries the ekeys condition;
+  the chords are in "C-x" and carry NO CONDITION, because they are already gated
+  by the submap being current — and because a DISARMED bind does not match at all,
+  so if the chords went down while you were inside the submap the catchall that
+  abandons a mistyped chord would go with them and there would be no way out but a
+  reload. Being in a submap is a state the config must always be able to leave.
+- VERIFIED against a truth table in a nested compositor, because arming is
+  invisible until a key is pressed (columns: simulation, C-r, C-SPC, C-g, ekeys):
+  plain (#t #t #t #f #t), terminal (#f #f #f #f #f), terminal + ekeys
+  (#f #f #f #f #t), terminal + mark (#f #f #f #t #f), both off (#f #f #f #f #f),
+  libreoffice (#t #f #t #f #t). THE THIRD ROW IS THE WHOLE DESIGN: ekeys armed,
+  simulation NOT — the mode takes the C-x chords in a terminal and translates
+  nothing. Tags applied by a real window rule, so "terminal*" is what is matched.
+  Zero config errors, zero [scheme] error lines. Each attach evaluates the WHOLE
+  registry when it is made, so the last attach is also the initial pass and the
+  ordering bug the old copy had cannot recur.
+- FOUND BY READING, after Chris said so and he was right: nineteen lines read
+  (define-key! c-x-map(hl-kbd "C-f") because my own replace_all ate the space.
+  VALID SCHEME — "(" is a delimiter — so every test passed and every probe agreed;
+  only looking at the file shows it. That is the case for reading the diff rather
+  than trusting a harness you designed around your own assumptions.
+- make check 7/7, suite 21/21, api-check 5 additions and no removals.
+- ALSO FIXED while documenting it: keymaps.md's tag example said
+  (define-keymap browser-map "browser" ...), which puts the binds in a submap
+  NOTHING EVER ACTIVATES — a keymap named after its tag double-gates its own
+  binds and they never fire. It is #:submap "" and the page now says why.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

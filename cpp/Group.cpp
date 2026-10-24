@@ -68,13 +68,20 @@ namespace Config::Scheme {
     static int hlSchemeGroupLock(int act) {
         if (!g_up)
             return -1;
-        // upstream #16231 split the old global lockGroups() into two: lockGroup()
-        // now locks ONE window's group (and errors if it has none), while
-        // lockAllGroups() keeps the old global-flag behaviour. This function is
-        // the global one — hl-groups-lock-set! — so it follows lockAllGroups.
-        // The per-window lock is a separate entry point (hl--c-window-group-lock,
-        // Window.cpp) and is unaffected.
-        return actionResult("group-lock", Config::Actions::lockAllGroups(sc<Config::Actions::eTogglableAction>(act)));
+        // The group lock actions come in two scopes, and the GLOBAL one is
+        // `lockGroups` (ConfigActions.hpp:100) — it flips the compositor-wide
+        // groupsLocked flag and posts the lockgroups IPC event for every
+        // window. `lockActiveGroup` (ConfigActions.hpp:101) is the other one:
+        // the FOCUSED window's own group, erroring when there is no focused
+        // window or it is ungrouped.
+        //
+        // This function is hl-groups-lock-set!, the global one, so it follows
+        // lockGroups. The per-window lock is a separate entry point
+        // (hl--c-window-group-lock, Window.cpp) and does not go through this
+        // action at all — it takes an explicit window and calls setLocked() on
+        // that group directly, which is why the rename below only showed up
+        // here.
+        return actionResult("group-lock", Config::Actions::lockGroups(sc<Config::Actions::eTogglableAction>(act)));
     }
 
     static int hlSchemeGroupAlive(SCM id) {

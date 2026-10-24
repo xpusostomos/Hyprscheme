@@ -124,11 +124,24 @@ def calls_of(code):
 
 
 def defines_of(text):
-    return set(re.findall(r'^\(define\*? \(?([\w!?*<>=+-]+)', text, re.M))
+    return set(re.findall(r'^\(define\*? \(?([\w!?*<>=+-]+)', strip_prose(text), re.M))
 
 
 def exports_of(text, key='#:export'):
-    m = re.search(re.escape(key) + r' \((.*?)\)\)', text, re.S)
+    # STRIPPED FIRST, and both halves of that matter.
+    #
+    # Without it the list is read as raw text, `split()` on whitespace — and a
+    # COMMENT between the names is whitespace-separated words, so every word of
+    # it became an "exported name". That is not cosmetic: the names then flow
+    # into `all_names` and into `visible_to`, so a module that explains its
+    # export list in a comment reports the comment's words as things it defines,
+    # and every module that does NOT export them as calling what they cannot
+    # see. A comment could make this tool lie in both directions at once.
+    #
+    # And the match takes the FIRST `#:export (`, so a comment MENTIONING the
+    # form higher in the file would win over the real one. Stripping removes
+    # that too.
+    m = re.search(re.escape(key) + r' \((.*?)\)\)', strip_prose(text), re.S)
     return set(m.group(1).split()) if m else set()
 
 

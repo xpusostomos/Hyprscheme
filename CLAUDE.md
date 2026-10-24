@@ -279,7 +279,7 @@ the kernel's `#:export`, naming them, be satisfied on every generation.
   still be in force on the next reload. **A module that keeps state therefore
   defines an unexported `reset`**, and the sweep at the end of `init.scm` calls
   them all, once per generation, before the config is read. `t-api` pins the
-  behaviour for the kernel's variables and for emacs-keymaps' three tables, and
+  behaviour for the kernel's variables and for emacs-keymaps' `global-map`, and
   was verified to fail with a `reset` neutered.
 - **The reset sweep iterates `module-uses`, which holds PUBLIC INTERFACES, not
   modules.** `use-modules` is `module-use!` applied to `resolve-interface`, and an
@@ -402,6 +402,22 @@ module, which is why no `.scm` does it.
 
 Things that bit us and are worth not rediscovering:
 
+- **`window.active` FIRES ONLY WHEN FOCUS CHANGES.** `FocusState.cpp` returns
+  early on `if (m_focusWindow.expired() && !pWindow)` — so asking the
+  compositor for "no focus" when there is already no focus emits nothing at
+  all. A test (or a config) that waits for the clear must create the
+  transition: focus a window first, then take focus away. This cost two
+  rounds of "the test is flaky" and it was never flaky, it was asserting on an
+  event that could not occur. The same shape applies to any listener waiting
+  for a null payload.
+- **A BARE WORKSPACE NAME MUST ALREADY EXIST.** `State::Workspace`'s resolver
+  ends at `targetFor(query().input(in).run())` — a lookup among EXISTING
+  workspaces — so an unknown non-numeric name yields an invalid target and
+  `changeWorkspace` answers "Bad workspace" and does nothing, silently. The
+  spelling that CREATES is the `name:` prefix (`"name:web"`); numeric strings
+  and the relative forms (`"+1"`, `"e+1"`, `"emptym"`) create too. A harness
+  that means to switch workspaces should assert WHERE IT ENDED UP, since "the
+  event never fired" and "the switch never happened" look identical otherwise.
 - **`#:export` must be explicit.** `module-export-all!` makes bindings
   visible to `module-variable` but does NOT reach a module that later
   `use-modules`/`#:re-export`s the module.
@@ -1081,8 +1097,11 @@ that `fullscreen-handler` was one of them. Neither was true:
     language could say "this ONE bind goes in resize". Deleted, along with
     `hl--c-get-submap-ctx` / `hl--c-set-submap-ctx` and both globals.
   - **`define-key!` in emacs-keymaps is unaffected** — it always set the name
-    per bind conceptually; it now passes `#:submap` instead of wrapping each
-    `hl-bind-add!` in an `hl-submap` thunk. Its post-action exit is still done
+    per bind conceptually; it now places each bind through `hl-keymap-add!`
+    instead of wrapping them in an `hl-submap` thunk. Its first argument is a
+    **keymap object**, not a submap name (a submap is a name stamped on the
+    binds; the keymap is what holds them), and the name comes from the keymap's
+    own `submap` field. Its post-action exit is still done
     in **Scheme** (a `dynamic-wind` around the thunk) rather than declared as
     `#:submap-reset`, deliberately: the compositor applies a reset inside
     `invokeBind`, AFTER the thunk, so the harness — which fires a bind by

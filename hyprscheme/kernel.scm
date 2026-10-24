@@ -170,6 +170,7 @@
            hl--fire-bool-rec hl--fire-list hl--fire-list-rec
            hl--fire-mon-rec hl--fire-str-rec hl--fire-win-rec
            hl--fire-win-state-rec hl--fire-ws-mon-rec hl--fire-ws-rec
+           hl--fire-win-ws-rec
            hl--guarded-run hl--layout-call hl--layout-msg
            hl--layout-recalculate hl--layout-resize
            hl--layout-window-close hl--layout-window-open
@@ -183,6 +184,7 @@
            hl--watchdog-ms hl--wd-aborted hl--wd-alarm hl--wd-enter
            hl--wd-exit hl--wd-handler hl--wd-handler-set hl--wd-rearm
            hl--wd-stack hl-bind-rtd hl--bind-thunk hl--bind-tokens
+           hl--bind-flags hl--bind-devices hl--bind-description
            hl-event-rtd hl-rule-rtd hl-timer-rtd))
 
 (use-modules (ice-9 exceptions)   ; guard, make-exception, exception-* accessors
@@ -623,15 +625,40 @@
 ;; SThunkRef) and stamps its pinned address into the bind's argument tag;
 ;; the record becomes collectable when the bind is unbound (or dies at
 ;; reload) and the user drops it. No bind ids, no registries.
+;;
+;; EVERYTHING INTRINSIC TO A BIND IS A FIELD. Five of them:
+;;
+;;   tokens       the key token list (what hl-kbd returns)
+;;   thunk        the action
+;;   flags        the combined eBindFlags bitmask, from the option keywords
+;;   devices      the device-scope list (part of the flag DERIVATION, see
+;;                hl--bind-flag-mask: a non-empty list sets DEVICE_INCLUSIVE
+;;                unless the caller opted out)
+;;   description  the display string
+;;
+;; What is emphatically NOT a field is PLACEMENT — the submap a bind lives in
+;; and where it resets to. Those are arguments to hl-bind-add!, because the
+;; SAME bind object can be the template for binds in several maps while a
+;; placement belongs to one registration. That split is what lets a config
+;; build a bind once and register it (see hl-make-bind / hl-bind-add!).
+;;
+;; The field COUNT is why this is not a struct-ref by index anywhere: the
+;; accessors below are the only way in, so adding a field is a change to this
+;; file plus whoever reads it, not a silent renumbering.
+(define hl-bind-rtd (make-record-type 'hl-bind '(tokens thunk flags devices description)))
 
-(define hl-bind-rtd (make-record-type 'hl-bind '(tokens thunk)))
-
-;; INTERNAL record-field accessors, hence hl-- : a bind's tokens and thunk are
-;; how the fire trampoline takes a bind apart, not something a config reads.
-;; They were hl-bind-* and so leaked into the public API list.
+;; INTERNAL record-field accessors, hence hl-- : how the machinery takes a bind
+;; apart, not something a config reads. hl--bind-tokens/hl--bind-thunk were
+;; hl-bind-* once and so leaked into the public API list.
 (define hl--bind-tokens (record-accessor hl-bind-rtd 'tokens))
 
 (define hl--bind-thunk (record-accessor hl-bind-rtd 'thunk))
+
+(define hl--bind-flags (record-accessor hl-bind-rtd 'flags))
+
+(define hl--bind-devices (record-accessor hl-bind-rtd 'devices))
+
+(define hl--bind-description (record-accessor hl-bind-rtd 'description))
 
 (define (hl--plist-cdr l)
   ;; (key value rest ...) → (value rest ...); a trailing bare KEY is an error
@@ -746,6 +773,14 @@
 (define (hl--fire-win-state-rec b window state)
   (let ((result (guard (e (#t (begin (hl--report e "window event") hl--wd-aborted)))
                   (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) window state))))))
+    (not (eq? result hl--wd-aborted))))
+
+;; window.move_to_workspace carries TWO payloads and delivers both, as the
+;; compositor's own Lua does — the handler is told WHERE the window went, not
+;; just that it moved. Either can be #f (see THE PAYLOAD RULE in Event.cpp).
+(define (hl--fire-win-ws-rec b window ws)
+  (let ((result (guard (e (#t (begin (hl--report e "window event") hl--wd-aborted)))
+                  (hl--guarded-run "handler" (lambda () ((hl--event-thunk b) window ws))))))
     (not (eq? result hl--wd-aborted))))
 
 ;; bare-thunk list fire for GESTURES (the thunk travels directly, no record)

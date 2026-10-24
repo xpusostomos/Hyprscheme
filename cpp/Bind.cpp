@@ -45,13 +45,21 @@ namespace Config::Scheme {
     // default map, as it always was (setSubmap treats "" and "reset" alike).
 
     // ---- bind handles ---------------------------------------------------------
-    // A bind's Scheme handle is an hl-bind RECORD (token list + thunk). The
-    // capture inside the CBind carries an SThunkRef to it (SchemeInternals.hpp):
-    // locked while any copy lives, released when the bind is destroyed. There
-    // is NO bind registry on our side: Hyprland's keybind registry is the only
-    // list. The record's pinned address, stamped into the bind's argument
-    // metadata at registration, identifies our binds for precise unbind and
-    // plugin shutdown.
+    // A bind's Scheme handle is an hl-bind RECORD. That record grew three
+    // fields when the bind options moved onto it — it is now
+    // (tokens thunk flags devices description), everything INTRINSIC to a
+    // binding, with the per-registration placement (submap / submap-reset)
+    // passed to hl-bind-add! instead — and THIS FILE CANNOT TELL: it uses the
+    // record opaquely, by pointer, and reads no field whatsoever. Only the
+    // tag below and the thunk the capture calls are touched, so the field list
+    // is Scheme's business and may change again without a line here moving.
+    //
+    // The capture inside the CBind carries an SThunkRef to the record
+    // (SchemeInternals.hpp): locked while any copy lives, released when the
+    // bind is destroyed. There is NO bind registry on our side: Hyprland's
+    // keybind registry is the only list. The record's pinned address, stamped
+    // into the bind's argument metadata at registration, identifies our binds
+    // for precise unbind and plugin shutdown.
     static std::string bindTag(SCM record) {
         return "scheme:" + std::to_string(SCM_UNPACK(record));
     }

@@ -59,7 +59,7 @@ val '(call-with-string-output-port (lambda (p) (display "ok" p)))' '"ok"'
 ok '(not (generation-uses? (quote (hyprscheme))))'
 
 # and a real call through an imported family still works, end to end
-ok '(let ((b (hl-bind-add! (hl-kbd "C-<f20>") (lambda () #f))))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "C-<f20>") (lambda () #f)))))
        (and (hl-bind? b) (hl-unbind! b)))'
 
 # `hl--ready` is the kernel's flag the host sets once everything loaded; the

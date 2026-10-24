@@ -45,6 +45,39 @@ namespace Config::Scheme {
         return schemeIntList(std::vector<int>(vals));
     }
 
+    // ======================= THE PAYLOAD RULE =======================
+    //
+    // IF THE NOTIFICATION ARRIVES, IT IS DELIVERED. A null payload crosses as
+    // #f; the event is NEVER swallowed because a payload is missing. Nothing
+    // below may `return` on a null argument.
+    //
+    // The reason is that a swallowed event is not "one fewer call", it is a
+    // STATE CHANGE the handler never learns about. window.active is emitted
+    // with a null window when focus is CLEARED, so dropping it means a handler
+    // can never find out that nothing is focused any more and everything it
+    // armed for the window that just closed stays armed.
+    //
+    // This rule used to be written once per helper instead of once, and the
+    // call sites each re-decided it. Most followed it; fireSchemeWin did not,
+    // and fireSchemeWin serves THIRTEEN window events — one bad guard, thirteen
+    // events. THE LESSON IS THE PLACEMENT: a per-site decision is a decision
+    // that gets made wrong somewhere, so it is made here once and the sites
+    // only choose a payload.
+    //
+    // It is also parity: upstream's own Lua binding pushes whatever it has, so
+    // a null window/workspace/monitor arrives as nil there (LuaEventHandler.cpp
+    // pushes the object and the push of a null is nil). A handler that has to
+    // cope with nil in Lua has to cope with #f here.
+    //
+    // WHICH ARGUMENTS CAN ACTUALLY BE NULL is a separate question, answered by
+    // reading the `.emit(...)` for that event — the tells are an explicit
+    // `nullptr` (deliberate), a preceding dereference or guard (cannot be
+    // null), and `emit(m_self.lock())` (an expired weak ref can be null). It
+    // does not change this rule at all: propagating a null that never happens
+    // costs nothing, and dropping one that does is a bug. Do not "optimise" a
+    // guard back in on the grounds that it cannot be null today.
+    // ===============================================================
+
     void fireScheme(SCM record) {
         if (!g_up)
             return;
@@ -75,15 +108,65 @@ namespace Config::Scheme {
         watchdogExit();
     }
 
-    // events carrying window payloads: the window crosses as a fresh handle
+    // events carrying window payloads: the window crosses as a fresh handle,
+    // and a null window as #f — see THE PAYLOAD RULE above.
     static void fireSchemeWin(SCM record, PHLWINDOW window) {
-        if (!g_up || !window)
+        if (!g_up)
+            return;
+
+        const auto handle = window ? hl::windowHandle(window) : SCM_BOOL_F;
+
+        watchdogEnter("handler");
+        hl::call2(hl::globalRef("hl--fire-win-rec"), record, handle);
+        watchdogExit();
+    }
+
+    // window.destroy: the bus event carries a WEAK ref and fires from the
+    // window's teardown, so it may already be expired — the handle is then born
+    // dead and every getter reads #f, which is exactly what Lua's `w.lock()`
+    // gives (LuaEventHandler.cpp dispatches ONE argument here; this used to
+    // deliver none, so a handler written for parity by arity did not fit).
+    // hl::windowHandle stores the ref WITHOUT locking, deliberately, which is
+    // the same thing fireSchemeWsRef does for workspace.removed.
+    static void fireSchemeWinRef(SCM record, PHLWINDOWREF window) {
+        if (!g_up)
             return;
 
         const auto handle = hl::windowHandle(window);
 
         watchdogEnter("handler");
         hl::call2(hl::globalRef("hl--fire-win-rec"), record, handle);
+        watchdogExit();
+    }
+
+    // window.moveToWorkspace: TWO payloads, as Lua dispatches ("window.
+    // move_to_workspace", 2). The window alone was passed before and the
+    // workspace was captured and thrown away, so the handler could not tell
+    // WHERE the window went — not a null-case bug at all, a payload dropped on
+    // every single call.
+    static void fireSchemeWinWs(SCM record, PHLWINDOW window, PHLWORKSPACE ws) {
+        if (!g_up)
+            return;
+
+        const auto winHandle = window ? hl::windowHandle(window) : SCM_BOOL_F;
+        const auto wsHandle  = ws ? hl::workspaceHandle(ws) : SCM_BOOL_F;
+
+        watchdogEnter("handler");
+        hl::call3(hl::globalRef("hl--fire-win-ws-rec"), record, winHandle, wsHandle);
+        watchdogExit();
+    }
+
+    // a STRING payload that may be absent — a null layer surface has no
+    // namespace, so the handler gets #f rather than nothing. Deliberately a
+    // separate helper from fireSchemeStr: an empty string is a real value and
+    // must not be confused with "there was no object".
+    void fireSchemeStrOrNull(SCM record, const char* s) {
+        if (!g_up)
+            return;
+
+        watchdogEnter("handler");
+        hl::call2(hl::globalRef("hl--fire-str-rec"), record,
+                  s ? scm_from_utf8_string(s) : SCM_BOOL_F);
         watchdogExit();
     }
 
@@ -159,7 +242,7 @@ namespace Config::Scheme {
             case 4: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.urgent.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
             case 5: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.pin.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
             case 6: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.fullscreen.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
-            case 7: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.moveToWorkspace.listen([ref = SThunkRef(record)](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWin(ref.obj, w); })); break;
+            case 7: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.moveToWorkspace.listen([ref = SThunkRef(record)](PHLWINDOW w, PHLWORKSPACE ws) { fireSchemeWinWs(ref.obj, w, ws); })); break;
             case 8: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.active.listen([ref = SThunkRef(record)](PHLWINDOW w, Desktop::eFocusReason) { fireSchemeWin(ref.obj, w); })); break;
             case 9: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.openEarly.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
             case 10: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.kill.listen([ref = SThunkRef(record)](PHLWINDOW w) { fireSchemeWin(ref.obj, w); })); break;
@@ -178,9 +261,9 @@ namespace Config::Scheme {
 
         SThunkRef ref(record);
         g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.minimize.listen([ref](PHLWINDOW w, bool state) {
-            if (!g_up || !w)
+            if (!g_up)
                 return;
-            const auto winId = hl::windowHandle(w);
+            const auto winId = w ? hl::windowHandle(w) : SCM_BOOL_F;
             hl::call3(hl::globalRef("hl--fire-win-state-rec"), ref.obj, winId, state ? SCM_BOOL_T : SCM_BOOL_F);
         }));
         return 0;
@@ -227,7 +310,7 @@ namespace Config::Scheme {
         if (!g_up)
             return -1;
         switch (which) {
-            case 0: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.workspace.created.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { auto w = ws.lock(); if (w) fireSchemeWs(ref.obj, w); })); break;
+            case 0: g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.workspace.created.listen([ref = SThunkRef(record)](PHLWORKSPACEREF ws) { fireSchemeWs(ref.obj, ws.lock()); })); break;
             // removed fires from ~CHLWorkspace: the payload cannot be locked
             // (hyprutils marks the impl "destroying"), but the data pointer
             // stays valid until the destructor returns, so the name COULD be
@@ -267,13 +350,16 @@ namespace Config::Scheme {
         return 0;
     }
 
-    // window.destroy: zero-argument callback (upstream delivers nil — the bus
-    // event is Event<PHLWINDOWREF>; identity belongs to the window-close notification)
+    // window.destroy: ONE argument, the window as a born-dead handle — see
+    // fireSchemeWinRef. (It used to deliver none, on the reasoning that "the bus
+    // event is a weak ref; identity belongs to the window-close notification".
+    // The reasoning was wrong on the facts: Lua dispatches one argument here,
+    // so the two APIs did not agree on the shape of the same event.)
     static int hlSchemeWindowDestroyListen(SCM record) {
         if (!g_up)
             return -1;
 
-        g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.destroy.listen([ref = SThunkRef(record)](PHLWINDOWREF) { fireScheme(ref.obj); }));
+        g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.window.destroy.listen([ref = SThunkRef(record)](PHLWINDOWREF w) { fireSchemeWinRef(ref.obj, w); }));
         return 0;
     }
 

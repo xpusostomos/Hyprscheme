@@ -143,14 +143,14 @@ assert-rt "SHIFT folds into a character" "$RT_CHECK
 # the message is captured and matched in SHELL, the way t-api.sh does it —
 # call-with-string-output-port returns the accumulated STRING, not the thunk's
 # value, so it cannot be asserted as #t
-seq_msg=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-bind-add! (hl-kbd "C-x C-f") (lambda () #f)))))' 2>&1)
+seq_msg=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-bind-add! (hl-make-bind (hl-kbd "C-x C-f") (lambda () #f))))))' 2>&1)
 [[ "$seq_msg" == *"global-set-key!"* ]] || { echo "FAIL: a sequence fed to hl-bind-add! did not name global-set-key! => [$seq_msg]"; FAILED=1; }
 # ...and the function it names EXISTS: the whole point of naming one
 [[ "$($SCHEME '(procedure? global-set-key!)')" == "#t" ]] || { echo "FAIL: hl-bind-add!'s message names global-set-key!, which is not a procedure"; FAILED=1; }
 
 # a single chord from hl-kbd still binds fine
 assert-rt "hl-bind-add! accepts a single chord" "$RT_CHECK
-(let ((b (hl-bind-add! (hl-kbd \"C-<f24>\") (lambda () #f)))) (hl-unbind! b))"
+(let ((b (hl-bind-add! (hl-make-bind (hl-kbd \"C-<f24>\") (lambda () #f))))) (hl-unbind! b))"
 
 # ---- global-set-key! ---------------------------------------------------------
 # hl-submap-activate! only succeeds if the submap EXISTS (setSubmap refuses
@@ -218,46 +218,72 @@ assert-rt "shifted emacs spellings round trip" "$RT_CHECK
 (rt-check (quote (\"M-<\" \"M->\" \"M-%\" \"C-/\" \"C-<\")))"
 
 # ---- define-key! and modal submaps ------------------------------------------
+# define-key!'s first argument is a KEYMAP OBJECT, not a submap NAME. A submap
+# is a name stamped on the binds that carry it; the keymap is what HOLDS them,
+# so it is what gets passed. A string — the old spelling — is REFUSED BY NAME,
+# like every other stale spelling in this tree: a config that was not converted
+# must fail loudly rather than bind into a map nobody holds.
+kmap_msg=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (define-key! "resize" (hl-kbd "h") (lambda () #f)))))' 2>&1)
+[[ "$kmap_msg" == *"expected a keymap"* ]] || { echo "FAIL: define-key! accepted a submap NAME => [$kmap_msg]"; FAILED=1; }
+[[ "$kmap_msg" == *"hl-make-keymap"* ]] || { echo "FAIL: the refusal does not say how to make a keymap => [$kmap_msg]"; FAILED=1; }
+
 # a sequence defined IN a submap names its prefixes by EXPANDING that submap's
 # name, so a modal submap's "C-a" cannot collide with the top level's
 assert-rt "define-key! expands the base submap's name" "$RT_CHECK
 (begin
-  (define-key! \"resize\" (hl-kbd \"C-a C-b\") (lambda () #f))
+  (define-key! (hl-make-keymap #:submap \"resize\") (hl-kbd \"C-a C-b\") (lambda () #f))
   (and (hl-submap-activate! \"resize C-a\") (equal? (hl-current-submap) \"resize C-a\")
        (begin (hl-submap-exit!) #t)))"
 
-# define-key! with an empty base IS global-set-key!
+# define-key! on global-map IS global-set-key! — global-map is the default map,
+# so both the exit and the target are ""
 assert-rt "define-key! in the default map is global-set-key!" "$RT_CHECK
 (begin
-  (define-key! \"\" (hl-kbd \"C-t C-t\") (lambda () #f))
+  (define-key! global-map (hl-kbd \"C-t C-t\") (lambda () #f))
   (and (hl-submap-activate! \"C-t\") (equal? (hl-current-submap) \"C-t\")
        (begin (hl-submap-exit!) #t)))"
 
 # a modal submap is escapable: define-key! gives the BASE an s-G out
 assert-rt "a modal submap gets its own s-G" "$RT_CHECK
 (begin
-  (define-key! \"modal\" (hl-kbd \"x\") (lambda () #f))
+  (define-key! (hl-make-keymap #:submap \"modal\") (hl-kbd \"x\") (lambda () #f))
   (hl-submap-activate! \"modal\")
   (equal? (hl-current-submap) \"modal\"))"
 
-# hl-submap! returns an ACTION, so it can be handed to a bind
-assert-rt "hl-submap! is an action" "$RT_CHECK
+# ENTERING a submap from a bind is a plain lambda — the thunk a bind takes, and
+# (hl-submap-activate! NAME) inside it. Written out rather than having a curried
+# helper for it: the helper was one line and prevented nothing.
+#
+# Note the asymmetry, which is why there is no helper: hl-submap-exit! takes NO
+# argument, so IT can be handed to a bind directly and really is the action,
+# while entering needs an argument and so would need currying.
+assert-rt "a bind can enter a submap" "$RT_CHECK
 (begin
-  (define-key! \"enter-me\" (hl-kbd \"y\") (lambda () #f))
-  (let ((b (hl-bind-add! (hl-kbd \"C-<f21>\") (hl-submap! \"enter-me\"))))
-    (and (hl-bind? b) (hl-unbind! b))))"
+  (define-key! (hl-make-keymap #:submap \"enter-me\") (hl-kbd \"y\") (lambda () #f))
+  (let ((b (hl-bind-add! (hl-make-bind (hl-kbd \"C-<f21>\")
+                                       (lambda () (hl-submap-activate! \"enter-me\"))))))
+    (hl--bind-fire-rec b)
+    (let ((in? (equal? (hl-current-submap) \"enter-me\")))
+      (hl-submap-exit!)
+      (and (hl-bind? b) (hl-unbind! b) in?))))"
+
+# ...and the exit needs no lambda at all: it takes no argument, so the
+# procedure itself is the thunk
+assert-rt "hl-submap-exit! is usable directly as a bind action" "$RT_CHECK
+(let ((b (hl-bind-add! (hl-make-bind (hl-kbd \"C-<f23>\") hl-submap-exit!))))
+  (and (hl-bind? b) (hl-unbind! b)))"
 
 # THE point of #:top-level, tested by firing the action and reading the submap
 # back: #f returns to the base (you stay in the mode), #t ejects to the default
 # map. Firing the returned handle runs the real action, exit included.
 assert-rt "define-key! #:top-level #f returns to the base submap" "$RT_CHECK
-(let ((b (define-key! \"stayer\" (hl-kbd \"a b\") (lambda () #f) #:top-level #f)))
+(let ((b (define-key! (hl-make-keymap #:submap \"stayer\") (hl-kbd \"a b\") (lambda () #f) #:top-level #f)))
   (hl-submap-activate! \"stayer a\")
   (hl--bind-fire-rec b)
   (equal? (hl-current-submap) \"stayer\"))"
 
 assert-rt "define-key! #:top-level #t ejects to the default map" "$RT_CHECK
-(let ((b (define-key! \"ejector\" (hl-kbd \"a b\") (lambda () #f))))
+(let ((b (define-key! (hl-make-keymap #:submap \"ejector\") (hl-kbd \"a b\") (lambda () #f))))
   (hl-submap-activate! \"ejector a\")
   (hl--bind-fire-rec b)
   (equal? (hl-current-submap) \"\"))"
@@ -270,30 +296,34 @@ assert-rt "define-key! #:top-level #t ejects to the default map" "$RT_CHECK
 # exit, exactly as its s-G does. A TOP-LEVEL map (#:top-level #f) is a mode you
 # entered deliberately, so it gets the s-G but NOT the catchall.
 #
-# Nothing exposes "the binds in a submap", so the catchall is observed through
-# hl-unbind-key!, which removes every bind on a key and reports whether it found
-# one. Each case drains first, so it starts from a known-empty state.
+# Nothing exposed "the binds in a submap" before the keymap existed. Now the map
+# the sequence was built in IS the thing in hand, so each case asserts twice:
+# hl-keymap-marked? says the map gave itself that exit, and hl-unbind-key! says
+# the compositor really holds it — which is the half that makes it fire.
 assert-rt "a key-sequence map gets a catchall" "$RT_CHECK
-(begin
+(let ((km (hl-make-keymap #:submap \"seq-catch\")))
   (hl-unbind-key! (hl-kbd \"catchall\"))          ; drain
-  (define-key! \"seq-catch\" (hl-kbd \"a\") (lambda () #f))
-  (hl-unbind-key! (hl-kbd \"catchall\")))"
+  (define-key! km (hl-kbd \"a\") (lambda () #f))
+  (and (hl-keymap-marked? km (quote catchall))    ; the map knows it gave one
+       (hl-unbind-key! (hl-kbd \"catchall\"))))"
 
 assert-rt "a top-level map gets an s-G but no catchall" "$RT_CHECK
-(begin
+(let ((km (hl-make-keymap #:submap \"modal-nocatch\")))
   (hl-unbind-key! (hl-kbd \"catchall\"))          ; drain
-  (define-key! \"modal-nocatch\" (hl-kbd \"a\") (lambda () #f) #:top-level #f)
-  ;; its s-G is there...
-  (and (hl-unbind-key! (hl-kbd \"s-G\"))
-       ;; ...and no catchall was added
+  (define-key! km (hl-kbd \"a\") (lambda () #f) #:top-level #f)
+  (and (hl-keymap-marked? km (quote exit))        ; it got its s-G...
+       (not (hl-keymap-marked? km (quote catchall)))   ; ...and no catchall
+       (hl-unbind-key! (hl-kbd \"s-G\"))          ; the s-G is really registered
        (not (hl-unbind-key! (hl-kbd \"catchall\")))))"
 
 assert-rt "the default map gets neither" "$RT_CHECK
 (begin
   (hl-unbind-key! (hl-kbd \"catchall\"))          ; drain both
   (hl-unbind-key! (hl-kbd \"s-G\"))
-  (define-key! \"\" (hl-kbd \"C-<f19>\") (lambda () #f))
-  (and (not (hl-unbind-key! (hl-kbd \"catchall\")))
+  (define-key! global-map (hl-kbd \"C-<f19>\") (lambda () #f))
+  (and (not (hl-keymap-marked? global-map (quote exit)))
+       (not (hl-keymap-marked? global-map (quote catchall)))
+       (not (hl-unbind-key! (hl-kbd \"catchall\")))
        (not (hl-unbind-key! (hl-kbd \"s-G\")))))"
 
 # WHERE the catchall abandons to is not observable here — reaching it needs the

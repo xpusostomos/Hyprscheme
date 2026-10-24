@@ -69,9 +69,15 @@ namespace Config::Scheme {
     // (gaps, monitor fields, workspace layout opts) that parse a string value
     lua_State* configScratch();
 
-    // fire a handler (Event.cpp); errors are contained inside the Scheme side
+    // fire a handler (Event.cpp); errors are contained inside the Scheme side.
+    // fireSchemeStrOrNull takes a NULL for "there was no object", and delivers
+    // #f: an empty string is a real value and the two must not be confused.
+    // Layered notifications are the user of it — a null layer surface has no
+    // namespace, and the event is still delivered rather than dropped (see THE
+    // PAYLOAD RULE in Event.cpp).
     void fireScheme(SCM record);
     void fireSchemeStr(SCM record, const std::string& arg);
+    void fireSchemeStrOrNull(SCM record, const char* s);
 
     // the host's side of the event plumbing (Event.cpp)
     void registerStartDispatch(); // the once-only "start" dispatch

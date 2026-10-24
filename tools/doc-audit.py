@@ -73,6 +73,9 @@ ALLOWED = {
         'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
     'hl-window-group-move-out!':
         'a RETIRED name, named deliberately in the rename table (dispatchers.md)',
+    'hl-submap!':
+        'a RETIRED name, named deliberately in emacs-keymaps.md so a config '
+        'still calling it can find out it is gone and what to write instead',
 }
 
 

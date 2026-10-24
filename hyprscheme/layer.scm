@@ -94,7 +94,8 @@
 
 (define (hl-layer-open-notification-add! handler)
   "Register a handler that fires when a layer surface opens. The handler
-   receives the layer's namespace string."
+   receives the layer's namespace string, or #f when the surface could
+   not be read (the compositor handed us no object)."
   (let ((rec (make-hl-event 'layer-open handler)))
     (if (= 0 (hl--c-layer-listen rec 0))
         rec
@@ -102,7 +103,8 @@
 
 (define (hl-layer-close-notification-add! handler)
   "Register a handler that fires when a layer surface closes. The
-   handler receives the layer's namespace string."
+   handler receives the layer's namespace string, or #f when the surface
+   could not be read (it is being torn down as this fires)."
   (let ((rec (make-hl-event 'layer-close handler)))
     (if (= 0 (hl--c-layer-listen rec 1))
         rec

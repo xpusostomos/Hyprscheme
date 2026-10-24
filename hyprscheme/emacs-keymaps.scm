@@ -12,16 +12,21 @@
 ;; Everything emacs-shaped lives here: the notation (hl-kbd/hl-key and the
 ;; hl--emacs-* tables), the canonicalisation (hl-key-regularise), the
 ;; logical/physical conversions, key-description, and the keymap layer built on
-;; them (define-key!, global-set-key!, hl-submap!).
+;; them (define-key!, global-set-key!, global-map, hl-keymap-attach-to-tag!).
 
 (define-module (hyprscheme emacs-keymaps)
   #:export (hl-key-regularise hl-key-logical-to-physical
             hl-key-physical-to-logical hl-key-description
-            hl-kbd hl-key hl-submap! define-key! global-set-key!))
+            hl-kbd hl-key define-key! global-set-key! global-map
+            hl-keymap-attach-to-tag! hl-keymap-attach-to-window-condition!
+            hl-keymaps-recheck!))
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
 (use-modules (hyprscheme bind))
+;; the third family this composer reaches: hl-keymap-attach-to-tag! reads the
+;; focused window's tags, and both of those are (hyprscheme window)'s.
+(use-modules (hyprscheme window))
 
 ;; the same standard library the parser had in (hyprscheme core): string-index
 ;; comes from (guile), remove/every from srfi-1, string-join from srfi-13
@@ -258,27 +263,69 @@ it — unlike hl-kbd, a shifted character is not expanded."
 ;; "global keymap", the default map is just the binds tagged "". So a submap is
 ;; a MODE: while one is active every bind outside it is dead.
 ;;
-;; Three tables, empty at the start of every generation — `reset` (below) is
-;; what empties them, this file being loaded once and never re-read. Hyprland's
-;; own hasSubmap() is
-;; not reachable from a plugin, and we do not need it: we are the only thing
-;; creating these submaps, so remembering them here is sufficient and cheaper.
-(define hl--submaps-made (make-hash-table))   ; prefix submaps already built
-(define hl--exit-bound (make-hash-table))     ; submaps already given our s-G
-(define hl--catchall-bound (make-hash-table)) ; submaps already given our catchall
+;; THE STATE BELONGS TO THE KEYMAP, not to this module, and that is the whole
+;; point of the keymap object. Three module-level hashtables used to live here —
+;; which prefix submaps had been built, which had been given our s-G, which had
+;; been given a catchall. A keymap holds that itself now: `children` is the
+;; sub-map it built for a prefix, found again BY NAME — the assq that makes a
+;; second binding on the same prefix reach the same map — and `marks` records
+;; the "already given an exit / a catchall" facts. Those two are MARKS rather
+;; than something read off the binds, and the difference is real: a config may
+;; bind s-G itself, so "is there a bind on s-G here" would answer yes for a map
+;; we never gave an exit to.
+;;
+;; global-map is the one thing here that genuinely IS module state, and `reset`
+;; rebuilds it — see below.
+;;
+;; IT IS ALSO BUILT AT LOAD TIME, not only by `reset`, and that is not
+;; belt-and-braces: `reset` runs from init.scm's sweep, which a tool that loads
+;; the modules directly (tools/doc-exercise.scm, tools/load-check.scm) never
+;; runs. A `#f` here would make every global-set-key! in the wiki fail under
+;; those while working perfectly in a config. The call is to hl-make-keymap,
+;; which is plain Scheme — make-struct and nothing else — so it is safe at a
+;; module's top level (the rule against top-level calls is about GSUBRS, which
+;; are unbound until the host has registered them).
+(define global-map (hl-make-keymap #:submap ""))
 
-;; Called ONCE PER GENERATION by init.scm (see the note there). Those three
-;; tables are module state and this file is loaded ONCE, so without emptying
-;; them a submap built before a reload would still count as built after it and
-;; define-key! would decline to rebuild the binds it holds. Emptied rather than
-;; replaced, so anything holding a reference to one sees the same table.
+;; The attachment registry and its listener handle — see
+;; hl-keymap-attach-to-window-condition! at the end of this file. Declared HERE,
+;; above `reset`, so that the `set!`s below are not forward references; `reset`
+;; is the only other writer.
+(define hl--window-conditions '())   ; ((keymap . condition) ...)
+(define hl--condition-listener #f)   ; the window.active subscription, or #f
+
+;; Called ONCE PER GENERATION by init.scm (see the note there). This file is
+;; loaded ONCE per process — use-modules loads a module one time — so the
+;; global-map built for the first config would still be here, still holding its
+;; binds, when the second config is read. Without this, every global-set-key! in
+;; a reloaded config would add a fresh bind on top of a stale one whose thunk
+;; belongs to a generation that has been thrown away.
 ;;
 ;; UNEXPORTED: not API, and init.scm finds it with `module-local-variable`,
 ;; which sees own bindings whether or not they are exported.
 (define (reset)
-  (hash-clear! hl--submaps-made)
-  (hash-clear! hl--exit-bound)
-  (hash-clear! hl--catchall-bound))
+  (set! global-map (hl-make-keymap #:submap ""))
+  ;; The tag registry is per-generation for the same reason global-map is: the
+  ;; keymaps in it belong to the config that built them and their binds are gone
+  ;; once the host drops the generation's handlers. Keeping it would mean
+  ;; arming keymaps from a config that no longer exists.
+  (set! hl--window-conditions '())
+  ;; And the LISTENER handle is deliberately forgotten rather than kept. On
+  ;; reload the host tears every event handler down and the new generation
+  ;; re-registers; a guard that still held a handle would believe the listener
+  ;; was installed, never install another one, and leave the registry frozen at
+  ;; whatever the first focus change made it. The opposite answer to the GC
+  ;; hook, which is installed once for the process and must NOT be reinstalled.
+  (set! hl--condition-listener #f))
+
+(define (hl--keymap! who km)
+  "Refuse anything that is not a keymap, naming WHO and the value it was handed.
+This argument used to be a submap NAME — a bare string — so a stale config gets
+a sentence here rather than a confusing failure several calls later."
+  (unless (hl-keymap? km)
+    (error (string-append who ": expected a keymap, as hl-make-keymap or define-keymap builds one, but got:")
+           km))
+  km)
 
 (define (hl--seq-chords sequence) "Normalise SEQUENCE to a list of chords:
 hl-kbd returns a flat token list for a one-key spec and a list of chords for
@@ -287,14 +334,19 @@ a multi-key one, and both are accepted here."
       sequence
       (list sequence)))
 
-(define (hl-submap! name) "Return an ACTION that switches to submap NAME —
-a thunk, so it can be handed to define-key!, hl-bind-add! or a timer:
-
-  (global-set-key! (hl-kbd \"s-r\") (hl-submap! \"resize\"))
-
-The submap must have at least one bind in it to exist, so define something in
-it with define-key! first. Leave it again with s-G."
-  (lambda () (hl-submap-activate! name)))
+;; There is deliberately NO `hl-submap!` here any more — the function that
+;; returned a thunk switching to a named submap. It was one line,
+;; (lambda () (hl-submap-activate! name)), and it prevented nothing: any
+;; config can write that lambda, and it is trivially correct, so the name
+;; bought 20 characters and cost a public name whose `!` claimed it ACTED when
+;; it returned a function. Entering a mode is written out now:
+;;
+;;   (global-set-key! (hl-kbd "s-r") (lambda () (hl-submap-activate! "resize")))
+;;
+;; Note the asymmetry that made the name read plausibly and mislead anyway:
+;; hl-submap-exit! takes NO argument, so it can be handed to a bind directly and
+;; really is the action — while ENTERING needs an argument, and so needed
+;; currying. One of the pair acted and the other returned, under the same `!`.
 
 (define (hl--expand submap chord) "The name of the submap one key DEEPER: the
 current submap's name extended by this key's canonical logical description, so
@@ -306,9 +358,12 @@ sequence is named \"C-a\" rather than \" C-a\"."
   (let ((desc (hl-key-description chord)))
     (if (string=? submap "") desc (string-append submap " " desc))))
 
-(define (hl--ensure-exit! submap target catchall?) "Give SUBMAP its ways out,
+(define (hl--ensure-exit! km target catchall?) "Give keymap KM its ways out,
 each once: an s-G that switches to TARGET, and — when CATCHALL? — a catchall
-that switches there too, on any key SUBMAP does not bind.
+that switches there too, on any key KM does not bind.
+
+TARGET is a submap NAME, not a keymap: the compositor switches submaps by name
+(hl-submap-activate!), and the names are what the chain is built from anyway.
 
 The catchall is what makes a prefix behave like a prefix. A submap is a MODE:
 Hyprland keeps one current submap and every bind outside it is dead, so a key
@@ -319,68 +374,80 @@ matched, and it consumes the key, so a bound key is unaffected.
 The DEFAULT map is skipped: it is top level, so there is nothing to abandon to,
 and binding s-G there would hijack the key globally rather than cancel out of a
 mode."
-  (unless (string=? submap "")
-    ;; tracked separately: a TOP-LEVEL map still wants its s-G (to leave the
-    ;; mode for good) but must not get a catchall (a key it does not bind must
-    ;; not eject you from a mode you entered deliberately)
-    (let ((want-g (not (hash-ref hl--exit-bound submap)))
-          (want-c (and catchall? (not (hash-ref hl--catchall-bound submap)))))
-      (when (or want-g want-c)
-        (when want-g (hash-set! hl--exit-bound submap #t))
-        (when want-c (hash-set! hl--catchall-bound submap #t))
-        (when want-g
-          (hl-bind-add! (hl-kbd "s-G") (lambda () (hl-submap-activate! target))
-                        #:submap submap))
-        (when want-c
-          (hl-bind-add! (hl-kbd "catchall")
-                        (lambda () (hl-submap-activate! target))
-                        #:submap submap
-                        #:description "unmatched key: abandon the sequence"))))))
+  (unless (string=? (hl-keymap-submap km) "")
+    ;; the two marks are tracked SEPARATELY, and on the KEYMAP rather than in a
+    ;; module table: a TOP-LEVEL map still wants its s-G (to leave the mode for
+    ;; good) but must not get a catchall (a key it does not bind must not eject
+    ;; you from a mode you entered deliberately).
+    ;;
+    ;; A MARK, not a look for an s-G bind: a config may bind s-G itself, and
+    ;; then we would think the exit had been given and leave the map without one.
+    (let ((want-g (not (hl-keymap-marked? km 'exit)))
+          (want-c (and catchall? (not (hl-keymap-marked? km 'catchall)))))
+      (when want-g
+        (hl-keymap-mark! km 'exit)
+        (hl-keymap-add! km (hl-make-bind (hl-kbd "s-G")
+                                         (lambda () (hl-submap-activate! target)))))
+      (when want-c
+        (hl-keymap-mark! km 'catchall)
+        (hl-keymap-add! km (hl-make-bind (hl-kbd "catchall")
+                                         (lambda () (hl-submap-activate! target))
+                                         #:description "unmatched key: abandon the sequence"))))))
 
-(define* (define-key! submap sequence thunk #:key (top-level #t)) "Bind a key
-SEQUENCE to THUNK inside SUBMAP — emacs' define-key, scoped to a map.
+(define* (define-key! keymap sequence thunk #:key (top-level #t)) "Bind a key
+SEQUENCE to THUNK inside KEYMAP — emacs' define-key, scoped to a map.
 
-  (define-key! \"resize\" (hl-kbd \"h\") (lambda () (hl-window-size-set! ...)))
+  (define-key! resize-map (hl-kbd \"h\") (lambda () (hl-window-size-set! ...)))
 
-The sequence is walked from SUBMAP, one submap per prefix, each named by
+KEYMAP is a keymap OBJECT — (hl-make-keymap ...), define-keymap, or global-map —
+NOT a submap name. A submap is a name stamped on the binds that carry it; the
+keymap is what holds them, so it is what you pass. The name it places its binds
+in comes from hl-keymap-submap.
+
+The sequence is walked from KEYMAP, one submap per prefix, each named by
 EXPANDING the previous name with the key that reaches it (hl--expand), so
-\"C-a C-b\" inside \"resize\" builds \"resize C-a\" and hangs C-b off it. The
-prefix key is bound in the enclosing submap to enter the next; the final key is
-bound in the last prefix's submap to THUNK. Two sequences sharing a prefix
-share the submap, because the name is derived from it.
+\"C-a C-b\" inside a map on \"resize\" builds \"resize C-a\" and hangs C-b off it.
+The prefix key is bound in the enclosing map to enter the next; the final key is
+bound in the last prefix's map to THUNK. Two sequences sharing a prefix share
+the submap AND the keymap, because the child is looked up by name in the map
+that built it rather than named again from scratch.
 
 #:top-level says where the chain LEAVES to — both when s-G cancels it and when
 THUNK completes:
 
   #t (default)  to the default map, \"\". You are ejected when it ends.
-  #f            back to SUBMAP. You stay in the mode.
+  #f            back to the keymap's submap. You stay in the mode.
 
-So (define-key! \"\" seq thunk) is exactly (global-set-key! seq thunk): with an
-empty base both targets are \"\". A modal submap is one whose sequences are
-defined #:top-level #f; it also gets its own s-G, to leave it for good.
+So (define-key! global-map seq thunk) is exactly (global-set-key! seq thunk):
+global-map is the default map, so both targets are \"\". A modal submap is one
+whose sequences are defined #:top-level #f; it also gets its own s-G, to leave
+it for good.
 
 Every map the chain builds is a KEY-SEQUENCE map, and abandons to EXIT on a key
 it does not bind — as if you had pressed s-G — so a mistyped prefix does not
-strand you in it. The one exception is a TOP-LEVEL map, which is SUBMAP itself
+strand you in it. The one exception is a TOP-LEVEL map, which is KEYMAP itself
 when #:top-level is #f: you entered that one deliberately, as a mode, so an
 unrecognised key must not eject you from it. Its own s-G still leaves.
 
 Returns the final bind's handle, the one carrying THUNK, so a binding can be
 removed again with hl-unbind!."
-  (let ((exit (if top-level "" submap)))
-    ;; SUBMAP always gets its s-G, so a mode can be left for good. It gets the
-    ;; catchall only when it is a key-SEQUENCE map: SUBMAP is a top-level map
+  (hl--keymap! "define-key!" keymap)
+  (let* ((base (hl-keymap-submap keymap))
+         (exit (if top-level "" base)))
+    ;; KEYMAP always gets its s-G, so a mode can be left for good. It gets the
+    ;; catchall only when it is a key-SEQUENCE map: KEYMAP is a top-level map
     ;; exactly when it is its own exit, and you entered that one deliberately,
     ;; so a key it does not bind must not eject you from it.
-    (hl--ensure-exit! submap "" (not (string=? submap exit)))
-    (let loop ((remaining (hl--seq-chords sequence)) (current submap))
+    (hl--ensure-exit! keymap "" (not (string=? base exit)))
+    (let loop ((remaining (hl--seq-chords sequence)) (current keymap))
       (if (null? remaining)
           #f
         (let ((chord (car remaining)))
           (if (null? (cdr remaining))
-              ;; the action: run it, then leave the chain. #:submap scopes the
-              ;; bind; the EXIT is done here in Scheme rather than declared as
-              ;; #:submap-reset, and that is a deliberate choice:
+              ;; the action: run it, then leave the chain. The bind's placement
+              ;; comes from the keymap it is added to; the EXIT is done here in
+              ;; Scheme rather than declared as #:submap-reset, and that is a
+              ;; deliberate choice:
               ;;
               ;;   - the compositor applies #:submap-reset inside invokeBind,
               ;;     AFTER the thunk — correct in a live session, but invisible
@@ -397,18 +464,23 @@ removed again with hl-unbind!."
               ;;
               ;; #:submap-reset stays a public option for configs that want the
               ;; declarative form (see hl-bind-add!, and submaps.md).
-              (hl-bind-add! chord
-                            (lambda ()
-                              (dynamic-wind (lambda () #t)
-                                            thunk
-                                            (lambda () (hl-submap-activate! exit))))
-                            #:submap current)
-              (let ((next (hl--expand current chord)))
-                (unless (hash-ref hl--submaps-made next)
-                  (hash-set! hl--submaps-made next #t)
-                  ;; the prefix key, in the enclosing submap, enters the next
-                  (hl-bind-add! chord (lambda () (hl-submap-activate! next))
-                                #:submap current)
+              (hl-keymap-add! current
+                              (hl-make-bind chord
+                                            (lambda ()
+                                              (dynamic-wind (lambda () #t)
+                                                            thunk
+                                                            (lambda () (hl-submap-activate! exit))))))
+              (let* ((next-name (hl--expand (hl-keymap-submap current) chord))
+                     (next (hl-keymap-child current next-name)))
+                (unless next
+                  ;; FIRST TIME this prefix is reached, so build its map, bind
+                  ;; the key that enters it, and give it its own ways out. A
+                  ;; second sequence through the same prefix finds `next` above
+                  ;; and only hangs its own key off it.
+                  (set! next (hl-make-keymap #:submap next-name))
+                  (hl--keymap-child-set! current next-name next)
+                  (hl-keymap-add! current
+                                  (hl-make-bind chord (lambda () (hl-submap-activate! next-name))))
                   (hl--ensure-exit! next exit #t))
                 (loop (cdr remaining) next))))))))   ; the record propagates up
 
@@ -424,5 +496,168 @@ binds the same sequence inside a MODAL submap instead.
 
 A key you did not bind abandons the sequence and returns you to the default
 map, the same as s-G — so a mistyped prefix costs you the keypress, not the
-session."
-  (define-key! "" sequence thunk))
+session.
+
+This binds into global-map, the keymap that IS the default map \"\". It is a
+keymap like any other, so it can be read and driven with hl-keymap-binds,
+hl-keymap-child and the rest — and it is REBUILT EMPTY when the config reloads,
+so a global-set-key! from a previous generation cannot linger."
+  (define-key! global-map sequence thunk))
+
+;; ---- attaching keymaps to a window condition ---------------------------------
+;;
+;; (hl-keymap-attach-to-tag! browser-map "browser") arms browser-map while the
+;; focused window carries the tag "browser" and disarms it while it does not. The
+;; mode follows the application instead of being toggled by hand, which is the
+;; point: the terminal's keys are live in a terminal and dead in a browser, and
+;; nothing has to be pressed to make that true.
+;;
+;; THE GENERAL FORM IS A PREDICATE, not a tag:
+;; (hl-keymap-attach-to-window-condition! KEYMAP (lambda (w) ...)), and the tag
+;; call is written in terms of it. The distinction is not decoration. The
+;; condition a real config wants is usually NOT a membership test — "armed unless
+;; this app speaks emacs" is a NEGATION, "armed in browsers or terminals" is a
+;; DISJUNCTION, "armed unless emacs OR unless this is on" mixes the two, and
+;; "armed while my mode flag is on" is not about the window at all. A tag is a
+;; string a window either has or has not, so none of those can be a tag; a lambda
+;; takes the window and can say anything Scheme can say.
+;;
+;; THE REGISTRY IS OURS, AND THE LISTENER ONLY EVER TOUCHES IT. This is the
+;; property that makes it safe to disarm everything on a mismatch: the only
+;; keymaps that go down are ones an attach put under this policy. A keymap the
+;; config arms itself — including global-map — is not in the registry and is
+;; never reached, so attaching one keymap cannot silently disarm another.
+;;
+;; THE EVENT IS window.active, WHOSE PAYLOAD IS #f WHEN FOCUS IS CLEARED — see
+;; events.md for why that event is delivered rather than dropped. #f is passed to
+;; the conditions like any other window; that is the reason the payload rule
+;; matters, because with a dropped clear the last window's mode would stay armed
+;; with nothing focused to explain it.
+;;
+;; THE TAGS IT COMPARES ARE hl-window-tags', i.e. the STRIPPED spelling, and
+;; that is load-bearing rather than cosmetic. A tag applied by a window rule —
+;; which is how a config normally tags an app's windows — is stored with a
+;; trailing "*", so the raw list holds "browser*" while the config wrote
+;; "browser". Comparing raw would make every tag condition silently never match,
+;; and the failure is invisible: no error, the keymap just never arms.
+
+(define (hl--condition-apply window) "Arm exactly the attached keymaps whose
+condition is true of WINDOW and disarm the rest of them. WINDOW may be #f —
+focus cleared — and is handed to the conditions as it is, so each of them
+answers for that case itself.
+
+Every attached keymap is visited on every evaluation and simply told what it
+should be now; that is what hl-keymap-enabled? is for, and it is why this needs
+no memory of what it armed last time. The alternative — diffing against the
+previous window — would be a second piece of state that can be wrong about the
+first."
+  (for-each
+    (lambda (entry)
+      (if ((cdr entry) window)
+          (hl-keymap-enable! (car entry))
+          (hl-keymap-disable! (car entry))))
+    hl--window-conditions)
+  #t)
+
+(define (hl-keymaps-recheck!) "Re-evaluate every attached keymap's condition
+against the window focused RIGHT NOW, and arm or disarm it accordingly. Returns
+#t.
+
+This is for conditions that read something BESIDES the window — a mode flag, a
+variable of your own. The registry is re-evaluated whenever the focused window
+changes, and that is all a condition about the window needs; a condition that
+also reads a global would otherwise stay stale until the next focus change, and
+the keymap would be armed for the wrong thing in between. Call this from
+whatever changes that global:
+
+  (define (set-ekeys-mode on)
+    (set! ekeys-mode on)
+    (hl-keymaps-recheck!))
+
+Cheap when nothing changed: a keymap that is already right is simply told again."
+  (hl--condition-apply (hl-active-window)))
+
+(define (hl-keymap-attach-to-window-condition! keymap condition) "Arm KEYMAP
+exactly while CONDITION is true of the focused window, and disarm it while it is
+not. Returns KEYMAP.
+
+  (hl-keymap-attach-to-window-condition! emacs-map
+    (lambda (w) (not (and w (member \"terminal\" (hl-window-tags w))))))
+
+CONDITION is a procedure of ONE argument — the focused window, which is a window
+handle or #f when NOTHING is focused. It must answer for #f like any other
+value, and the usual answer is to disarm: no window means no application to have
+an opinion about.
+
+This is the general form, and a tag is just the common case of it:
+hl-keymap-attach-to-tag! is this function with a condition written for you. Reach
+for this one when the condition is NOT a membership test — a NEGATION, a
+disjunction, a set of tags that must all hold, or a mode flag of your own — since
+none of those is a tag a window can carry.
+
+Attaching again REPLACES the condition rather than adding a second one, so the
+last call is the keymap's whole condition. A config that means \"this tag OR that
+tag\" writes the or into its lambda instead of attaching twice, which keeps the
+two readings from being mistaken for each other.
+
+The listener is installed on the FIRST attach and not before, so a config that
+never attaches keymaps pays nothing for it, and the condition is evaluated once
+here as well, so a config that attaches during load is right about the window
+already focused rather than waiting for a focus change to notice.
+
+Returns KEYMAP, so the call can sit in a definition that also reads well."
+  (hl--keymap! "hl-keymap-attach-to-window-condition!" keymap)
+  (unless (procedure? condition)
+    (error "hl-keymap-attach-to-window-condition!: condition must be a procedure of one argument (a window, or #f when nothing is focused), got:"
+           condition))
+  (set! hl--window-conditions
+        (cons (cons keymap condition)
+              ;; the keymap's PREVIOUS condition goes, so a re-attach replaces
+              (filter (lambda (e) (not (eq? (car e) keymap))) hl--window-conditions)))
+  (unless hl--condition-listener
+    (set! hl--condition-listener (hl-window-active-notification-add! hl--condition-apply)))
+  (hl--condition-apply (hl-active-window))
+  keymap)
+
+(define (hl--tag-name tag) "TAG as the string a window's tags are compared
+against. A symbol is the natural way to write a tag at a call site —
+(hl-keymap-attach-to-tag! m 'browser) — and hl--str is the tree's one coercion
+for a name, the same one the workspace and monitor resolvers use."
+  (let ((s (hl--str tag)))
+    (unless (and (string? s) (> (string-length s) 0))
+      (error "hl-keymap-attach-to-tag!: tag must be a non-empty string or symbol, got:" tag))
+    s))
+
+(define (hl-keymap-attach-to-tag! keymap tag) "Arm KEYMAP exactly while the
+focused window carries TAG, and disarm it while it does not.
+
+  (define-keymap browser-map \"browser\" ...)
+  (hl-keymap-attach-to-tag! browser-map \"browser\")
+
+This is hl-keymap-attach-to-window-condition! with the condition written for
+you — the keymap is armed while the window carries the tag — so nothing here is
+a separate mechanism, and a config that outgrows the tag form can move to the
+general one without changing anything else.
+
+TAG is the tag as you WROTE it — the name in a window rule's #:tag, or the
+string hl-window-tag-add! was given — a string, or a symbol for convenience. It
+is matched against hl-window-tags, so it does not matter whether the tag
+reached the window from a rule or by hand: the trailing \"*\" the compositor
+puts on a rule-applied tag is not part of the name here.
+
+A window carrying the tag is the whole condition, so a window tagged \"browser\"
+arms a map attached to \"browser\" and leaves one attached to \"work\" alone. A
+keymap that should be armed for EITHER tag is a lambda in
+hl-keymap-attach-to-window-condition!, not two calls here — the second call
+replaces the first.
+
+The condition tests W before reading its tags, which is what makes focus being
+cleared disarm the keymap: with no window there is no tag, and that case is the
+one hl-window-active-notification-add! delivers as #f.
+
+Returns KEYMAP, so the call can sit in a definition that also reads well."
+  (hl--keymap! "hl-keymap-attach-to-tag!" keymap)
+  (let ((name (hl--tag-name tag)))
+    (hl-keymap-attach-to-window-condition!
+      keymap
+      (lambda (w) (and w (if (member name (hl-window-tags w)) #t #f))))))

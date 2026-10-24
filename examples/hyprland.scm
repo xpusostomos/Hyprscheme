@@ -2,23 +2,27 @@
 ;; Copy to $XDG_CONFIG_HOME/hypr/hyprland.scm (or point HYPRSCHEME_CONFIG at it).
 
 ;; ---- binds ----------------------------------------------------------------
-;; hl-bind-add! takes a TOKEN LIST (mods first, key last) and a thunk.
+;; hl-make-bind takes a TOKEN LIST (mods first, key last), a thunk and the
+;; bind's own options; hl-bind-add! registers it, taking only its PLACEMENT.
 ;; (hl-kbd ...) is emacs syntax, (hl-key ...) is hyprland syntax; both return the list.
-(hl-bind-add! (hl-kbd "s-<Return>") (lambda () (hl-exec! "foot")))
-(hl-bind-add! (hl-kbd "s-d")        (lambda () (hl-exec! "wofi --show drun")))
-(hl-bind-add! (hl-kbd "s-<Tab>")    (lambda () (hl-window-cycle!)))
+(hl-bind-add! (hl-make-bind (hl-kbd "s-<Return>") (lambda () (hl-exec! "foot"))))
+(hl-bind-add! (hl-make-bind (hl-kbd "s-d")        (lambda () (hl-exec! "wofi --show drun"))))
+(hl-bind-add! (hl-make-bind (hl-kbd "s-<Tab>")    (lambda () (hl-window-cycle!))))
 
 ;; options follow the thunk as a plist
-(hl-bind-add! (hl-kbd "s-q") (lambda () (hl-window-close!))
-         #:description "Close the focused window")
+(hl-bind-add! (hl-make-bind (hl-kbd "s-q") (lambda () (hl-window-close!))
+                            #:description "Close the focused window"))
 
-;; a submap: name it ON the bind, no modifiers needed inside
-(hl-bind-add! (hl-kbd "s-g") (lambda () (hl-submap-activate! "resize")))
-(hl-bind-add! (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 #:relative #t))
-              #:submap "resize" #:repeat #t)
-(hl-bind-add! (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 #:relative #t))
-              #:submap "resize" #:repeat #t)
-(hl-bind-add! (hl-kbd "g")     (lambda () (hl-submap-exit!))
+;; a submap: name it ON the bind, no modifiers needed inside. The submap is
+;; PLACEMENT, so it is hl-bind-add!'s argument, not hl-make-bind's.
+(hl-bind-add! (hl-make-bind (hl-kbd "s-g") (lambda () (hl-submap-activate! "resize"))))
+(hl-bind-add! (hl-make-bind (hl-kbd "left")  (lambda () (hl-window-size-set! #f -20 0 #:relative #t))
+                            #:repeat #t)
+              #:submap "resize")
+(hl-bind-add! (hl-make-bind (hl-kbd "right") (lambda () (hl-window-size-set! #f 20 0 #:relative #t))
+                            #:repeat #t)
+              #:submap "resize")
+(hl-bind-add! (hl-make-bind (hl-kbd "g")     (lambda () (hl-submap-exit!)))
               #:submap "resize")
 
 ;; ---- events ---------------------------------------------------------------

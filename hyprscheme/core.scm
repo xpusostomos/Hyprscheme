@@ -8,7 +8,7 @@
 (define-module (hyprscheme core)
   #:export (
            bind-flag-enum
-           hl--bind-flags hl--bool-act hl--chord-key hl--chord-mods
+           hl--bind-flag-mask hl--bool-act hl--chord-key hl--chord-mods
            hl--modifier-token? hl--modifier-tokens
            hl--gesture-mode
            hl--mon-arg hl--monitor-listen hl--notif-act hl--plist-fold
@@ -18,7 +18,7 @@
            hl--window-listen hl--window-rule-mk hl--workspace-listen
            hl--ws-arg hl-after hl-box hl-box-h hl-box-rtd hl-box-w
            hl-box-x hl-box-y hl-current-submap hl-group?
-           hl-layer? hl-layout-add! hl-load hl-monitor? hl-notification?
+           hl-layer? hl-layout-add! hl-load hl-make-bind hl-monitor? hl-notification?
            hl-plist-get hl-state-keys hl-state-ref hl-state-remove!
            hl-state-set! hl-window? hl-workspace? make-hl-bind
            make-hl-event make-hl-rule make-hl-timer
@@ -186,7 +186,7 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
 ;; ---- eBindFlags — the bind option bits ---------------------------------------
 ;;
 ;; THESE ARE MIRRORED FROM C++ BY HAND, and they are the one place in the
-;; Scheme tree that has to be. `hl--bind-flags` combines them into the single
+;; Scheme tree that has to be. `hl--bind-flag-mask` combines them into the single
 ;; integer the boundary takes, and a Scheme function cannot read a C++ enum — so
 ;; the values are copied, and the job is to make a MISMATCH VISIBLE.
 ;;
@@ -225,7 +225,7 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
 ;; so `(hl-bind-add! ... #:click #t #:release #t)` silently armed autorepeat.
 ;; (Measured: that call answered 516, and `(logand 516 4)` is 4.) logior is what
 ;; a set of bits wants and cannot collide however the options overlap.
-(define* (hl--bind-flags #:key (click #f) (drag #f) (devices #f)
+(define* (hl--bind-flag-mask #:key (click #f) (drag #f) (devices #f)
                          (device-inclusive 'unset) (locked #f) (release #f)
                          (repeat #f) (long-press #f) (non-consuming #f)
                          (auto-consuming #f) (transparent #f)
@@ -233,11 +233,11 @@ DEFAULT; pass the-eof-object to tell an absent key apart from a stored
                          (submap-universal #f) (allow-input-capture #f)
                          (mouse #f) (key ""))
   (when (and click drag)
-    (error "hl-bind-add!: click and drag are exclusive"))
+    (error "hl-make-bind: click and drag are exclusive"))
   (when (and (or long-press release) repeat)
-    (error "hl-bind-add!: long-press / release is incompatible with repeat"))
+    (error "hl-make-bind: long-press / release is incompatible with repeat"))
   (when (and mouse (or repeat locked release))
-    (error "hl-bind-add!: mouse is exclusive with repeat/locked/release"))
+    (error "hl-make-bind: mouse is exclusive with repeat/locked/release"))
   ;; the option keywords, one bit each
   (logior (if locked               (enum-value bind-flag-enum 'locked)               0)
           (if release              (enum-value bind-flag-enum 'release)              0)
@@ -307,7 +307,68 @@ one-shot releases its own record lock when it completes."
 
 (define (make-hl-timer interval thunk) (make-struct/no-tail hl-timer-rtd interval thunk))
 
-(define (make-hl-bind tokens thunk) (make-struct/no-tail hl-bind-rtd tokens thunk))
+(define (make-hl-bind tokens thunk flags devices description)
+  (make-struct/no-tail hl-bind-rtd tokens thunk flags devices description))
+
+(define* (hl-make-bind tokens thunk
+                        #:key (description "")
+                        (devices #f) (device-inclusive 'unset)
+                        (locked #f) (release #f) (repeat #f) (long-press #f)
+                        (non-consuming #f) (auto-consuming #f) (transparent #f)
+                        (ignore-mods #f) (dont-inhibit #f) (click #f) (drag #f)
+                        (submap-universal #f) (allow-input-capture #f) (mouse #f))
+  "Build a bind OBJECT — everything intrinsic to the binding — without
+registering it. TOKENS is the key token list (modifiers first, key last) as
+(hl-kbd \"C-M-a\") returns, and THUNK is the action.
+
+The keyword options are exactly the ones hl-bind-add! used to take:
+#:description, #:devices, #:device-inclusive and the boolean flags #:locked,
+#:release, #:repeat, #:long-press, #:non-consuming, #:auto-consuming,
+#:transparent, #:ignore-mods, #:dont-inhibit, #:click, #:drag,
+#:submap-universal, #:allow-input-capture, #:mouse.
+
+What is NOT here is PLACEMENT: the submap the bind lives in and where it
+resets to belong to a REGISTRATION, not to the bind, so they are arguments to
+hl-bind-add! instead:
+
+  (hl-bind-add! (hl-make-bind (hl-kbd \"C-x\") thunk #:locked #t))
+
+That split is the point: the same bind object can be registered in more than
+one place, and each registration is a separate bind in the compositor with its
+own handle.
+
+Exclusivity is checked HERE, because this is the call that takes the options:
+click and drag are mutually exclusive, long-press/release are incompatible with
+repeat, and mouse is exclusive with repeat/locked/release. Returns the bind
+object; see hl-bind-add! to register it."
+  ;; ONE CHORD ONLY. The compositor binds a single key+modifier set and has no
+  ;; notion of a sequence. hl-kbd returns a LIST OF CHORDS for a multi-key spec
+  ;; like "C-x C-f"; feeding that here would otherwise die deep in C++ as "A
+  ;; bind requires a trigger" — non-string tokens are skipped there — with a
+  ;; stale message attached. Say what is actually wrong instead.
+  (unless (every string? tokens)
+    (error "hl-make-bind: tokens must be a list of key-name strings, but got (see the value below). \
+If that came from (hl-kbd \"...\") with a space in it, it is a SEQUENCE \
+(a list of chords) — bind those with global-set-key!, which registers the \
+submaps to chain them. The value was:"
+           tokens))
+  (make-hl-bind tokens thunk
+                (hl--bind-flag-mask #:click click #:drag drag
+                                    #:devices devices
+                                    #:device-inclusive device-inclusive
+                                    #:locked locked #:release release
+                                    #:repeat repeat #:long-press long-press
+                                    #:non-consuming non-consuming
+                                    #:auto-consuming auto-consuming
+                                    #:transparent transparent
+                                    #:ignore-mods ignore-mods
+                                    #:dont-inhibit dont-inhibit
+                                    #:submap-universal submap-universal
+                                    #:allow-input-capture allow-input-capture
+                                    #:mouse mouse
+                                    #:key (car (reverse tokens)))
+                (if (list? devices) devices '())
+                description))
 
 (define (hl--special-name s)
   ;; normalize a special-workspace name/selector to its bare name, so an

@@ -70,7 +70,7 @@ of what you can do..
 
 ```scheme
 ;; ~/.config/hypr/hyprland.scm
-(hl-bind-add! (hl-key "SUPER+U") (lambda () (hl-exec! "foot")))
+(hl-bind-add! (hl-make-bind (hl-key "SUPER+U") (lambda () (hl-exec! "foot"))))
 
 ;; a master layout: the first window takes 60% of the width, the rest stack
 ;; down the right. It is handed the work AREA and the PLACEMENTS — one

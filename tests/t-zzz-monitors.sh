@@ -123,10 +123,21 @@ dx=$(( px - ax ))
 # not get to assume its own teardown worked. (The trap still covers the
 # failure paths above; cleanup is idempotent.)
 cleanup
-sleep 3
-nm=$($SCHEME '(length (hl-monitors))' 2>/dev/null)
+# POLL for the teardown rather than sleeping a fixed time and hoping, which is
+# what made this flake ("teardown left the primary at x=1920"): reconfiguring
+# the topology takes longer when the machine is busy, and this file runs in the
+# full suite with every other test behind it. The wait for the second output to
+# APPEAR above already polls, for the same reason — the teardown just didn't.
+# Polling also makes the common case faster, since it leaves as soon as the
+# state is right.
+nm=""; rx=""
+for _ in $(seq 1 20); do
+  nm=$($SCHEME '(length (hl-monitors))' 2>/dev/null)
+  rx=$($SCHEME "(hl-monitor-x (hl-monitor-from \"$PRIM\"))" 2>/dev/null)
+  [[ "$nm" == "1" && "$rx" == "0" ]] && break
+  sleep 0.5
+done
 [[ "$nm" == "1" ]] || { echo "teardown left $nm monitors, not 1"; exit 1; }
-rx=$($SCHEME "(hl-monitor-x (hl-monitor-from \"$PRIM\"))" 2>/dev/null)
 [[ "$rx" == "0" ]] || { echo "teardown left the primary at x=$rx, not 0"; exit 1; }
 
 echo "multi-monitor: area x=$ax (monitor x=$mx), window x=$px, $calls recalculates"

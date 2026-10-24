@@ -234,7 +234,7 @@ while (( SECONDS < END )); do
     eval_scheme timers "(begin (hl-after 5 (lambda () #f)) (hl-timer-cancel! (hl-repeat 5 (lambda () #f))) #t)"
 
     # binds: add + unbind cycle
-    eval_scheme binds "(hl-unbind! (hl-bind-add! (hl-key \"SUPER+F$((ITER % 12 + 13))\") (lambda () #f)))"
+    eval_scheme binds "(hl-unbind! (hl-bind-add! (hl-make-bind (hl-key \"SUPER+F$((ITER % 12 + 13))\") (lambda () #f))))"
 
     # gestures: add + remove cycle
     eval_scheme gestures "(hl-gesture-remove! (hl-gesture-add! #:fingers 8 #:direction \"up\" #:action (hl-make-move-gesture)))"

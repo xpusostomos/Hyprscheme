@@ -24,15 +24,25 @@
 
 (define (callback-arg? x)
   (or (and (pair? x) (eq? (car x) 'lambda))          ; an inline lambda
-      ;; a procedure passed by name: `(hl-bind-add! (hl-kbd "s-z") zoom)`
+      ;; a procedure passed by name: `(hl-bind-add! (hl-make-bind (hl-kbd "s-z") zoom))`
       (and (symbol? x) (module-variable (current-module) x)
            (procedure? (variable-ref (module-variable (current-module) x))))))
 
+(define (inside-make-bind form)
+  ;; A BIND FORM NESTS ITS THUNK. hl-bind-add! now takes one argument — the
+  ;; hl-bind record hl-make-bind built — and the thunk is the record's second
+  ;; field, so a scan of hl-bind-add!'s OWN arguments finds no lambda at all
+  ;; and every bind snippet silently reports "no thunk". Return the inner
+  ;; (hl-make-bind ...) form so the search continues inside it.
+  (and (pair? form) (pair? (cdr form)) (pair? (cadr form))
+       (eq? (car (cadr form)) 'hl-make-bind)
+       (cadr form)))
+
 (define (thunk-of form)
-  ;; the callback is whichever argument IS one: the third element of a bind, the
-  ;; second of a notification, a value in a layout's plist — one rule rather
-  ;; than one per shape
-  (let loop ((args (cdr form)))
+  ;; the callback is whichever argument IS one: the third element of a
+  ;; hl-make-bind, the second of a notification, a value in a layout's plist —
+  ;; one rule rather than one per shape
+  (let loop ((args (if (inside-make-bind form) (cdr (inside-make-bind form)) (cdr form))))
     (cond ((null? args) #f)
           ((callback-arg? (car args)) (car args))
           (else (loop (cdr args))))))
@@ -65,7 +75,11 @@
     (snippet-definitions! forms)
     (let ((form (find-form forms
                            (lambda (f)
-                             (let ((keys (cadr f)))
+                             ;; the KEYS live inside the bind record now, so the
+                             ;; search for them goes to hl-make-bind's first
+                             ;; argument, not hl-bind-add!'s
+                             (let* ((inner (or (inside-make-bind f) f))
+                                    (keys (cadr inner)))
                                ;; a bind's keys argument is built by hl-kbd/hl-key;
                                ;; requiring that keeps a `lambda` form (also a
                                ;; pair) from matching on its last element

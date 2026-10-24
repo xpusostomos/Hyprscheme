@@ -34,7 +34,8 @@
            hl-window-pin-fullscreened? hl-window-allowed-over-fullscreen?
            hl-window-tearing-hint? hl-window-inhibiting-idle?
            hl-window-focus-history-id hl-window-content-type
-           hl-window-stable-id hl-window-tags hl-window-swallowing
+           hl-window-stable-id hl-window-tags hl-window-tags-raw
+           hl--tag-bare hl-window-swallowing
            hl-window-xdg-tag hl-window-xdg-description hl-window-layout
            hl-window-pinned? hl-window-pseudo? hl-window-maximized?
            hl-window-deny-from-group? hl-window-prop
@@ -206,7 +207,25 @@
   (= 0 (hl--c-window-set-prop w prop val)))
 
 (define (hl-window-tag-add! w tag)
-  "Add the static TAG string to WINDOW's tags."
+  "Change one of WINDOW's tags — the same operation as the `tag` WINDOW RULE
+and the tag dispatcher, which is a TOGGLE unless TAG says otherwise:
+
+  (hl-window-tag-add! w \"+code\")   ; set
+  (hl-window-tag-add! w \"-code\")   ; unset
+  (hl-window-tag-add! w \"code\")    ; toggle: a second call REMOVES it
+
+\"ADD\" IS A MISLEADING NAME, and the bare spelling is the one that misleads:
+TAG is the compositor's own string, so the +/- prefixes are part of the argument
+rather than options, and a bare name flips the tag on every call. Pass \"+\"
+when you mean set.
+
+So a config may call this on every window open, but must not call it on every
+event: setting the same tag twice is the same as setting it once, while
+TOGGLING it twice is the same as never setting it at all.
+
+These are STATIC tags, stored bare. A tag a window rule applies is DYNAMIC and
+stored with a trailing \"*\" — see hl-window-tags-raw for why that mark exists,
+and hl-window-tags for reading either spelling back as a plain name."
   (= 0 (hl--c-window-tag w tag)))
 
 (define (hl-window-tags-clear! w)
@@ -518,10 +537,62 @@
   "The window's metadata stable id, as a hex string."
   (hl--c-window-stable-id w))
 
-(define (hl-window-tags w)
-  "The window's static tags, as a list of strings (set with
-   hl-window-tag-add!)."
+;; TAGS COME IN TWO SPELLINGS, and the difference is a trailing "*".
+;;
+;; The compositor stores the string it was given, and marks a tag that a WINDOW
+;; RULE applied by appending "*" (CTagKeeper::applyTag's `dynamic` flag). The
+;; mark is not decoration: it is what ties the tag to the rule that applied it,
+;; so the compositor can take it away again when the rule stops matching
+;; (removeDynamicTag erases "name*" and nothing else). A tag set by hand with
+;; hl-window-tag-add! has no owner and no mark.
+;;
+;; The two spellings are therefore both real, and they are what the raw list
+;; holds. Everyone downstream then has to decide whether to care, and the tree
+;; had been deciding differently in every place it read a tag — the API returned
+;; the mark, a config's comparison did not want it, and the only reader in the
+;; compositor that forgives it is the rule matcher. Hence two functions with the
+;; split made explicit rather than left to each caller.
+(define (hl-window-tags-raw w)
+  "The window's tags EXACTLY as the compositor stores them, as a list of
+   strings. A tag a window rule applied carries a trailing \"*\", the mark that
+   says a rule put it there and a rule may take it away again; a tag set by hand
+   with hl-window-tag-add! does not:
+
+     (hl-window-tags-raw w)   ; -> (\"browser*\" \"pinned\")
+
+   That mark is information, so it is not thrown away here: it is the only way
+   to tell a tag the compositor will retire on its own from one only you can
+   remove. When you just want a window's tags as names, use hl-window-tags."
   (hl--c-window-tags w))
+
+(define (hl--tag-bare tag)
+  "TAG without a trailing \"*\" — see hl-window-tags-raw for what the mark
+means. ONE is stripped, which is all the compositor ever appends, and a tag
+that genuinely ended in \"*\" could not be stored without colliding with the
+mark anyway."
+  (if (and (> (string-length tag) 0)
+           (char=? (string-ref tag (- (string-length tag) 1)) #\*))
+      (substring tag 0 (- (string-length tag) 1))
+      tag))
+
+(define (hl-window-tags w)
+  "The window's tags as plain names, with the trailing \"*\" the compositor
+   puts on a RULE-APPLIED tag stripped off, so a tag reads the same however it
+   got there:
+
+     (hl-window-tags w)   ; -> (\"browser\" \"pinned\")
+
+   THIS is the list to compare against. A window rule is written
+   `#:tag \"browser\"` and the config reads `\"browser\"`, but what the
+   compositor stores is \"browser*\", so the raw list matches nothing you would
+   ever write — comparing it against a name is a comparison that is silently
+   always false. Reach for hl-window-tags-raw only when the ownership question
+   is the one you are asking."
+  (let ((tags (hl--c-window-tags w)))
+    ;; `and`, not `or`: a window with no tags answers '(), while a handle the
+    ;; compositor cannot resolve still answers #f. Both are what the raw call
+    ;; answers, so the pair never disagree about the window itself.
+    (and tags (map hl--tag-bare tags))))
 
 (define (hl-window-swallowing w)
   "The window this one is swallowing, as a handle, or #f."
@@ -613,12 +684,24 @@
 
 (define (hl-window-move-to-workspace-notification-add! handler)
   "Register a handler that fires when a window moves to a different
-   workspace. The handler receives the window handle."
+   workspace. The handler receives the window handle AND the workspace
+   it moved to — (lambda (w ws) ...) — as the compositor's own Lua
+   does. Either may be #f."
   (hl--window-listen 7 'window-move-to-workspace handler 'hl-window-move-to-workspace-notification-add!))
 
 (define (hl-window-active-notification-add! handler)
   "Register a handler that fires when the focused window changes. The
-   handler receives the window handle."
+   handler receives the window handle, or #f when focus is CLEARED —
+   when there is no window focused at all (the last one on the
+   workspace closed, you switched to an empty one).
+
+   The #f case is not decoration: it is the only way to learn that
+   nothing is focused any more, so a handler that armed something for
+   the window that just went away would otherwise never arm down. Check
+   it before using the handle:
+
+     (hl-window-active-notification-add!
+       (lambda (w) (if w (arm-for w) (disarm-all))))"
   (hl--window-listen 8 'window-active handler 'hl-window-active-notification-add!))
 
 (define (hl-window-minimize-notification-add! handler)
@@ -651,9 +734,14 @@
   (hl--window-listen 12 'window-update-rules handler 'hl-window-update-rules-notification-add!))
 
 (define (hl-window-destroy-notification-add! handler)
-  "Register a handler that fires when a window is destroyed.
-   Zero-argument callback (the bus event is a weak ref; window identity
-   belongs to the window-close notification)."
+  "Register a handler that fires when a window is destroyed. The
+   handler receives the window handle — (lambda (w) ...) — as the
+   compositor's own Lua does.
+
+   The handle is BORN DEAD: this fires from the window's teardown, so
+   every getter on it answers #f and it identifies the window only by
+   identity. For a last look at the window's data use the window-close
+   notification, which fires while it is still alive."
   (let ((rec (make-hl-event 'window-destroy handler)))
     (if (= 0 (hl--c-window-destroy-listen rec))
         rec

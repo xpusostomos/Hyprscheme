@@ -307,6 +307,40 @@ ok '(let ((l (hl-window-layout w)))
 # static tags round-trip through the tag keeper the reader walks
 ok '(begin (hl-window-tag-add! w "api-read-tag") (equal? (hl-window-tags w) (quote ("api-read-tag"))))'
 ok '(begin (hl-window-tags-clear! w) (null? (hl-window-tags w)))'
+
+# AND THE TWO SPELLINGS. A tag applied by a WINDOW RULE is stored with a
+# trailing "*"; one set by hand is stored bare. hl-window-tags-raw is what the
+# compositor holds, hl-window-tags is what you wrote. t-keymap.sh pins the real
+# rule path end to end; this pins the pair against each other on one window, so
+# the marker is visible as the only difference.
+#
+# hl-window-tag-add! is the static path, so it stores this NAME verbatim —
+# including a star, which makes it a stand-in the rule path would otherwise be
+# needed for. The pair has to disagree about exactly that one character.
+# CLEARED FIRST, and the "+" is not decoration: a bare tag TOGGLES, so adding
+# the same one twice removes it and a re-add between two reads would compare
+# against the empty list. The prefix is part of the tag string the compositor
+# parses, not an option — see hl-window-tag-add!.
+ok '(begin (hl-window-tags-clear! w)
+           (hl-window-tag-add! w "+api-star-stand-in*")
+           (and (equal? (hl-window-tags-raw w) (quote ("api-star-stand-in*")))
+                (equal? (hl-window-tags w) (quote ("api-star-stand-in")))))'
+# a tag with no star is the same list either way, and ONE trailing star is
+# stripped — not two, and not one from the middle
+ok '(begin (hl-window-tags-clear! w)
+           (hl-window-tag-add! w "+api-bare-tag")
+           (and (equal? (hl-window-tags-raw w) (quote ("api-bare-tag")))
+                (equal? (hl-window-tags w) (quote ("api-bare-tag")))))'
+ok '(begin (hl-window-tags-clear! w)
+           (hl-window-tag-add! w "+api-two**")
+           (equal? (hl-window-tags w) (quote ("api-two*"))))'
+ok '(begin (hl-window-tags-clear! w) (null? (hl-window-tags-raw w)))'
+# and the toggle, since the name says "add" and the compositor says otherwise
+ok '(begin (hl-window-tags-clear! w)
+           (hl-window-tag-add! w "api-toggle")
+           (and (equal? (hl-window-tags w) (quote ("api-toggle")))
+                (begin (hl-window-tag-add! w "api-toggle")
+                       (null? (hl-window-tags w)))))'
 ok '(hl-window-signal! w 28)'
 
 # groups
@@ -838,7 +872,7 @@ noerr '(begin (hl-workspace-focus! "1") #t)'
 # ---- submaps ----------------------------------------------------------------
 # A submap is named ON the bind (there is no hl-submap wrapper any more), so
 # registering one bind in it is what brings it into existence.
-ok '(hl-bind? (hl-bind-add! (hl-kbd "g") (lambda () #f) #:submap "api-sub"))'
+ok '(hl-bind? (hl-bind-add! (hl-make-bind (hl-kbd "g") (lambda () #f)) #:submap "api-sub"))'
 ok '(hl-submap-activate! "api-sub")'
 val '(hl-current-submap)' '"api-sub"'
 ok '(hl-submap-exit!)'
@@ -853,8 +887,8 @@ val '(hl-current-submap)' '""'
 # agree with itself. The bind is found by its unique description; each block in
 # that output is separated by a blank line.
 ok '(begin
-      (hl-bind-add! (hl-kbd "C-<f20>") (lambda () #f)
-                    #:description "api-submap-probe"
+      (hl-bind-add! (hl-make-bind (hl-kbd "C-<f20>") (lambda () #f)
+                                  #:description "api-submap-probe")
                     #:submap "api-probe-map")
       #t)'
 submap_seen=$($HYP binds 2>/dev/null | awk '
@@ -880,10 +914,10 @@ val '(hl-current-submap)' '""'
 # ---- binds ------------------------------------------------------------------
 # device-inclusive semantics: listed devices default to inclusive (8192); an
 # explicit #:device-inclusive #f opts OUT
-val '(hl--bind-flags #:devices (quote ("k1")))' '8192'
-val '(hl--bind-flags #:devices (quote ("k1")) #:device-inclusive #f)' '0'
-val '(hl--bind-flags #:device-inclusive #t)' '8192'
-val '(hl--bind-flags)' '0'
+val '(hl--bind-flag-mask #:devices (quote ("k1")))' '8192'
+val '(hl--bind-flag-mask #:devices (quote ("k1")) #:device-inclusive #f)' '0'
+val '(hl--bind-flag-mask #:device-inclusive #t)' '8192'
+val '(hl--bind-flag-mask)' '0'
 # THE BUG THIS PASS FIXED, and the reason the bits are combined with logior
 # rather than `+`. click and drag each imply RELEASE, so `+` added 2+2 = 4 —
 # which is BIND_FLAG_REPEAT. Asking to bind a click therefore armed autorepeat
@@ -893,47 +927,47 @@ val '(hl--bind-flags)' '0'
 # The VALUES of the flag bits — the enum itself — are pinned in t-enums.sh,
 # which is where every concrete enum's set lives; what is here is the combining
 # behaviour, which is an hl-bind-add! option concern.
-val '(hl--bind-flags #:click #t #:release #t)' '514'
-val '(logand (hl--bind-flags #:click #t #:release #t) 4)' '0'
-val '(logand (hl--bind-flags #:click #t #:release #t) 512)' '512'
-val '(hl--bind-flags #:key "catchall")' '16384'
+val '(hl--bind-flag-mask #:click #t #:release #t)' '514'
+val '(logand (hl--bind-flag-mask #:click #t #:release #t) 4)' '0'
+val '(logand (hl--bind-flag-mask #:click #t #:release #t) 512)' '512'
+val '(hl--bind-flag-mask #:key "catchall")' '16384'
 # exclusivity rules (upstream's three checks at the binding layer)
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:click #t #:drag #t))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flag-mask #:click #t #:drag #t))))')
 [[ "$bad_bf" == *"click and drag are exclusive"* ]] || { echo "FAIL: click+drag not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:release #t #:repeat #t))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flag-mask #:release #t #:repeat #t))))')
 [[ "$bad_bf" == *"incompatible with repeat"* ]] || { echo "FAIL: release+repeat not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:long-press #t #:repeat #t))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flag-mask #:long-press #t #:repeat #t))))')
 [[ "$bad_bf" == *"incompatible with repeat"* ]] || { echo "FAIL: long-press+repeat not rejected => [$bad_bf]"; FAILED=1; }
-bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flags #:mouse #t #:repeat #t))))')
+bad_bf=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl--bind-flag-mask #:mouse #t #:repeat #t))))')
 [[ "$bad_bf" == *"mouse is exclusive"* ]] || { echo "FAIL: mouse+repeat not rejected => [$bad_bf]"; FAILED=1; }
-ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F13>") (lambda () #f)))'
-ok '(hl-bind? (hl-bind-add! (hl-kbd "C-M-<F15>") (lambda () #f)))'
-ok '(hl-bind? (hl-bind-add! (hl-kbd "s-<F16>") (lambda () #f) #:release #t #:description "api"))'
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F18>") (lambda () #f)))) (hl-unbind! b))'
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F19>") (lambda () #f)))) b (hl-unbind-key! (hl-kbd "s-<f19>")))'
+ok '(hl-bind? (hl-bind-add! (hl-make-bind (hl-kbd "s-<F13>") (lambda () #f))))'
+ok '(hl-bind? (hl-bind-add! (hl-make-bind (hl-kbd "C-M-<F15>") (lambda () #f))))'
+ok '(hl-bind? (hl-bind-add! (hl-make-bind (hl-kbd "s-<F16>") (lambda () #f) #:release #t #:description "api")))'
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F18>") (lambda () #f))))) (hl-unbind! b))'
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F19>") (lambda () #f))))) b (hl-unbind-key! (hl-kbd "s-<f19>")))'
 # function keys use emacs' bracketed notation; Hyprland matches key names
 # case-insensitively, so a lowercase emacs spelling resolves the same keysym
-ok '(let ((b (hl-bind-add! (hl-kbd "<f24>") (lambda () #f)))) b (hl-unbind-key! (hl-kbd "<f24>")))'
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "<f24>") (lambda () #f))))) b (hl-unbind-key! (hl-kbd "<f24>")))'
 
 # ---- bind records: the handle carries the token list and the thunk ----------
 # the accessors are hl--bind-tokens / hl--bind-thunk: INTERNAL (they are how the
 # fire trampoline takes a bind apart), so they are tested here as internals —
 # this file is the API suite, and the point is that the record holds both
-ok '(let ((b (hl-bind-add! (hl-kbd "C-M-a") (lambda () #f))))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "C-M-a") (lambda () #f)))))
      (and (hl-bind? b)
        (equal? (hl--bind-tokens b) (quote ("CTRL" "ALT" "a")))
        (procedure? (hl--bind-thunk b))
        (hl-unbind! b)))'
 # precise unbind: two binds on the SAME key; removing the first must leave
 # the second registrable-and-removable (a coarse unbind would kill both)
-ok '(let ((a (hl-bind-add! (hl-kbd "s-<F33>") (lambda () #f)))
-         (c (hl-bind-add! (hl-kbd "s-<F33>") (lambda () #f))))
+ok '(let ((a (hl-bind-add! (hl-make-bind (hl-kbd "s-<F33>") (lambda () #f))))
+         (c (hl-bind-add! (hl-make-bind (hl-kbd "s-<F33>") (lambda () #f)))))
      (and (hl-unbind! a) (hl-unbind! c)))'
 # ---- arming and disarming a bind -------------------------------------------
 # a CONDITIONAL bind: registered once, enabled only while a predicate holds. A
 # disabled bind does not match, so its key falls through to the focused app
 # untouched — with the app's own autorepeat, which injection cannot reproduce.
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F25>") (lambda () #f))))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F25>") (lambda () #f)))))
      (and (hl-bind-enabled? b)            ; armed on registration
           (hl-bind-enabled-set! b #f)
           (not (hl-bind-enabled? b))      ; disarmed, still registered
@@ -942,29 +976,29 @@ ok '(let ((b (hl-bind-add! (hl-kbd "s-<F25>") (lambda () #f))))
           (hl-unbind! b)))'
 # a stale handle reads #f rather than raising — the bind is gone, and a reload
 # discards every handle the same way
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F26>") (lambda () #f))))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F26>") (lambda () #f)))))
      (hl-unbind! b)
      (not (hl-bind-enabled? b)))'
 # disarming a stale handle fails rather than pretending
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F27>") (lambda () #f))))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F27>") (lambda () #f)))))
      (hl-unbind! b)
      (not (hl-bind-enabled-set! b #t)))'
 
 # double unbind: the second is #f (already gone)
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F34>") (lambda () #f))))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F34>") (lambda () #f)))))
      (and (hl-unbind! b) (not (hl-unbind! b))))'
 # unbinding one of two same-key binds, then firing the survivor through the
 # record path, must still work (the tag, not the key, is the identity)
-ok '(let ((dead (hl-bind-add! (hl-kbd "s-<F35>") (lambda () #f)))
-         (live (hl-bind-add! (hl-kbd "s-<F35>") (lambda () "survivor"))))
+ok '(let ((dead (hl-bind-add! (hl-make-bind (hl-kbd "s-<F35>") (lambda () #f))))
+         (live (hl-bind-add! (hl-make-bind (hl-kbd "s-<F35>") (lambda () "survivor")))))
      (and (hl-unbind! dead)
        (equal? (hl--bind-fire-rec live) (quote (ok #t)))
        (hl-unbind! live)))'
 # modless + literal forms of the explicit token list (regression: hl-bind-add!
 # used to auto-dispatch a two-string shorthand; the LIST is the only form)
-ok '(hl-bind? (hl-bind-add! (hl-kbd "<F20>") (lambda () #f)))'
-ok "(hl-bind? (hl-bind-add! (quote (\"SUPER\" \"F21\")) (lambda () #f)))"
-ok '(hl-bind? (hl-bind-add! (hl-key "SUPER+F22") (lambda () #f)))'
+ok '(hl-bind? (hl-bind-add! (hl-make-bind (hl-kbd "<F20>") (lambda () #f))))'
+ok "(hl-bind? (hl-bind-add! (hl-make-bind (quote (\"SUPER\" \"F21\")) (lambda () #f))))"
+ok '(hl-bind? (hl-bind-add! (hl-make-bind (hl-key "SUPER+F22") (lambda () #f))))'
 
 # ---- timers -----------------------------------------------------------------
 ok '(hl-timer? (hl-after 5000 (lambda () #f)))'
@@ -1014,11 +1048,11 @@ ok '(hl-event? (hl-layer-open-notification-add! (lambda (ns) #f)))'
 ok '(hl-event? (hl-layer-close-notification-add! (lambda (ns) #f)))'
 
 # ---- auto-consuming protocol: a bind thunk returning #f DECLINES the key ---
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F26>") (lambda () #f) #:auto-consuming #t)))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F26>") (lambda () #f) #:auto-consuming #t))))
      (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F27>") (lambda () #t) #:auto-consuming #t)))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F27>") (lambda () #t) #:auto-consuming #t))))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F28>") (lambda () (error "boom")) #:auto-consuming #t)))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F28>") (lambda () (error "boom")) #:auto-consuming #t))))
      (begin (eq? (hl--bind-fire-rec b) #f) (hl-unbind! b)))'
 
 # ---- hl-load-config: find a config file and load it into the generation -----
@@ -1083,16 +1117,16 @@ ok '(let ((txt (map hl-notification-text (hl-notifications))))
 
 # ---- bind result protocol (upstream {ok, pass_event, error, request_release}) ----
 # a non-plist truthy value normalizes to ok #t, like upstream's non-table returns
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F29>") (lambda () "done") #:auto-consuming #t)))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F29>") (lambda () "done") #:auto-consuming #t))))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t))) (hl-unbind! b)))'
 # pass-event: handled AND forwarded to the focused window (Keybinds Manager CONSUMES)
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F30>") (lambda () (quote (pass-event #t))) #:auto-consuming #t)))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F30>") (lambda () (quote (pass-event #t))) #:auto-consuming #t))))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t pass-event #t))) (hl-unbind! b)))'
 # explicit decline with an error message
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F31>") (lambda () (quote (ok #f (quote error) "not now"))) #:auto-consuming #t)))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F31>") (lambda () (quote (ok #f (quote error) "not now"))) #:auto-consuming #t))))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #f error "not now"))) (hl-unbind! b)))'
 # request-release: handled; asks the manager to trigger the release event (click/drag binds)
-ok '(let ((b (hl-bind-add! (hl-kbd "s-<F32>") (lambda () (quote (request-release #t))) #:auto-consuming #t)))
+ok '(let ((b (hl-bind-add! (hl-make-bind (hl-kbd "s-<F32>") (lambda () (quote (request-release #t))) #:auto-consuming #t))))
      (begin (equal? (hl--bind-fire-rec b) (quote (ok #t request-release #t))) (hl-unbind! b)))'
 
 # the C++ side reads the same plists: ok #f fails the result, which stops a
@@ -1239,7 +1273,7 @@ val '(+ 40 2)' '42'
 # manager calls, so this exercises the real path minus the keypress.
 ok '(begin
        (define notify-probe
-         (hl-bind-add! (hl-kbd "s-F19") (lambda () (error "probe: deliberate failure"))))
+         (hl-bind-add! (hl-make-bind (hl-kbd "s-F19") (lambda () (error "probe: deliberate failure")))))
        #t)'
 # count only OUR notification, by its prefix — the harness makes others
 probe-notifs() {
@@ -1270,7 +1304,7 @@ after2=$(probe-notifs)
 ok '(begin (hl-unbind! notify-probe) #t)'
 ok '(begin
        (define notify-probe2
-         (hl-bind-add! (hl-kbd "s-F19") (lambda () (error "probe: a different failure"))))
+         (hl-bind-add! (hl-make-bind (hl-kbd "s-F19") (lambda () (error "probe: a different failure")))))
        #t)'
 noerr '(hl--bind-fire-rec notify-probe2)'
 sleep 0.3
@@ -1294,19 +1328,22 @@ val 'hl--watchdog-ms' '5000'
 # machinery is no longer RE-READ on a reload, so the file being read again is no
 # longer what puts the variable back. The kernel's own `reset` does, and init.scm
 # calls it on every generation. So the same sweep has to reach the OTHER module
-# that keeps state — emacs-keymaps' three tables of submaps it has already built,
-# where a stale entry means define-key! declines to rebuild the binds it holds.
-# Those tables are unexported (nothing a config should be reading), so this
-# reaches them the way the sweep does: resolve the module, take its OWN binding.
-# `module-uses` would not do — what it holds is the public INTERFACE, which
-# carries only exported names.
-submaps() { $SCHEME '(hash-count (lambda (k v) #t) (variable-ref (module-local-variable (resolve-module (quote (hyprscheme emacs-keymaps)) #f #:ensure #f) (quote hl--submaps-made))))'; }
+# that keeps state — emacs-keymaps' global-map, which holds every bind a config
+# registered through global-set-key! and would otherwise still hold the previous
+# generation's on top of the new one, its thunks pointing at a generation that
+# has been thrown away.
+#
+# global-map is EXPORTED, so unlike the three hashtables it replaced this needs
+# none of the module-local-variable ritual to reach: it is read through the
+# ordinary API, and that is a straight improvement — the thing whose lifetime is
+# being asserted is now the thing a config can also see.
+keymap-binds() { $SCHEME '(length (hl-keymap-binds global-map))'; }
 $SCHEME '(global-set-key! (hl-kbd "C-z C-z") (lambda () #t))' >/dev/null
-n=$(submaps)
-[[ "$n" -gt 0 ]] || { echo "FAIL: no submap recorded before the reload => [$n]"; FAILED=1; }
+n=$(keymap-binds)
+[[ "$n" -gt 0 ]] || { echo "FAIL: global-map held no binds before the reload => [$n]"; FAILED=1; }
 ok '(hl-config-reload!)'
-n=$(submaps)
-[[ "$n" == "0" ]] || { echo "FAIL: submap tables survived the reload => [$n] want [0]"; FAILED=1; }
+n=$(keymap-binds)
+[[ "$n" == "0" ]] || { echo "FAIL: global-map's binds survived the reload => [$n] want [0]"; FAILED=1; }
 
 # ---- the swap flag, both directions ----------------------------------------
 # The option is the FLAG the dispatcher mirrors (its lua is swap({prev = true})),

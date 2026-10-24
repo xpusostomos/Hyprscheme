@@ -155,9 +155,9 @@ namespace Config::Scheme {
             return -1;
 
         if (which == 0)
-            g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.layer.opened.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
+            g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.layer.opened.listen([ref = SThunkRef(record)](PHLLS ls) { fireSchemeStrOrNull(ref.obj, ls ? ls->m_namespace.c_str() : nullptr); }));
         else
-            g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.layer.closed.listen([ref = SThunkRef(record)](PHLLS ls) { if (g_up && ls) fireSchemeStr(ref.obj, ls->m_namespace); }));
+            g_eventConnections.emplace(SCM_UNPACK(record), Event::bus()->m_events.layer.closed.listen([ref = SThunkRef(record)](PHLLS ls) { fireSchemeStrOrNull(ref.obj, ls ? ls->m_namespace.c_str() : nullptr); }));
         return 0;
     }
 
