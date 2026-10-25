@@ -349,7 +349,23 @@ namespace Config::Scheme {
         return Config::Actions::focus(*window) ? 0 : -2;
     }
 
-    static int hlSchemeWindowMoveToWorkspace(SCM id, const char* name) {
+    // MOVE the window to a workspace, SILENTLY or not.
+    //
+    // `silent` is Actions::moveToWorkspace's own second parameter, and passing
+    // it through rather than choosing is the whole point: the two branches do
+    // materially different things. The NON-silent one follows the window —
+    // it refocuses the monitor, changes the workspace and warps the cursor —
+    // and, for a SPECIAL workspace, it calls setSpecialWorkspace, which SHOWS
+    // it as an overlay. The silent one moves the window and leaves the view
+    // where it was.
+    //
+    // This was hard-coded `false` until Chris hit exactly that: a window rule
+    // sending test instances to special:test moved them AND displayed
+    // special:test on top of his work. The compositor supports the silent move,
+    // Lua's dispatchers expose it, and we made the decision in C++ on the
+    // caller's behalf — which is what THE BOUNDARY forbids. The default in
+    // Scheme is #f, so no existing call changes behaviour.
+    static int hlSchemeWindowMoveToWorkspace(SCM id, const char* name, bool silent) {
         if (!g_up || !name)
             return -1;
 
@@ -373,7 +389,7 @@ namespace Config::Scheme {
         if (!ws)
             return -2;
 
-        return Config::Actions::moveToWorkspace(ws, false, w) ? 0 : -2;
+        return Config::Actions::moveToWorkspace(ws, silent, w) ? 0 : -2;
     }
 
     // toggles the given fullscreen mode (FSMODE_FULLSCREEN=2, FSMODE_MAXIMIZED=1),

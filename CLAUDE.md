@@ -380,8 +380,11 @@ load-check cannot see that (not loading something is not a load failure).
    as API: every module `init.scm` names, **except the kernel** (the C++
    boundary: 368 exports, 313 of them `hl--c-*` gsubrs). **Extras and
    emacs-keymaps ARE API** — extended API rather than base, but a config calls
-   `hl-kbd` and `hl-gesture-add!` directly and they follow the same testing
-   rule. Internals are excluded by the convention the tree already keeps:
+   `hl-kbd` and `hl-load-config` directly and they follow the same testing
+   rule. (This used to cite `hl-gesture-add!`, which is now a FAMILY name — see
+   WHERE A FUNCTION GOES below; the point stands, but the example had to move
+   with the function.) Internals are excluded by the convention the tree
+   already keeps:
    `hl--*` internal, `*-rtd` a record type C++ resolves by name, `make-hl-*` a
    record constructor. **A name that is none of those and starts with `hl-` is
    API — if it should not be, rename it, don't filter it.** (That is what
@@ -399,6 +402,43 @@ so the tool enforces it and the suite would catch a violation at runtime.
 `hl--ready` is the kernel's flag and the **host** sets it once every module
 has loaded; a `set!` of an imported binding is a syntax error in a declarative
 module, which is why no `.scm` does it.
+
+**WHERE A FUNCTION GOES: TWO QUESTIONS, and conflating them is a real mistake
+that was made (Chris's policy, Aug 2026).**
+
+1. **Does it reach Hyprland C or C++?** Then it is the **FAMILY's** that owns
+   the object — never extras. Five functions had drifted into extras for no
+   reason: `hl-rule-enabled-set!`, `hl-timer-enabled-set!`,
+   `hl-notification-paused-set!`, `hl-gesture-add!`, `hl-gesture-remove!`. Each
+   calls ONE gsubr and otherwise only its own module's own query. The sibling
+   that had it right all along is `hl-bind-enabled-set!`, in `bind.scm`. The
+   name's prefix is what says where it goes: `hl-rule-*` → `rule.scm`,
+   `hl-timer-*` → `timer.scm`, `hl-workspace-*` → `workspace.scm`.
+2. **Does it cross families?** Then it is `extras`'. `hl-window-monitor-set!`
+   needs window AND monitor; `hl-workspace-special-set!` needs workspace,
+   monitor and query; `hl-load-config` needs core and notification. A family
+   may not import another family, so a convenience spanning two has nowhere
+   else to live.
+
+**"Policy, not mechanism" is a DIFFERENT rule and does not answer this.** It is
+about *C++ versus Scheme* (THE BOUNDARY, above): a decision belongs in Scheme,
+which is why those wrappers compute a toggle in Scheme at all. It says nothing
+about family versus extras. Treating it as though it did is exactly what put
+those five in the wrong module — the `#:on?`-with-absent-means-flip convention
+was read as "policy, therefore extras", when the function's *reach* is what
+decides.
+
+**The layers run `core → extras → emacs-keymaps`**, each more specific than the
+last. Extras is NOT "the complicated one" — it is everything that is not a raw
+API, and may be perfectly simple. `emacs-keymaps` is where complex behaviour
+lives, and it may use extras freely (both are composers; `module-audit`'s
+`visible_to` lets a composer see every export in the tree, and its cross-family
+CALL check exempts `EXTRAS`, `EMACS_KEYMAPS` and `WATCH`).
+
+A **rename or move between modules does not change the API** — `api-check`
+reports `api unchanged`, which is what a move should look like, and
+`t-coverage` derives the public set by introspection rather than from a list,
+so it follows the move for free.
 
 Things that bit us and are worth not rediscovering:
 
@@ -703,6 +743,25 @@ Two things this forbids, and both had been done:
 - **Naming a gsubr after a policy rather than the call.** A gsubr called
   `-toggle` invites its caller to toggle. If the operation underneath SETS, it
   is `-set`.
+- **HARD-CODDING a parameter the C++ takes — the same sin, and it cost a real
+  bug.** `hl-window-workspace-set!` called `Actions::moveToWorkspace(ws, FALSE, w)`
+  with the silent flag fixed in C++. The two branches differ materially: the
+  non-silent one follows the window, and **for a SPECIAL workspace it also calls
+  `setSpecialWorkspace`, which DISPLAYS it as an overlay**. So a config sending
+  its test instances to `special:test` moved them and put that overlay in front
+  of the user — the opposite of out of the way, reported as "the test instances
+  still bother me, did you forget something". The compositor supported the
+  silent move and the scripting API exposed it; only OUR API could not reach it.
+  Fixed by passing it through, and the public spelling is the SCRIPTING layer's
+  (`#:follow`, default `#t`, since `LuaBindingsDispatchers.cpp` computes
+  `silent = follow.has_value() && !*follow`) — the gsubr keeps the C++ unit and
+  the negation lives in Scheme.
+  **The audit that followed is the part to repeat**: every one of the 57
+  `Actions::` call sites in `cpp/` was compared against its C++ signature. Five
+  take a parameter beyond the window (`cycleNext`, `fullscreenWindow`, `resize`,
+  `changeGroupActive`, `moveGroupWindow`) and all five already passed theirs;
+  this was the only one dropped. Nothing would have told us otherwise, which is
+  exactly why the comparison is worth running after any batch of gsubr work.
 
 **And it is the ONE place a value is converted.** A caller passes what it has;
 the boundary makes the C++ type out of it. Two entries were missing for years,
@@ -1172,6 +1231,51 @@ that `fullscreen-handler` was one of them. Neither was true:
   in "API conventions" is about the common case and does not cover this one).
   With `#:allow-other-keys` the rest arg captures the extra pairs AND re-captures
   the recognised ones, so `#:top-level` has to be filtered out before forwarding.
+- **MODES live in `emacs-keymaps` too** (`make-mode` / `define-mode`,
+  `mode-active?` / `mode-active-set!` / `mode-active-toggle!`, `mode-name`,
+  `mode-color`, `mode-file`). A mode is a named flag with a callback pair, a
+  colour and a state file — and it is HERE because a mode change is nearly always
+  also a **keymap** change: `mode-active-set!` calls `hl-keymaps-recheck!` for
+  you, and that is the line every config forgets, because a keymap condition is
+  evaluated **when the focused window changes and at no other time**. It does the
+  whole of "a mode changed": flag, hook, state file, notification, colour rules,
+  recheck.
+- **A MODE'S COLOUR IS A WINDOW RULE, AND THERE IS NO FOCUS LISTENER.** The rule
+  is `#:match '((focus . #t))` + `#:border-color`, born disabled. `focus` is a
+  real rule property (`RULE_PROP_FOCUS`, a BOOL match engine), and
+  `WindowRuleApplicator.cpp` treats a focus match **specially** — its colour goes
+  to the ACTIVE border. So "colour the focused window" is the compositor's own
+  feature: `Window.cpp`'s focus path re-runs `propertiesChanged`, which
+  re-evaluates the rule, and the window that lost focus stops matching. Nothing
+  has to be un-coloured and no per-window paint is involved. **First registered
+  mode wins** — the walk is in registration order and disables every other mode's
+  rule, which is what makes "first" mean anything (several enabled rules writing
+  the same border would be decided by the compositor's own application order).
+- **A RULE FLIP DOES NOT REPAINT — `IRule::setEnabled` only sets a flag**, so
+  every mode change follows its rule changes with
+  `(hl-refresh #:window-states #t #:immediately #t)`. `#:window-states` and not
+  `#:rules`: the composite is `(1<<5)|REFRESH_RULES` and the `1<<5` half is what
+  uncaches and redraws the decorations. ALWAYS, not only when a mode won —
+  turning the LAST mode off leaves no winner, and `(when winner …)` (the first
+  version) then left a disabled rule's colour on screen until something else
+  happened to repaint.
+- **The mode state file is `$XDG_STATE_HOME/hyprscheme/<name>`** — derived from
+  the name, not passed — and holds the colour in Scheme hex (`#xffffa500`).
+  NOT under `omarchy/`, which belongs to another program.
+- **`tools/doc-exercise.scm`'s stub scanner must find gsubrs passed AS VALUES.**
+  A gsubr handed to a helper that compares its own parameter — core.scm's
+  `hl--window-rule-mk` takes `hl--c-window-rule-begin`/`-effect`/`-commit` — is
+  invisible to a scan of call sites, so those were stubbed `#f` and every wiki
+  block calling `hl-window-rule-add!` raised `(= 0 #f)`. It showed up as a NOTE,
+  so it read as harness noise, and it only became visible when a block DEFINED
+  something and then used it: the define raised, the name stayed unbound, and the
+  NEXT line failed as `unbound-variable` **naming the innocent name three frames
+  from the cause** (`FAIL unbound: ekeys`). The tool now runs the same
+  parameter-aware two passes as `tools/form-trace.scm`. Two traps, both hit in
+  both tools: the position walk needs `(list? (cdr x))` because
+  `(hl-layout-add! name . spec)` is a real dotted signature and
+  `(length '(name . spec))` raises; and `make-stack` is DEPTH-LESS here, because
+  `(make-stack #t 40)` answers `#f`.
 - Binds validate exclusivity (long-press/release vs repeat conflicts)
   at the Scheme level; hyprland does not.
 - Documentation: every public function is a plain `define` whose body

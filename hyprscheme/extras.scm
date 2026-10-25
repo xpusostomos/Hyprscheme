@@ -1,33 +1,45 @@
 ;; hyprscheme/extras.scm — composed conveniences built on the raw API
 ;;
-;; imports (hyprscheme kernel) [the C++ boundary] and (hyprscheme core)
-;; [shared Scheme plumbing], and nothing else in the tree: a family
-;; never calls another family. Anything that has to compose several API
-;; calls lives in (hyprscheme extras).
+;; THE TWO RULES THAT DECIDE WHAT LIVES HERE, and they are different questions
+;; that are easy to conflate (they were):
+;;
+;;   1. DOES IT REACH HYPRLAND C OR C++? Then it is a FAMILY's, not extras'.
+;;      A wrapper that calls one gsubr and maybe its own module's own query
+;;      belongs with the object it wraps — hl-rule-enabled-set! in rule.scm,
+;;      hl-timer-enabled-set! in timer.scm, hl-gesture-add! in gesture.scm.
+;;      Those five sat here until Chris asked why, and the answer was that
+;;      nothing about them composes anything.
+;;   2. DOES IT CROSS FAMILIES? Then it is extras'. hl-window-monitor-set!
+;;      needs window AND monitor; hl-workspace-special-set! needs workspace,
+;;      monitor and query. A family may not import another family, so a
+;;      convenience that spans two has nowhere else to live.
+;;
+;; "Policy in Scheme" is NOT the test — it is a separate rule that lives in
+;; CLAUDE.md (C++ exists to reach a compositor API, decisions belong in
+;; Scheme). hl-rule-enabled-set!'s absent-argument toggle is policy, and it
+;; still belongs in rule.scm.
+;;
+;; THE HIERARCHY, from Chris: core -> extras -> emacs-keymaps, each more
+;; specific than the last. extras is not "complex behaviour", it is simply
+;; everything that is not a raw API; emacs-keymaps is where complex behaviour
+;; lives and may freely use extras.
+;;
+;; imports the kernel [the C++ boundary] and core [shared plumbing], plus the
+;; families it composes — a family imports only the kernel and core, which is
+;; exactly why composition has to happen out here.
 
 (define-module (hyprscheme extras)
   #:export (
            hl-window-monitor-set! hl-workspace-special-set!
-           hl-rule-enabled-set! hl-notification-paused-set!
-           hl-timer-enabled-set! hl-gesture-add! hl-gesture-remove!
            hl-load-config))
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
-(use-modules (hyprscheme bind))
-(use-modules (hyprscheme config))
-(use-modules (hyprscheme event))
-(use-modules (hyprscheme exec))
-(use-modules (hyprscheme gesture))
-(use-modules (hyprscheme group))
-(use-modules (hyprscheme layer))
 (use-modules (hyprscheme monitor))
 (use-modules (hyprscheme notification))
 (use-modules (hyprscheme query))
-(use-modules (hyprscheme rule))
-(use-modules (hyprscheme timer))
-(use-modules (hyprscheme window))
 (use-modules (hyprscheme workspace))
+(use-modules (hyprscheme window))
 
 (use-modules (ice-9 exceptions)
              (rnrs io ports)
@@ -35,11 +47,16 @@
              (srfi srfi-1)
              (ice-9 optargs))
 
-(define (hl-window-monitor-set! w mon)
+(define* (hl-window-monitor-set! w mon #:key (follow #t))
   "Move the window to another monitor MON. There is no direct
    window-to-monitor dispatch, so this moves to the target's active
-   workspace."
-  (hl-window-workspace-set! w (hl-monitor-active-workspace mon)))
+   workspace.
+
+   #:follow is passed through to hl-window-workspace-set!, and exists for the
+   same reason it does there — the scripting API's move takes it for a monitor
+   target too. With #:follow #f the window goes to the other monitor and the
+   VIEW STAYS; with the default it follows the window there."
+  (hl-window-workspace-set! w (hl-monitor-active-workspace mon) #:follow follow))
 
 ;; ---- actions: navigation and geometry --------------------------------------
 ;; directions: "l"/"r"/"u"/"d" or 'left/'right/'up/'down. Window args accept
@@ -62,73 +79,12 @@
             0
             (= 0 (hl--c-workspace-toggle-special (hl--ws-arg ws)))))))
 
-(define* (hl-rule-enabled-set! rule #:key (on? 'unset))
-  "Enable, disable or toggle RULE: absent #:on? toggles, #t/#f set."
-  (if (= 0 (hl--c-rule-set-enabled rule
-                            (if (eq? on? 'unset) (not (hl-rule-enabled? rule)) on?)))
-      #t
-      (error "hl-rule-enabled-set!: unknown rule")))
-
-(define* (hl-notification-paused-set! n #:key (on? 'unset))
-  "Pause or resume the notification's timeout timer: absent #:on? toggles,
-   #t/#f set."
-  (= 0 (hl--c-notification-paused-set n
-         (if (eq? on? 'unset) (not (eq? (hl-notification-paused? n) #t)) (eq? on? #t)))))
-
-(define* (hl-timer-enabled-set! t #:key (on? 'unset))
-  "Enable, disable or toggle the timer T: absent #:on? toggles, #t/#f set."
-  (if (= 0 (hl--c-timer-set-enabled t
-                                   (if (eq? on? 'unset) (not (hl-timer-enabled? t)) on?)))
-      #t
-      (error "hl-timer-enabled-set!: unknown timer")))
-
-(define* (hl-gesture-add! #:key fingers direction action (mods '()) (scale 1.0) (disable-inhibit #f))
-  "Register a gesture: (hl-gesture-add! #:fingers N #:direction \"dir\"
-   #:action ACTION [#:mods (hl-key \"SUPER\")] [#:scale 1.0]
-   [#:disable-inhibit #t]). #:fingers, #:direction and #:action are
-   required; the optional keywords describe the gesture INPUT,
-   independent of the action. ACTION is an hl-gesture-action built by
-   the hl-make-*-gesture constructors - built-in and custom actions are
-   indistinguishable from the caller's side, and a recipe is a pure
-   value (registering it under two specs constructs two independent
-   gestures). Returns an hl-gesture handle for hl-gesture-remove! -
-   removal matches on the registration spec, never on the action."
-  (let ()
-    (cond ((not fingers)
-           (error "hl-gesture-add!: field 'fingers' is required"))
-          ((not (and (integer? fingers) (exact? fingers) (>= fingers 2)))
-           (error "hl-gesture-add!: field 'fingers' must be an integer >= 2"))
-          ((not direction)
-           (error "hl-gesture-add!: field 'direction' is required"))
-          ((not (string? direction))
-           (error "hl-gesture-add!: field 'direction' must be a string"))
-          ((not action)
-           (error "hl-gesture-add!: an action is required — #:action (hl-make-...-gesture ...)"))
-          ((not (hl-gesture-action? action))
-           (error "hl-gesture-add!: field 'action' must be an hl-gesture-action (see the hl-make-*-gesture constructors)"))
-          ((not (and (list? mods) (every (lambda (m) (string? m)) mods)))
-           (error "hl-gesture-add!: 'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\") or '(\"SUPER\" \"SHIFT\")"))
-          ((not (or (<= -10.0 scale -0.1) (<= 0.1 scale 10.0)))
-           (error "hl-gesture-add!: field 'scale' must be between -10 and -0.1 or between 0.1 and 10 - it is currently:" scale))
-          (else
-           (let ((rc (hl--c-gesture action fingers direction mods (exact->inexact scale) disable-inhibit)))
-             (cond ((not (= 0 rc))
-                    (error "hl-gesture-add!:" (hl--c-config-last-error)))
-                   (else
-                    ;; the handle is the exact registration spec — the manager
-                    ;; matches removal on it, so remove! always hits our gesture
-                    (list fingers direction mods scale disable-inhibit))))))))
-
-(define (hl-gesture-remove! g)
-  "Remove a registered gesture: #t when removed, #f when nothing is
-   registered under that spec, error otherwise."
-  (unless (hl-gesture? g)
-    (error "hl-gesture-remove!: not an hl-gesture handle"))
-  (let ((rc (hl--c-gesture-remove (car g) (cadr g) (caddr g) (exact->inexact (cadddr g))
-                                 (list-ref g 4))))
-    (cond ((= rc 0) #t)
-          ((= rc 1) #f)
-          (else (error "hl-gesture-remove!:" (hl--c-config-last-error))))))
+;; hl-rule-enabled-set!, hl-timer-enabled-set!, hl-notification-paused-set!,
+;; hl-gesture-add! and hl-gesture-remove! USED TO BE HERE and are now in their
+;; own families — rule.scm, timer.scm, notification.scm and gesture.scm. Each
+;; one reaches the compositor through a gsubr and otherwise calls only its own
+;; module's query, so none of them composed anything; see the note at the top of
+;; this file for the two rules that decide what belongs here.
 
 ;; ---- loading other config files ---------------------------------------------
 

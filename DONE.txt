@@ -1805,6 +1805,258 @@ what separated them:
 A corrected copy is left for him at /tmp/hs-bindings-fix/ — ~/.config/ is
 NEVER edited from here, per the standing rule.
 
+== FIVE FUNCTIONS MOVED OUT OF extras, and the rule that put them there ==
+
+Chris asked why hl-rule-enabled-set! was in (hyprscheme extras) when "it kind of
+looks like hyprland core". It does, and he was right: it calls
+hl--c-rule-set-enabled — a gsubr, i.e. straight to the compositor — and
+otherwise only rule.scm's own hl-rule-enabled?. Nothing about it composes
+anything. I first defended the placement (the #:on?-with-absent-means-flip
+convention is policy, and policy belongs in Scheme) and that defence was WRONG
+in a way worth recording: "policy not mechanism" is a rule about C++ VERSUS
+SCHEME, and I used it to answer a FAMILY VERSUS extras question. Two different
+rules. He corrected it, and the correction is now standing policy in CLAUDE.md.
+
+MOVED, each into the family that owns the object:
+  hl-rule-enabled-set!         extras -> rule.scm
+  hl-timer-enabled-set!        extras -> timer.scm
+  hl-notification-paused-set!  extras -> notification.scm
+  hl-gesture-add!              extras -> gesture.scm
+  hl-gesture-remove!           extras -> gesture.scm
+
+STAYED, because they genuinely cross families (which is what extras is FOR):
+  hl-window-monitor-set!   window + monitor
+  hl-workspace-special-set! workspace + monitor + query
+  hl-load-config           core (hl-load) + notification
+
+THE TWO QUESTIONS, now written down in CLAUDE.md and building-the-plugin.md:
+  1. does it reach Hyprland C or C++?  -> the FAMILY's. The name's prefix is the
+     answer: hl-rule-* -> rule.scm, hl-timer-* -> timer.scm.
+  2. does it cross families?           -> extras'.
+The layers run core -> extras -> emacs-keymaps, each more specific; extras is
+not "the complex one", it is everything that is not a raw API.
+
+- extras' import list dropped from 16 use-modules to 7 — bind, config, event,
+  gesture, group, layer, rule, timer AND exec all went, since nothing left in
+  the module calls any of them (exec was reachable only through the gesture
+  code). Its header now states both rules rather than the one half-truth.
+- EACH moved function carries a note saying why it left, pointing at
+  hl-rule-enabled-set! in rule.scm for the full argument. The next person to
+  wonder will find the answer at the function rather than in this ledger.
+- VERIFIED: make check green (module-audit is the one that would catch a family
+  reaching into another, and it is satisfied); suite 21/21; api-check reports
+  "api unchanged (359 names)" — which is what a module MOVE should look like,
+  no removal and no addition, since the names are unchanged and t-coverage
+  derives the public set by introspection rather than from a list.
+- A REAL BUG WAS CAUGHT MID-MOVE: my first edit to timer.scm replaced the
+  function's docstring but dropped its BODY, leaving an unterminated define.
+  tools/syntax-check.scm named it instantly (timer.scm:53 unexpected end of
+  input). That is the check doing exactly what it exists for.
+- ALSO CAUGHT: I added hl-notification-paused-set! to notification.scm without
+  adding it to that module's #:export — module-audit's EXPORT rule reported it
+  by name. The export rule earning its place again.
+- Docs: building-the-plugin.md's module-layout section now carries the two
+  questions and the core->extras->emacs-keymaps hierarchy. CLAUDE.md gains the
+  same as standing policy, and its api-names passage stopped citing
+  hl-gesture-add! as an extras example, since it is a family name now.
+
+== hl-refresh: the refresh pass, on request ==
+
+Chris asked for two "missing" refresh functions. ONE was missing:
+
+  hl-force-renderer-reload!                     ALREADY EXISTED
+                                                (exec.scm:67, cpp/Exec.cpp:317,
+                                                tested t-api.sh:742, documented
+                                                dispatchers.md:110)
+  hl-exec-scheduled-prop-refresh-immediately!   ALREADY EXISTED (exec.scm:97)
+  hl--c-schedule-refresh / hl-refresh           genuinely missing — built here
+
+So the work was ONE gsubr and one wrapper, not two functions. Worth recording
+because proposing work that already exists is the failure mode CLAUDE.md warns
+about ("don't re-propose finished work"), and the fix is to grep the name before
+planning it — which is what found this, late.
+
+- cpp/Config.cpp: hlSchemeScheduleRefresh mirrors scheduleRefresh(), the SAME
+  call the line above it already makes (Config.cpp:139). Arg<int> already
+  existed, so no new conversion. 0 IS PASSED THROUGH: it arms a tick that trips
+  no bits and the pass does nothing, which is what the compositor does with it;
+  refusing it would invent a policy the C++ does not have (Chris's call).
+- hyprscheme/config.scm: refresh-enum, the compositor's own refresh bits copied
+  from PropRefresher.hpp in the HEADER'S order with (ash 1 N), so the two
+  columns diff by eye. The two COMPOSITES are written as the header writes them
+  — window-states is (1<<5)|rules, monitor-states is (1<<6)|layouts — because
+  flattening them hides the thing that makes them worth having: re-decorating
+  windows is a SUPERSET of re-applying rules. THAT is the bit modes need.
+- IT LIVES IN config.scm, NOT core. The ENUMS rule is "used by one family ->
+  that family", and hl-refresh is the only speaker. core's bind-flag-enum is in
+  core for its own stated reason (hl--bind-flag-mask is core's own data); I had
+  pattern-matched on it and put refresh-enum in core at first.
+- hl-refresh takes every bit as a #:key, builds the mask with logior (NEVER +:
+  two options naming one bit would accumulate into the NEXT bit — the click/
+  release = autorepeat bug this tree already paid for), and #:immediately
+  defaults #f (the compositor defers; deferring is the safe default).
+- THE FLUSH IS CALLED AS A GSUBRS, not through (hyprscheme exec)'s wrapper: a
+  family may not import another family, and that wrapper lives in exec.scm.
+  Same call the wrapper makes; the only other name needed is the kernel's.
+- NO `all` IN THE ENUM, deliberately: the header's REFRESH_ALL is
+  numeric_limits<uint16_t>::max() = #xffff — every bit INCLUDING the meaningless
+  ones — which is a different thing from the union of the named bits. Exposing
+  it under a name that reads like "all the ones listed" would be a trap.
+
+TWO BUGS OF MY OWN, both caught by the tree's own checks:
+  - `,(logior ,(ash 1 5) ,(ash 1 4))` — NESTED UNQUOTES. Inside ,(...) you are no
+    longer quasiquoting, so the inner commas are simply invalid. load-check named
+    it at init.scm:79 as a bare "unquote".
+  - A `;` in a trailing comment in t-enums.sh, breaking the shell (`syntax error
+    near unexpected token`). Caught by bash -n before the suite ever ran.
+
+TESTED, and the tests were made to FAIL:
+  - t-enums.sh pins all ten values against the header's shifts, the declaration
+    ORDER, the LENGTH (10), the absence of `all`, and both composites. Verified
+    to fail by flattening the two composites — t-enums fails, naming them.
+  - t-api.sh exercises every option, a combination, no-options, and a bad option
+    name being NAMED (Guile's unrecognized-keyword, since every option is a
+    named key — the enum's own error is unreachable from hl-refresh's body,
+    which t-enums pins instead).
+  - THE #:immediately TEST WAS REWRITTEN AFTER IT FAILED TO FAIL. The first version
+    asserted `(boolean? (hl-refresh … #:immediately #t))`, which passes against a
+    NEUTERED flush — a check that cannot fail, the exact trap CLAUDE.md names.
+    The assertion that works: with the flush in place, hl-refresh schedules then
+    drains, so a FOLLOW-UP flush finds nothing and answers #f; with the flush
+    removed the schedule survives and the follow-up drains it instead. Verified
+    to fail by neutering the flush (t-api fails), and to pass when restored.
+- Docs: scheme-utilities.md gains an hl-refresh section with the full option
+  table marked to show which options carry their parts.
+
+== MODES: a named flag with a colour, a file and two hooks ==
+
+Chris's design, built in (hyprscheme emacs-keymaps) — with the keymaps, because a
+mode change is nearly always also a KEYMAP change and the facility does the
+recheck itself. The shape went through several corrections in the conversation
+and the reasoning is worth carrying forward:
+
+  - ONE #:color, NOT color-window/color-all-windows. The colour marks THE FOCUSED
+    WINDOW, which is what a mode usually wants to say. First registered mode that
+    is on and has a colour wins.
+  - #:activate / #:deactivate take the MODE as their argument, so one lambda can
+    serve several modes and read its own name and colour.
+  - The state file is DERIVED from the name: $XDG_STATE_HOME/hyprscheme/<name>
+    (NOT under omarchy/, which belongs to another program). It exists exactly
+    while the mode is on and holds the colour in Scheme hex.
+  - #:notify defaults #t.
+  - Mutual exclusion is an #:activate hook's business, NOT a declared field.
+
+HOW THE COLOUR WORKS, and it needed no new C++: a mode owns a WINDOW RULE,
+    #:match (focus . #t) + #:border-color, born disabled.
+`focus` is a real rule property (RULE_PROP_FOCUS, a BOOL engine), and the
+border-colour application treats a focus match SPECIALLY — its colour goes to the
+ACTIVE border (WindowRuleApplicator.cpp:147-155). So "colour the focused window"
+is the compositor's own feature, and it needs NO focus listener and NO clearing:
+Window.cpp's focus path re-runs propertiesChanged, which re-evaluates the rule,
+and the window that lost focus simply stops matching.
+
+WHAT A MODE CHANGE DOES (mode-active-set!, the ONLY writer of a mode's state):
+flag, hook, state file, notification, colour rules, and hl-keymaps-recheck! —
+that last one is the point of living in this module, since a keymap condition is
+evaluated when the FOCUSED WINDOW changes and at no other time. The config this
+replaces wrote all six out per mode and always forgot one.
+
+A BUG IN MY OWN FIRST VERSION, found by re-reading it rather than by a test:
+hl--modes-apply-colors! called hl-refresh only `(when winner …)`. Turning the
+LAST mode off leaves no winner, so nothing refreshed, so the rule was disabled
+and THE COLOUR STAYED ON SCREEN until something else repainted. Now always. It is
+the same mistake as hl-rule-enabled-set! without a refresh, one branch further
+in — and it is NOT testable in the harness (the repaint is not observable, only
+the rule's enabled flag, which was already correct), so it is recorded here.
+
+TESTS: tests/t-mode.sh, 30 assertions. Verified to FAIL: neutering the
+hl-keymaps-recheck! call fails the recheck assertions; arming every active mode's
+rule instead of only the winner's fails the precedence assertion. The precedence
+test asserts BOTH rules' state through hl-rule-enabled? — a Scheme-only check
+would pass with both armed, which is the collision the walk exists to prevent.
+t-coverage FAILED while this file was being written, which is how the new API got
+pinned.
+
+== doc-exercise's STUB SCANNER MISSED GSUBRS PASSED AS VALUES ==
+
+A real hole in the tool, found because the mode facility's wiki example was the
+first block SHAPED to expose it.
+
+status-gsubrs found a status gsubr two ways: (= 0 (hl--c-x …)) directly, and
+(= 0 v) where v was bound to a gsubr call. A THIRD shape was invisible — a gsubr
+passed AS A VALUE to a helper that compares its own parameter. core.scm's
+hl--window-rule-mk is handed hl--c-window-rule-begin / -effect / -commit and
+tests each with (= 0 …). Those were stubbed #f, so every wiki block calling
+hl-window-rule-add! raised (= 0 #f) — as a NOTE, not a failure, so it read as
+harness noise and was tolerated.
+
+It only became visible when a block DEFINED something and then USED it: the
+define raised, the name stayed unbound, and the NEXT line failed as
+unbound-variable, NAMING THE INNOCENT NAME (three frames from the cause). That is
+what "FAIL unbound: ekeys" was.
+
+The fix is form-trace.scm's parameter-aware pass, ported here: pass 1 records
+which parameters of which helper are compared numerically, pass 2 marks a gsubr
+passed at one of those positions. Same two traps as in form-trace, both hit
+again: the position walk needs `(list? (cdr x))` because (hl-layout-add! name .
+spec) is a real dotted signature and (length '(name . spec)) raises, and
+`make-stack #t` is depth-LESS here because (make-stack #t 40) answers #f.
+
+Result: doc-exercise goes from FAIL to green, and its note count drops 74 -> 71 —
+the three spurious (= 0 #f) notes were pre-existing, in blocks that had nothing to
+do with modes.
+
+== #:follow on a workspace move, and an audit for other dropped flags ==
+
+Chris's test instances kept appearing on screen after he added the rule I
+suggested. The rule was not the problem — it worked. THE SPECIAL WORKSPACE WAS
+BEING DISPLAYED.
+
+`ConfigActions.cpp:423` in `Actions::moveToWorkspace`: only the NON-silent branch
+runs `pMonitor->setSpecialWorkspace(ws)`, which shows that special workspace as an
+overlay. So "move the test instances to special:test" moved them AND put
+special:test in front of him — the exact opposite of out of the way. Measured
+three ways in a nested compositor, with a window made by `foot -a aquamarine`:
+
+  window rule -> special:test    window there, workspace SHOWN   (hyprctl monitors: specialworkspace: special:test)
+  window rule -> name:zzz-test   window there, hidden            (specialworkspace: ())
+  callback + #:silent            window there, hidden
+
+- `cpp/Window.cpp:376` hard-coded `moveToWorkspace(ws, FALSE, w)`. The compositor
+  supports the silent move, the scripting API exposes it, and we chose for the
+  caller IN C++ — which is what THE BOUNDARY forbids. Now a parameter.
+- The public spelling is `#:follow` (default #t), NOT `#:silent`, because that is
+  what the scripting API calls it: LuaBindingsDispatchers.cpp:840 computes
+  `bool silent = follow.has_value() && !*follow`. The gsubr keeps the C++ unit
+  (`silent`); the negation is a conversion and lives in Scheme, where conversions
+  and policy belong.
+- `hl-window-monitor-set!` (extras) takes `#:follow` too — the scripting API's
+  move takes it for a monitor target as well.
+
+AN AUDIT FOR THE SAME MISTAKE ELSEWHERE, and it is the kind that decays silently:
+every `Actions::` call site in cpp/ (57 of them) was compared against its C++
+signature. Five take a parameter beyond the window —
+cycleNext(next,tiled,floating), fullscreenWindow(mode,clientMode,layoutAware),
+resize(size,relative), changeGroupActive(forward), moveGroupWindow(forward) —
+and ALL FIVE already pass theirs. `moveToWorkspace`'s `silent` was the only one
+dropped. Also checked: `Workspace::state()->create(target, mon, false)` is a
+deliberate isEmpty=false (an empty-flagged workspace gets swept before the window
+lands in it), and `setSpecialWorkspace(ws, true)` matches what the scripting API
+passes. So the audit is now zero-gap, which is worth stating because nothing
+would have told us otherwise.
+
+TESTED, and verified to fail: t-api.sh pins BOTH directions — the default SHOWS
+the special workspace (unchanged behaviour) and `#:follow #f` does not — plus
+that the window really moved (not-following is not doing nothing). Asserted
+through the MONITOR's own view, because the call answers #t either way and a
+return-value test cannot see this. Verified to fail by making the wrapper accept
+`#:follow` and ignore it: the silent assertion fails, naming the call. The
+BOTH-DIRECTIONS part is deliberate — a test of the silent half alone would still
+pass if every move had silently become silent.
+
+Docs: dispatchers.md's two move rows gained the option, and the special-workspace
+table now says to use `#:follow #f` there and why.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

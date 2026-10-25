@@ -15,6 +15,7 @@
            hl-notification-text-set! hl-notification-timeout-set!
            hl-notification-color-set! hl-notification-icon-set!
            hl-notification-font-size-set! hl-notification-paused?
+           hl-notification-paused-set!
            hl-notification-dismiss! hl-notification-remove!
            hl-notification-active?))
 
@@ -152,6 +153,22 @@
 (define (hl-notification-paused? n)
   "#t when the notification is paused (its timeout timer frozen)."
   (eq? (hl--c-notification-paused-q n) #t))
+
+(define* (hl-notification-paused-set! n #:key (on? 'unset))
+  "Pause or resume the notification's timeout timer: absent #:on? toggles,
+#t/#f set. A paused notification stays on screen until dismissed, which is
+what makes it usable as a pin.
+
+IT LIVES HERE, NOT IN (hyprscheme extras): it reaches the compositor through
+hl--c-notification-paused-set and otherwise calls only this module's own
+hl-notification-paused?. See hl-rule-enabled-set! in rule.scm for the full
+note — whatever reaches Hyprland C or C++ belongs to the family that owns the
+object, and extras is for things built on top of the families."
+  (= 0 (hl--c-notification-paused-set
+         n
+         (if (eq? on? 'unset)
+             (not (eq? (hl-notification-paused? n) #t))
+             (eq? on? #t)))))
 
 (define (hl-notification-dismiss! n)
   "Dismiss the notification."

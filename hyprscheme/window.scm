@@ -119,9 +119,26 @@
   "Float or unfloat WINDOW: absent #:on? toggles, #t floats, #f tiles."
   (= 0 (hl--c-window-float-act w (hl--bool-act on?))))
 
-(define (hl-window-workspace-set! w ws)
-  "Move the window to workspace WS."
-  (= 0 (hl--c-window-move-to-workspace w (hl--ws-arg ws))))
+(define* (hl-window-workspace-set! w ws #:key (follow #t))
+  "Move the window to workspace WS. WS is the workspace selector: a handle, a
+name/number, or a relative form (\"+1\", \"name:web\", \"special:scratchpad\").
+
+#:follow #f moves the window and LEAVES THE VIEW WHERE IT IS — no monitor
+refocus, no workspace change, no cursor warp. It is the option the scripting API
+spells `follow` too, and its default is that API's: #t, follow the window.
+
+THE SPECIAL CASE IS THE WHOLE POINT. For an ordinary workspace the two look
+alike; for a SPECIAL one only the non-silent path calls setSpecialWorkspace,
+which DISPLAYS that workspace as an overlay on top of everything. So a rule or
+callback meant to get a window OUT of the way with the default puts it in FRONT
+of you instead:
+
+  (hl-window-workspace-set! w \"special:test\" #:follow #f)   ; out of sight
+
+(The C++ parameter underneath is `silent`, and Hyprland's own dispatcher is
+`movetoworkspacesilent` — this API speaks the scripting layer's spelling and
+negates it here, which is where a conversion belongs.)"
+  (= 0 (hl--c-window-move-to-workspace w (hl--ws-arg ws) (if follow #f #t))))
 
 (define* (hl-window-move! #:optional w #:key (direction 'right))
   "Move WINDOW in DIRECTION, a direction-enum: 'up, 'right, 'down or 'left.

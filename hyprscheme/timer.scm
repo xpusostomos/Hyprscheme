@@ -7,8 +7,8 @@
 
 (define-module (hyprscheme timer)
   #:export (
-           hl-timer? hl-timer-enabled? hl-timer-set-timeout!
-           hl-timer-cancel!))
+           hl-timer? hl-timer-enabled? hl-timer-enabled-set!
+           hl-timer-set-timeout! hl-timer-cancel!))
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
@@ -24,6 +24,21 @@
 (define (hl-timer-enabled? t)
   "#t when the timer T is enabled."
   (= 1 (hl--c-timer-enabled t)))
+
+(define* (hl-timer-enabled-set! t #:key (on? 'unset))
+  "Enable, disable or toggle the timer T: absent #:on? toggles, #t/#f set.
+
+IT LIVES HERE, NOT IN (hyprscheme extras): it reaches the compositor through
+hl--c-timer-set-enabled and otherwise calls only this module's own
+hl-timer-enabled?. See hl-rule-enabled-set! in rule.scm for the full note — the
+rule is that whatever reaches Hyprland C or C++ belongs to the family that owns
+the object, and extras is for things built on top of the families."
+  (if (= 0 (hl--c-timer-set-enabled t
+                                   (if (eq? on? 'unset)
+                                       (not (hl-timer-enabled? t))
+                                       on?)))
+      #t
+      (error "hl-timer-enabled-set!: unknown timer")))
 
 (define (hl-timer-set-timeout! t ms)
   "Re-tune the timer T's timeout to MS (>= 1)."

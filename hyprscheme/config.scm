@@ -7,6 +7,7 @@
 
 (define-module (hyprscheme config)
   #:export (
+           refresh-enum hl-refresh
            hl-config-reload! hl-config-add! hl-config-get hl-device-add!
            hl-bezier-curve-add! hl-spring-curve-add! hl-animation-add!
            hl-permission-add!
@@ -16,6 +17,10 @@
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
+;; enums is a LEAF — it imports the kernel and defines no enum of its own — so a
+;; family importing it is leaf-to-leaf, not a family reaching into a family.
+;; Needed for refresh-enum and enum-value, below.
+(use-modules (hyprscheme enums))
 
 (use-modules (ice-9 exceptions)
              (rnrs io ports)
@@ -26,6 +31,94 @@
 (define (hl-config-reload! )
   "Reload the configuration, like hyprctl reload."
   (= 0 (hl--c-reload-config)))
+
+;; ---- the deferred refresh pass: which bits, and running it now ----------------
+;;
+;; THE COMPOSITOR'S OWN SET OF REFRESH BITS, copied line for line from
+;; Config/supplementary/propRefresher/PropRefresher.hpp — same names (modulo the
+;; case a symbol forces), SAME ORDER, and the same (ash 1 N) rather than a
+;; decimal, so the two columns can be diffed by eye. A number like 16 tells you
+;; nothing; (ash 1 4) sits next to the header's (1 << 4).
+;;
+;; IT LIVES HERE, not in (hyprscheme core), because ONE family uses it —
+;; hl-refresh, below. core's bind-flag-enum is in core for its own reason
+;; (hl--bind-flag-mask is core's own data); the placement rule is "used by one
+;; family -> that family", and this set is config's.
+;;
+;; THE TWO COMPOSITES ARE WRITTEN AS THE HEADER WRITES THEM, and they are not
+;; decoration: REFRESH_WINDOW_STATES is (1<<5) | REFRESH_RULES, so asking for
+;; "window-states" gets you the rules pass too. Flattening them to bare numbers
+;; would hide exactly the thing that makes them worth having, which is that
+;; re-decorating windows is a superset of re-applying rules.
+;;
+;; THERE IS DELIBERATELY NO `all`. The header has REFRESH_ALL =
+;; numeric_limits<uint16_t>::max() = #xffff — every bit, including the ones with
+;; no meaning — which is a different thing from the union of the named bits.
+;; Exposing it under a name that reads like "all the ones listed" would be a
+;; trap; a caller who wants everything can name what they want.
+(define-enum-values refresh-enum
+  `((layouts            . ,(ash 1 0))       ; recalculate + damage every monitor
+    (input-devices      . ,(ash 1 1))       ; keyboard layout, pointer/touch/tablet
+    (screen-shader      . ,(ash 1 2))       ; reload the screen shader
+    (blur-fb            . ,(ash 1 3))       ; rebuild the blur framebuffers
+    (rules              . ,(ash 1 4))       ; re-apply the rule engine
+    (window-states      . ,(logior (ash 1 5) (ash 1 4)))       ; | REFRESH_RULES
+    (monitor-states     . ,(logior (ash 1 6) (ash 1 0)))       ; | REFRESH_LAYOUTS
+    (cursor-zooms       . ,(ash 1 7))
+    (config-watcher     . ,(ash 1 8))
+    (gradients-groupbar . ,(ash 1 9))))
+
+(define* (hl-refresh #:key (layouts #f) (input-devices #f) (screen-shader #f)
+                     (blur-fb #f) (rules #f) (window-states #f)
+                     (monitor-states #f) (cursor-zooms #f)
+                     (config-watcher #f) (gradients-groupbar #f)
+                     (immediately #f))
+  "Ask the compositor to re-do some of its config-derived work, and optionally
+run that pass NOW instead of on the next event-loop tick.
+
+  (hl-refresh #:rules #t)                              ; re-apply rules
+  (hl-refresh #:window-states #t #:immediately #t)     ; …and re-decorate the
+                                                       ;    windows, straight away
+
+Each option is one bit of the compositor's own refresh set (see refresh-enum
+for what each one re-does); any combination is accepted, and the composites
+carry their parts — #:window-states implies #:rules, exactly as the C++ does.
+COMBINED WITH logior, never +: two options naming the same bit would otherwise
+accumulate into the NEXT bit, which is a mistake this tree has already paid for
+once (click and drag both imply release, and `+` turned `(hl-bind-add! … #:click
+#t #:release #t)` into an armed autorepeat).
+
+NO OPTIONS AT ALL PASSES 0 THROUGH, which the compositor accepts: it arms a tick
+that trips no bits, and the pass runs and does nothing. That mirrors the C++
+rather than inventing a guard for it.
+
+#:immediately #f (the default) is the compositor's own behaviour — the pass is
+DEFERRED, which is what you want when several changes are about to be made, since
+the bits accumulate and the pass runs once. #:immediately #t cancels the pending
+tick and runs the pass synchronously, which is what you want when the next thing
+you do depends on the result. It answers #t when the pass ran, #f when there was
+nothing pending to run."
+  ;; logior over the chosen bits, each fetched through enum-value so a name that
+  ;; is not in the set is an error naming the set rather than a wrong number.
+  (let ((bits (logior (if layouts            (enum-value refresh-enum 'layouts)            0)
+                      (if input-devices      (enum-value refresh-enum 'input-devices)      0)
+                      (if screen-shader      (enum-value refresh-enum 'screen-shader)      0)
+                      (if blur-fb            (enum-value refresh-enum 'blur-fb)            0)
+                      (if rules              (enum-value refresh-enum 'rules)              0)
+                      (if window-states      (enum-value refresh-enum 'window-states)      0)
+                      (if monitor-states     (enum-value refresh-enum 'monitor-states)     0)
+                      (if cursor-zooms       (enum-value refresh-enum 'cursor-zooms)       0)
+                      (if config-watcher     (enum-value refresh-enum 'config-watcher)     0)
+                      (if gradients-groupbar (enum-value refresh-enum 'gradients-groupbar) 0))))
+    (if (= 0 (hl--c-schedule-refresh bits))
+        ;; the flush is the GSUBRS's, not (hyprscheme exec)'s — a family may not
+        ;; import another family, and hl-exec-scheduled-prop-refresh-immediately!
+        ;; lives there. Calling the entry point directly is the same call that
+        ;; wrapper makes, and the only other name it needs is the kernel's.
+        (if immediately
+            (= 0 (hl--c-scheduled-prop-refresh-immediately))
+            #t)
+        (error "hl-refresh: the compositor rejected the refresh" bits))))
 
 (define (hl-config-add! key val)
   "Set the config option KEY to VAL. KEY is the compositor's own config

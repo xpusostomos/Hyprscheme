@@ -161,4 +161,44 @@ ok  '(equal? (enum-set->list (enum-values->enum bind-flag-enum))
 val '(length (enum-set->list (enum-values->enum bind-flag-enum)))' '16'
 err '(enum-value bind-flag-enum (quote sideways))' "not a value of this enum"
 
+# ---- an enum used by ONE family, so it lives in that family ------------------
+# refresh-enum belongs to (hyprscheme config): hl-refresh is the only thing that
+# speaks it, and the ENUMS placement rule is "used by one family -> that family"
+# (a set more than one family needs goes to (hyprscheme values); core's
+# bind-flag-enum is in core because hl--bind-flag-mask is core's own data).
+#
+# Pinned against PropRefresher.hpp's OWN shifts, in the header's order, because
+# a table shifted by one would still be a perfectly coherent enum and would make
+# every option re-do its neighbour's work — silently, since this is a bitset and
+# any integer "works".
+val '(enum-value refresh-enum (quote layouts))'            '1'
+val '(enum-value refresh-enum (quote input-devices))'      '2'
+val '(enum-value refresh-enum (quote screen-shader))'      '4'
+val '(enum-value refresh-enum (quote blur-fb))'            '8'
+val '(enum-value refresh-enum (quote rules))'              '16'
+val '(enum-value refresh-enum (quote cursor-zooms))'       '128'
+val '(enum-value refresh-enum (quote config-watcher))'     '256'
+val '(enum-value refresh-enum (quote gradients-groupbar))' '512'
+
+# THE TWO COMPOSITES, and these are the assertions worth having: the header
+# defines REFRESH_WINDOW_STATES as `(1 << 5) | REFRESH_RULES` and
+# REFRESH_MONITOR_STATES as `(1 << 6) | REFRESH_LAYOUTS` — so asking for one of
+# them gets its parts as well. Flatten either to the bare bit and a mode that
+# asks to re-decorate the windows stops re-applying the rules first, which is the
+# half that makes the colours appear at all.
+val '(enum-value refresh-enum (quote window-states))'  '48'    # 32 | 16, i.e. (1<<5) | rules
+val '(enum-value refresh-enum (quote monitor-states))' '65'    # 64 |  1, i.e. (1<<6) | layouts
+
+# the declaration ORDER, read through enum-values->enum so this is the public route
+ok  '(equal? (enum-set->list (enum-values->enum refresh-enum))
+             (quote (layouts input-devices screen-shader blur-fb rules
+                     window-states monitor-states cursor-zooms
+                     config-watcher gradients-groupbar)))'
+# ten names, and NO `all`: the header's REFRESH_ALL is uint16 max (#xffff), so it
+# is every bit INCLUDING the meaningless ones — a different thing from the union
+# of the named bits, and not something to expose under a name that reads like
+# "all the ones listed".
+val '(length (enum-set->list (enum-values->enum refresh-enum)))' '10'
+err '(enum-value refresh-enum (quote sideways))' "not a value of this enum"
+
 exit $FAILED

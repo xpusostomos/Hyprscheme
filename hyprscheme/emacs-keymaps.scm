@@ -20,17 +20,33 @@
             hl-kbd hl-key define-key! global-set-key! global-map
             define-keymap
             hl-keymap-attach-to-tag! hl-keymap-attach-to-window-condition!
-            hl-keymaps-recheck!))
+            hl-keymaps-recheck!
+            hl-mode? make-mode define-mode
+            mode-active? mode-active-set! mode-active-toggle!
+            mode-name mode-color mode-file
+            hl--mode-rule))
 
 (use-modules (hyprscheme kernel))
 (use-modules (hyprscheme core))
 (use-modules (hyprscheme bind))
 ;; the third family this composer reaches: hl-keymap-attach-to-tag! reads the
-;; focused window's tags, and both of those are (hyprscheme window)'s.
+;; focused window's tags, and both of those are (hyprscheme window)'s. The mode
+;; facility needs it too — hl-window-rule-add! creates each mode's border-colour
+;; rule.
 (use-modules (hyprscheme window))
+;; and rule.scm, for hl-rule-enabled-set! — the switch that arms a mode's colour.
+(use-modules (hyprscheme rule))
+;; config.scm, for hl-refresh: turning a rule on or off does NOT repaint by
+;; itself (setEnabled only flips a flag), so a mode change asks for a
+;; window-states refresh. See the note in hl--modes-apply-colors!.
+(use-modules (hyprscheme config))
 
 ;; the same standard library the parser had in (hyprscheme core): string-index
-;; comes from (guile), remove/every from srfi-1, string-join from srfi-13
+;; comes from (guile), remove/every from srfi-1, string-join and string-pad from
+;; srfi-13. (ice-9 exceptions) is for `guard` — this module had never needed it,
+;; because nothing here called anything that could fail: a keymap arm is a flag.
+;; The mode facility does (a file write, a notification), so it does.
+(use-modules (ice-9 exceptions))
 (use-modules (srfi srfi-1)
              (srfi srfi-13))
 
@@ -293,6 +309,21 @@ it — unlike hl-kbd, a shifted character is not expanded."
 ;; above `reset`, so that the `set!`s below are not forward references; `reset`
 ;; is the only other writer.
 (define hl--window-conditions '())   ; ((keymap . condition) ...)
+;; (name . mode) pairs, in REGISTRATION ORDER, which is the order they were
+;; defined in and the order the colour walk uses.
+;;
+;; DECLARED HERE, above `reset`, which clears it — not down with the rest of the
+;; facility. A module-level variable referenced by `reset` has to be defined
+;; before the sweep runs, and keeping the definition physically above the
+;; function that empties it is what stops the next reader wondering whether the
+;; reference is a forward one.
+;;
+;; MODULE-LEVEL STATE, so it must be cleared by `reset` — this file is loaded
+;; once per process and the modes in it belong to the config generation that
+;; built them. A mode left in this list would keep its rule armed on the next
+;; generation, pointing at a callback from a config that no longer exists.
+(define hl--modes '())
+
 (define hl--condition-listener #f)   ; the window.active subscription, or #f
 
 ;; Called ONCE PER GENERATION by init.scm (see the note there). This file is
@@ -317,7 +348,15 @@ it — unlike hl-kbd, a shifted character is not expanded."
   ;; was installed, never install another one, and leave the registry frozen at
   ;; whatever the first focus change made it. The opposite answer to the GC
   ;; hook, which is installed once for the process and must NOT be reinstalled.
-  (set! hl--condition-listener #f))
+  (set! hl--condition-listener #f)
+  ;; THE MODE LIST GOES with them, and leaving it would be worse than either of
+  ;; the two above: a mode holds a CALLBACK from a config generation that is
+  ;; gone, and a rule handle the host has already discarded. A stale entry kept
+  ;; here would make hl--modes-apply-colors! arm a rule belonging to a dead
+  ;; generation, and the mode's state file would still be on disk claiming it was
+  ;; on. The config re-creates its modes every generation, so clearing is
+  ;; complete — nothing is lost, because nothing here belongs to the machinery.
+  (set! hl--modes '()))
 
 (define (hl--keymap! who km)
   "Refuse anything that is not a keymap, naming WHO and the value it was handed.
@@ -740,3 +779,267 @@ Returns KEYMAP, so the call can sit in a definition that also reads well."
     (hl-keymap-attach-to-window-condition!
       keymap
       (lambda (w) (and w (if (member name (hl-window-tags w)) #t #f))))))
+
+;; ---- modes: a named flag with a look, a file, and two hooks -------------------
+;;
+;; A MODE is a flag the user turns on and off — ekeys, nkeys, mark — with three
+;; things hung off it: what it DOES, what it LOOKS like, and how it PERSISTS.
+;; That is the whole abstraction, and it is here because a mode change is nearly
+;; always also a KEYMAP change: a condition that reads a mode flag has to be
+;; re-evaluated when the flag moves, so a mode change calls hl-keymaps-recheck!
+;; itself rather than leaving every config to remember. That is the argument for
+;; this living in emacs-keymaps rather than in the config or in extras.
+;;
+;; WHY A RECORD AND NOT A SET! FLAG. A bare variable can be read anywhere, but
+;; nothing happens when it changes: the config has to remember the state file,
+;; the recheck, the colour and the callback, every time, for every mode. Three
+;; modes meant that machinery written out three times, and the third copy always
+;; forgets something. Here there is ONE place that knows what "a mode changed"
+;; means.
+;;
+;; THE HOOKS TAKE THE MODE. (lambda (m) ...) rather than a thunk, so one function
+;; can serve several modes and read its own name and colour out of the argument
+;; instead of closing over them. That is what makes (define-mode …) read as data.
+;;
+;; NOTHING HERE NOTIFIES, COLORS OR WRITES BY ITSELF UNLESS ASKED. The record
+;; says what should happen; mode-active-set! is the one function that makes it
+;; happen, and it is the ONLY writer of the state — the same discipline
+;; hl-keymap-enable!/disable! keep for a keymap's flag, and for the same reason:
+;; a flag and its effects cannot then disagree.
+
+;; THE STATE DIRECTORY. Per the XDG spec an unset, empty or RELATIVE
+;; XDG_STATE_HOME is invalid and ignored, and the default is ~/.local/state —
+;; the same rule the machinery's own config search applies to XDG_CONFIG_HOME.
+;; NOT under omarchy/ (where the config this replaced kept its indicator files):
+;; that directory belongs to another program, and a mode file is hyprscheme's.
+(define (hl--state-dir)
+  (let ((xdg (getenv "XDG_STATE_HOME")))
+    (string-append (if (and xdg (not (string-null? xdg)) (string-prefix? "/" xdg))
+                       xdg
+                       (string-append (or (getenv "HOME") "") "/.local/state"))
+                   "/hyprscheme")))
+
+;; (name . mode) pairs, in REGISTRATION ORDER — see the declaration above
+;; `reset`, which is where the variable lives.
+
+(define hl-mode-rtd (make-record-type 'hl-mode
+                                      '(name active activate deactivate
+                                        color file notify rule)))
+
+(define hl-mode? (record-predicate hl-mode-rtd))
+(define hl--mode-name (record-accessor hl-mode-rtd 'name))
+(define hl--mode-active (record-accessor hl-mode-rtd 'active))
+(define hl--mode-active-set! (record-modifier hl-mode-rtd 'active))
+(define hl--mode-activate (record-accessor hl-mode-rtd 'activate))
+(define hl--mode-deactivate (record-accessor hl-mode-rtd 'deactivate))
+(define hl--mode-color (record-accessor hl-mode-rtd 'color))
+(define hl--mode-file (record-accessor hl-mode-rtd 'file))
+(define hl--mode-notify (record-accessor hl-mode-rtd 'notify))
+(define hl--mode-rule (record-accessor hl-mode-rtd 'rule))
+
+(define (mode-name m) "The mode's name, a string." (hl--mode-name m))
+(define (mode-color m) "The mode's colour, a 0xAARRGGBB integer, or #f."
+  (hl--mode-color m))
+(define (mode-file m) "The mode's state file: the path, which EXISTS exactly
+while the mode is on. Its contents are the mode's colour in hex, so a status bar
+can read the mode's colour as well as its state from one place."
+  (hl--mode-file m))
+
+(define (mode-active? m) "Is mode M on right now? Reads the mode's own flag,
+not the compositor — it is what the mode was last TOLD."
+  (unless (hl-mode? m) (error "mode-active?: not a mode, got:" m))
+  (hl--mode-active m))
+
+(define (hl--color-hex c)
+  "C as eight hex digits, zero-padded — the digits only, no prefix.
+
+BY HAND rather than (format #f \"~8,'0x\" c), because the padding directive is
+an (ice-9 format) EXTENSION: plain `format` does not have `~8` and answers the
+literal text back, which is how this first went wrong — compile-lint names it
+(\"unsupported format option ~8\"). string-pad is srfi-13, already imported here."
+  (string-pad (number->string c 16) 8 #\0))
+
+;; THE COLOUR, AS THE COMPOSITOR WANTS IT. A mode's colour is a 0xAARRGGBB
+;; integer, like every other colour in this API (see COLOURS in CLAUDE.md), but
+;; a rule's #:border-color takes the CONFIG-FILE spelling, and the two orderings
+;; are the trap: the integer is alpha-first, "#rrggbbaa" is RGB-first. Writing
+;; \"0xAARRGGBB\" is the spelling parseColor reads as alpha-first — the SAME
+;; convention the integer is already in — so nothing has to be reordered here.
+(define (hl--color->rule-string c)
+  (string-append "0x" (hl--color-hex c)))
+
+(define* (make-mode name #:key (activate #f) (deactivate #f) (color #f) (notify #t))
+  "Build a mode called NAME and register it. Returns the mode.
+
+  (define ekeys (make-mode \"ekeys\"
+                  #:activate   (lambda (m) (hl-notify! (mode-name m) 1500))
+                  #:deactivate (lambda (m) #t)
+                  #:color      #xffffa500))
+
+NAME is a string or symbol and becomes the mode's name AND its state file's
+basename. #:activate and #:deactivate are called with the MODE as their only
+argument, so one lambda can serve several modes. #:color is a 0xAARRGGBB integer
+(colours are numbers everywhere in this API) or #f for a mode with no look.
+
+A MODE IS BORN OFF. Arming one at definition time would turn a mode on as a side
+effect of the config being READ, which is the same trap hl-make-keymap avoids —
+and the reason define-keymap's keymaps are born disabled too.
+
+#:notify says whether turning the mode on and off pops a notification, and
+defaults to #t because a mode with no visible effect is a mode you cannot tell is
+on. It is a MODE'S OWN notification — the name, in the mode's colour — so a mode
+that wants a sentence of its own sets #:notify #f and notifies from its
+#:activate.
+
+Modes may evict each other (ekeys and nkeys are mutually exclusive in the config
+this replaced). THAT IS NOT DECLARED HERE, deliberately: it is an #:activate
+hook's business, because what \"evict\" means is a policy the config owns —
+(set-nkeys-mode #f) is one line inside ekeys' activate, and a facility that had
+a #:exclusive-with field would be inventing a shape for something a lambda
+already says."
+  (let* ((nm (hl--str name))
+         ;; A NAME IS HALF THE INTERFACE — it is the mode's state file and the
+         ;; word a notification shows — so it is checked here rather than left to
+         ;; become a file path. hl--str passes anything that is not a symbol or a
+         ;; number through UNCHANGED, so a list or a #f would otherwise reach
+         ;; string-append and fail somewhere further away.
+         (_ (unless (and (string? nm) (> (string-length nm) 0))
+              (error "make-mode: name must be a non-empty string or symbol, got:" name)))
+         (file (string-append (hl--state-dir) "/" nm))
+         ;; THE RULE IS MADE HERE AND BORN DISABLED, so the mode has its colour
+         ;; rule in hand from the start and turning the mode on is one enable.
+         ;;
+         ;; #:match (focus . #t) IS THE WHOLE MECHANISM of "colour the window
+         ;; that has focus": `focus` is a real rule property (RULE_PROP_FOCUS)
+         ;; and the compositor's border-colour application treats a focus match
+         ;; specially — its colour goes to the ACTIVE border, and the rule stops
+         ;; matching the moment focus moves. So the colour needs no focus
+         ;; listener and no clearing: Window.cpp's focus path re-runs
+         ;; propertiesChanged, which re-evaluates this rule, and the window that
+         ;; lost focus simply does not match any more.
+         (rule (and color
+                    (hl-window-rule-add! #f
+                                         #:match (list 'focus #t)
+                                         #:border-color (hl--color->rule-string color)
+                                         #:enabled #f)))
+         (m (make-struct/no-tail hl-mode-rtd nm #f activate deactivate
+                                 color file notify rule)))
+    (set! hl--modes (append hl--modes (list (cons nm m))))
+    m))
+
+(define-syntax define-mode
+  (syntax-rules ()
+    ((_ name opts ...)
+     (define name (make-mode 'name opts ...)))))
+
+;; Which mode's colour should be showing, given the whole list. FIRST
+;; REGISTERED WINS, which is the precedence rule the design settled on: the walk
+;; is in registration order, so a config puts the mode that should take priority
+;; first. Disabling every other rule is what makes "first" mean anything —
+;; without it the compositor would have several enabled rules writing the same
+;; border and the winner would be whichever the engine applied last, which is not
+;; an order this side controls.
+(define (hl--modes-apply-colors!)
+  (let ((winner (find (lambda (m) (and (hl--mode-active m)
+                                       (hl--mode-rule m)))
+                      (map cdr hl--modes))))
+    (for-each
+      (lambda (entry)
+        (let ((m (cdr entry)))
+          (when (hl--mode-rule m)
+            (hl-rule-enabled-set! (hl--mode-rule m)
+                                  #:on? (and winner (eq? m winner))))))
+      hl--modes)
+    ;; A RULE FLIP DOES NOT REPAINT BY ITSELF — IRule::setEnabled only sets a
+    ;; flag — so the change is made visible here, the same pair of calls a config
+    ;; would otherwise have to write: arm the rule, then ask for the pass that
+    ;; re-evaluates it.
+    ;;
+    ;; ALWAYS, not only when a mode won. `(when winner …)` was the first version
+    ;; and it was wrong in the one case that matters most: turning the LAST mode
+    ;; off leaves no winner, so nothing refreshed, so the rule was disabled and
+    ;; the colour stayed on screen until something else happened to repaint. It
+    ;; is the same mistake as hl-rule-enabled-set! without a refresh, one branch
+    ;; further in.
+    ;;
+    ;; #:window-states rather than #:rules: the composite is (1<<5)|REFRESH_RULES,
+    ;; and the 1<<5 half is what uncaches and redraws every window's decorations.
+    ;; #:rules alone would re-apply the rules and leave the borders as they were.
+    ;;
+    ;; #:immediately because the caller is about to look at the screen — a mode
+    ;; key was just pressed — and a deferred pass would show the colour on the
+    ;; next event loop tick instead.
+    (hl-refresh #:window-states #t #:immediately #t)
+    #t))
+
+(define (hl--mkdir-p dir)
+  "Create DIR and any missing parents. Guile's mkdir makes ONE level and
+raises unless the parent already exists, so a fresh XDG_STATE_HOME (which is
+what the test harness has, and what a new user has) needs the walk. Answers #t
+when the directory is there afterwards, #f when it could not be made."
+  (cond ((file-exists? dir) #t)
+        ((string=? dir "/") #t)
+        (else (and (hl--mkdir-p (dirname dir))
+                   (catch #t (lambda () (mkdir dir) #t) (lambda _ #f))))))
+
+(define (hl--mode-file-write! m on)
+  "Put the mode's state on disk: the file exists exactly while the mode is on,
+and holds the mode's colour in hex — the natural Scheme spelling of the integer,
+#x prefix and all — so a status bar reading the file knows the mode's colour as
+well as its state. A mode with no colour gets an empty file, which is the same
+thing minus the colour."
+  (let ((file (hl--mode-file m)))
+    (guard (e (#t #f))
+      (if on
+          (begin
+            (hl--mkdir-p (hl--state-dir))
+            (call-with-output-file file
+              (lambda (p)
+                (let ((c (hl--mode-color m)))
+                  (when c (display (string-append "#x" (hl--color-hex c)) p))))))
+          (when (file-exists? file) (delete-file file))))))
+
+(define* (mode-active-set! m on #:key (refresh #t))
+  "Turn mode M on or off. Returns #t.
+
+This is the ONLY writer of a mode's state, and it does everything a mode change
+means, in one place:
+
+  1. set the flag,
+  2. run #:activate or #:deactivate with the mode,
+  3. write or remove the state file,
+  4. notify, when the mode asked for it,
+  5. re-arm the colours (first registered mode with a colour wins), and
+  6. hl-keymaps-recheck! — because a keymap condition that reads this mode is
+     now stale, and NOTHING ELSE will notice: a condition is evaluated when the
+     focused window changes and at no other time.
+
+Doing these separately is what the config this replaced did, three times over,
+and the recheck is the one that gets forgotten — the mode then looks on and the
+keys do not follow until you change window.
+
+Answers #t. Setting a mode to the state it is already in still runs the hooks,
+deliberately: a mode's #:activate is where a config puts \"and do this too\", and
+making it idempotent silently would make (mode-active-set! m #t) mean two
+different things depending on history."
+  (unless (hl-mode? m) (error "mode-active-set!: not a mode, got:" m))
+  (let ((on (if on #t #f)))
+    (hl--mode-active-set! m on)
+    (let ((hook (if on (hl--mode-activate m) (hl--mode-deactivate m))))
+      (when hook (hook m)))
+    (hl--mode-file-write! m on)
+    (when (hl--mode-notify m)
+      (guard (e (#t #f))
+        (hl--c-notification-add
+          (list 'text (format #f "~a ~a" (hl--mode-name m) (if on "on" "off"))
+                'timeout (if on 1500 1000)
+                'icon "info"
+                'color (or (hl--mode-color m) #xFFFFFFFF)))))
+    (hl--modes-apply-colors!)
+    (hl-keymaps-recheck!)
+    #t))
+
+(define (mode-active-toggle! m)
+  "Flip mode M: on if it is off, off if it is on. Returns what mode-active-set!
+  would — #t."
+  (mode-active-set! m (not (mode-active? m))))

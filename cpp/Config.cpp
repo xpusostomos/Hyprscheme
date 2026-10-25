@@ -144,6 +144,30 @@ namespace Config::Scheme {
         return scm_from_utf8_stringn(g_configError.c_str(), g_configError.size());
     }
 
+    // Arm the prop refresher with an explicit set of refresh bits. A thin
+    // mirror of scheduleRefresh(), which the line above already calls with the
+    // bits a config value asks for — this is the same call with the bits the
+    // CALLER chooses.
+    //
+    // IT ONLY SCHEDULES. The pass runs on the event loop's next tick, which is
+    // what the compositor wants for a batch of config changes; (hl-refresh …
+    // #:immediately #t) flushes it through the already-existing
+    // hl--c-scheduled-prop-refresh-immediately, which CANCELS the pending tick
+    // and runs the pass synchronously. Both halves are needed in that order:
+    // the flush returns early when nothing is scheduled, so it cannot create a
+    // refresh, only drain one.
+    //
+    // 0 IS PASSED THROUGH, deliberately. It arms a tick that trips no bits —
+    // the pass runs and does nothing but emit props_refreshed — and that is
+    // exactly what the compositor does with it, so refusing it here would be
+    // inventing a policy the C++ does not have.
+    static int hlSchemeScheduleRefresh(int bits) {
+        if (!g_up)
+            return -1;
+        Supplementary::refresher()->scheduleRefresh(static_cast<Supplementary::PropRefreshBits>(bits));
+        return 0;
+    }
+
     // mirrored from DEVICE_FIELDS (LuaBindingsConfigRules.cpp)
     enum class eDeviceKind : uint8_t { BOOL, INT, FLOAT, STRING, VEC2 };
 
@@ -738,6 +762,7 @@ namespace Config::Scheme {
         hl::bind<hlConfigSet>("hl--c-config-set");
         hl::bind<hlConfigLastError>("hl--c-config-last-error");
         hl::bind<hlConfigGet>("hl--c-config-get");
+        hl::bind<hlSchemeScheduleRefresh>("hl--c-schedule-refresh");
         hl::bind<hlSchemeDeviceAdd>("hl--c-device-add");
         hl::bind<hlMonitorBegin>("hl--c-monitor-begin");
         hl::bind<hlMonitorFieldStr>("hl--c-monitor-field-str");

@@ -38,6 +38,7 @@
            hl--c-config-set hl--c-config-tbl-key hl--c-config-tbl-open
            hl--c-config-tbl-set-hash hl--c-config-tbl-seti
            hl--c-config-unload-listen hl--c-current-submap
+           hl--c-schedule-refresh
            hl--c-cursor-corner hl--c-cursor-move hl--c-cursor-pos
            hl--c-bezier-curve-add hl--c-device-add hl--c-dpms hl--c-enter-submap
            hl--c-event hl--c-event-active hl--c-event-cancel hl--c-exec!

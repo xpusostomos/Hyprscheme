@@ -135,51 +135,135 @@ test, not symbol equality: every gsubr shares a prefix, not an identity."
 
 (define (status-gsubrs files)
   "The gsubrs that answer a STATUS CODE rather than a value — see the note above
-gsubr-symbol? for why that matters. THE COMPARISON IS OFTEN THROUGH A VARIABLE,
-so this looks for both shapes: (= 0 (hl--c-x ...)) directly, and (= 0 v) where v
-was bound to a gsubr call. Matching only the direct shape misses hl--c-bind."
-  ;; PER FILE, deliberately — the three tables are reset for each file rather
-  ;; than accumulated across all of them. A variable name is local to the form
-  ;; that binds it, and the same name is reused in unrelated files: `rc` is used
-  ;; in bind.scm for the bind call AND in several other modules for something
-  ;; else. Joined file-wide, the later binding wins and the gsubr we were
-  ;; actually after is lost. Both `by-var` and `cmp-var` therefore live inside
-  ;; the per-file loop, and only `direct` is accumulated.
+gsubr-symbol? for why that matters. THREE shapes have to be found, and the third
+one is the one that hides:
+
+  1. DIRECT — (= 0 (hl--c-x ...)).
+  2. THROUGH A VARIABLE — (= 0 v), where v was bound to a gsubr call.
+  3. THROUGH A PARAMETER — a gsubr passed as a VALUE to a helper that compares
+     its own parameter: core.scm's hl--window-rule-mk is handed
+     hl--c-window-rule-begin / -effect / -commit and tests each with (= 0 ...).
+
+SHAPE 3 WAS MISSING, and that was not a small hole. Every wiki block calling
+hl-window-rule-add! got `(= 0 #f)` instead of a status — a NOTE rather than a
+failure, so it read as harness noise and was tolerated. It only became visible
+when a block DEFINED something and then used it: the define raised, the name
+stayed unbound, and the FOLLOWING line failed as unbound-variable. The mode
+facility's own example was the first to be shaped that way, and the error named
+`ekeys` — a name that was innocent, three frames from the cause."
+  ;; PER FILE, deliberately — the tables are reset for each file rather than
+  ;; accumulated across all of them. A variable name is local to the form that
+  ;; binds it, and the same name is reused in unrelated files: `rc` is used in
+  ;; bind.scm for the bind call AND in several other modules for something else.
+  ;; Joined file-wide, the later binding wins and the gsubr we were actually
+  ;; after is lost. Only `direct` is accumulated.
   (let ((direct (make-hash-table)))     ; gsubr compared against an integer
-    (define (scan! x by-var cmp-var)
-      (when (pair? x)
-        (when (and (eq? (car x) '=)
-                   (pair? (cdr x)) (integer? (cadr x))
-                   (pair? (cddr x)))
-          (let ((rhs (caddr x)))
-            (cond ((and (pair? rhs) (gsubr-symbol? (car rhs)))
-                   (hash-set! direct (car rhs) #t))
-                  ((symbol? rhs) (hash-set! cmp-var rhs #t)))))
-        ;; a binding `(name (gsubr ...))`: any two-element form whose first
-        ;; element is a symbol and whose second is a gsubr call. Deliberately
-        ;; loose — over-inclusion can only mark one extra gsubr as a status
-        ;; gsubr, and only for a variable separately seen compared against an
-        ;; integer.
-        (when (and (symbol? (car x)) (pair? (cdr x)) (pair? (cadr x))
-                   (gsubr-symbol? (car (cadr x))))
-          (hash-set! by-var (car x) (car (cadr x))))
-        (scan! (car x) by-var cmp-var)
-        (scan! (cdr x) by-var cmp-var)))
-    (for-each
-      (lambda (f)
-        (let ((by-var (make-hash-table)) (cmp-var (make-hash-table)))
-          (call-with-input-file f
-            (lambda (port)
-              (let loop ((form (read port)))
-                (unless (eof-object? form) (scan! form by-var cmp-var) (loop (read port))))))
-          ;; join WITHIN the file: every variable compared against an integer
-          ;; that was bound to a gsubr call marks that gsubr a status gsubr
-          (hash-for-each (lambda (v _)
-                           (let ((g (hash-ref by-var v)))
-                             (when g (hash-set! direct g #t))))
-                         cmp-var)))
-      files)
-    direct))
+    (define (forms-of f)
+      (call-with-input-file f
+        (lambda (port)
+          (let loop ((acc '()))
+            (let ((x (read port)))
+              (if (eof-object? x) (reverse acc) (loop (cons x acc))))))))
+    (define (proper-prefix l)
+      "L up to its first improper tail — where a dot or a rest parameter sits, so
+(define (f a . rest) …) reports (a) rather than swallowing a position."
+      (let loop ((l l) (acc '()))
+        (if (pair? l) (loop (cdr l) (cons (car l) acc)) (reverse acc))))
+    (define (define-name form)
+      (and (pair? form) (eq? (car form) 'define) (pair? (cdr form))
+           (let ((t (cadr form))) (and (pair? t) (symbol? (car t)) (car t)))))
+    (define (define-params form)
+      (and (pair? form) (eq? (car form) 'define) (pair? (cdr form))
+           (let ((target (cadr form)) (rest (cddr form)))
+             (cond ((pair? target) (proper-prefix (cdr target)))
+                   ((and (pair? rest) (pair? (car rest))
+                         (eq? (car (car rest)) 'lambda) (pair? (cdar rest)))
+                    (proper-prefix (cadr (car rest))))
+                   (else '())))))
+    (define (numeric-params form)
+      "PARAM -> #t for the parameters of FORM that any numeric comparison
+touches, in either position."
+      (let ((found (make-hash-table)) (params (define-params form)))
+        (define (mark! x)
+          (when (pair? x)
+            (when (and (symbol? (car x)) (memq (car x) params))
+              (hash-set! found (car x) #t))
+            (mark! (car x))
+            (mark! (cdr x))))
+        (let walk ((x form))
+          (when (pair? x)
+            (when (memq (car x) '(= < > <= >=))
+              (mark! (cdr x)))
+            (walk (car x))
+            (walk (cdr x))))
+        found))
+
+    ;; PASS 1 — every helper, and which of its parameters are status-tested.
+    (let ((params-of (make-hash-table)) (tested-of (make-hash-table)))
+      (for-each
+        (lambda (f)
+          (for-each
+            (lambda (form)
+              (let ((n (define-name form)))
+                (when n
+                  (hash-set! params-of n (define-params form))
+                  (hash-set! tested-of n (numeric-params form)))))
+            (forms-of f)))
+        files)
+
+      (define (status-positions name)
+        "The 1-BASED argument positions of NAME that are compared numerically.
+Compared with the argument COUNT before indexing, so a call through a rest
+parameter cannot walk off the end."
+        (let ((ps (hash-ref params-of name)))
+          (and ps
+               (let ((m (hash-ref tested-of name)))
+                 (let loop ((ps ps) (i 1) (acc '()))
+                   (if (null? ps) (reverse acc)
+                       (loop (cdr ps) (+ i 1)
+                             (if (and m (hash-ref m (car ps))) (cons i acc) acc))))))))
+
+      ;; PASS 2 — the three shapes, per file.
+      (for-each
+        (lambda (f)
+          (let ((by-var (make-hash-table)) (cmp-var (make-hash-table)))
+            (define (scan-passed! x)
+              (when (pair? x)
+                ;; `list?` on the ARGUMENTS as well as the positions check:
+                ;; (hl-layout-add! name . spec) is a real dotted signature in
+                ;; this tree, and (length '(name . spec)) raises. The walk
+                ;; itself is list-guarded for the same reason.
+                (when (and (symbol? (car x)) (list? (cdr x)))
+                  (for-each
+                    (lambda (i)
+                      (let ((a (if (> i (length (cdr x))) #f (list-ref (cdr x) (- i 1)))))
+                        (when (gsubr-symbol? a) (hash-set! direct a #t))))
+                    (or (status-positions (car x)) '())))
+                (scan-passed! (car x))
+                (when (list? x) (scan-passed! (cdr x)))))
+            (define (scan! x)
+              (when (pair? x)
+                (when (and (eq? (car x) '=)
+                           (pair? (cdr x)) (integer? (cadr x))
+                           (pair? (cddr x)))
+                  (let ((rhs (caddr x)))
+                    (cond ((and (pair? rhs) (gsubr-symbol? (car rhs)))
+                           (hash-set! direct (car rhs) #t))
+                          ((symbol? rhs) (hash-set! cmp-var rhs #t)))))
+                (when (and (symbol? (car x)) (pair? (cdr x)) (pair? (cadr x))
+                           (gsubr-symbol? (car (cadr x))))
+                  (hash-set! by-var (car x) (car (cadr x))))
+                (scan! (car x))
+                (scan! (cdr x))))
+            (for-each (lambda (form) (scan! form) (scan-passed! form)) (forms-of f))
+            ;; join WITHIN the file: a variable compared against an integer that
+            ;; was bound to a gsubr call marks that gsubr a status gsubr
+            (hash-for-each (lambda (v _)
+                             (let ((g (hash-ref by-var v)))
+                               (when g (hash-set! direct g #t))))
+                           cmp-var)))
+        files)
+      direct)))
 
 (define (stub-c-entry-points files)
   (let ((status (status-gsubrs files)))

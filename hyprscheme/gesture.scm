@@ -7,7 +7,8 @@
 
 (define-module (hyprscheme gesture)
   #:export (
-           hl-gesture-action? hl-make-workspace-swipe-gesture
+           hl-gesture-action? hl-gesture-add! hl-gesture-remove!
+           hl-make-workspace-swipe-gesture
            hl-make-move-gesture hl-make-resize-gesture
            hl-make-close-gesture hl-make-scroll-move-gesture
            hl-make-float-gesture hl-make-fullscreen-gesture
@@ -101,4 +102,63 @@
   "#t when X is an hl-gesture handle - the registration spec: (fingers
    direction mods scale disable-inhibit)."
   (and (pair? x) (list? x) (= 5 (length x)) (integer? (car x)) (string? (cadr x)) (list? (caddr x))))
+
+;; ---- registering and removing gestures ---------------------------------------
+;;
+;; THESE TWO LIVE HERE, NOT IN (hyprscheme extras): they reach the compositor
+;; through hl--c-gesture / hl--c-gesture-remove, and the only other names they
+;; call are this module's own hl-gesture-action? and hl-gesture?. See
+;; hl-rule-enabled-set! in rule.scm for the full note — whatever reaches
+;; Hyprland C or C++ belongs to the family that owns the object.
+;;
+;; The handle is the exact registration spec, and that is deliberate: the
+;; manager matches removal on the spec, never on the action, so hl-gesture-remove!
+;; always hits the gesture that was registered rather than a same-shaped one.
+
+(define* (hl-gesture-add! #:key fingers direction action (mods '()) (scale 1.0) (disable-inhibit #f))
+  "Register a gesture: (hl-gesture-add! #:fingers N #:direction \"dir\"
+   #:action ACTION [#:mods (hl-key \"SUPER\")] [#:scale 1.0]
+   [#:disable-inhibit #t]). #:fingers, #:direction and #:action are
+   required; the optional keywords describe the gesture INPUT,
+   independent of the action. ACTION is an hl-gesture-action built by
+   the hl-make-*-gesture constructors - built-in and custom actions are
+   indistinguishable from the caller's side, and a recipe is a pure
+   value (registering it under two specs constructs two independent
+   gestures). Returns an hl-gesture handle for hl-gesture-remove! -
+   removal matches on the registration spec, never on the action."
+  (cond ((not fingers)
+         (error "hl-gesture-add!: field 'fingers' is required"))
+        ((not (and (integer? fingers) (exact? fingers) (>= fingers 2)))
+         (error "hl-gesture-add!: field 'fingers' must be an integer >= 2"))
+        ((not direction)
+         (error "hl-gesture-add!: field 'direction' is required"))
+        ((not (string? direction))
+         (error "hl-gesture-add!: field 'direction' must be a string"))
+        ((not action)
+         (error "hl-gesture-add!: an action is required - #:action (hl-make-...-gesture ...)"))
+        ((not (hl-gesture-action? action))
+         (error "hl-gesture-add!: field 'action' must be an hl-gesture-action (see the hl-make-*-gesture constructors)"))
+        ((not (and (list? mods) (every (lambda (m) (string? m)) mods)))
+         (error "hl-gesture-add!: 'mods must be a list of modifier tokens, e.g. (hl-key \"SUPER\") or '(\"SUPER\" \"SHIFT\")"))
+        ((not (or (<= -10.0 scale -0.1) (<= 0.1 scale 10.0)))
+         (error "hl-gesture-add!: field 'scale' must be between -10 and -0.1 or between 0.1 and 10 - it is currently:" scale))
+        (else
+         (let ((rc (hl--c-gesture action fingers direction mods (exact->inexact scale) disable-inhibit)))
+           (cond ((not (= 0 rc))
+                  (error "hl-gesture-add!:" (hl--c-config-last-error)))
+                 (else
+                  ;; the handle is the exact registration spec — the manager
+                  ;; matches removal on it, so remove! always hits our gesture
+                  (list fingers direction mods scale disable-inhibit)))))))
+
+(define (hl-gesture-remove! g)
+  "Remove a registered gesture: #t when removed, #f when nothing is
+   registered under that spec, error otherwise."
+  (unless (hl-gesture? g)
+    (error "hl-gesture-remove!: not an hl-gesture handle"))
+  (let ((rc (hl--c-gesture-remove (car g) (cadr g) (caddr g) (exact->inexact (cadddr g))
+                                 (list-ref g 4))))
+    (cond ((= rc 0) #t)
+          ((= rc 1) #f)
+          (else (error "hl-gesture-remove!:" (hl--c-config-last-error))))))
 

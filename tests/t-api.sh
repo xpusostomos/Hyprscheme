@@ -478,6 +478,32 @@ ok '(begin (hl-workspace-special-toggle! "api-special") (not (hl-monitor-active-
 ok '(boolean? (hl-monitor-swap! (hl-active-monitor) (hl-active-monitor)))'
 ok '(let ((l (hl-workspace-windows (hl-active-workspace)))) (list? l))'
 
+# ---- #:follow on a workspace move — and the SPECIAL case is the whole point ---
+# Moving a window to an ORDINARY workspace looks the same either way. Moving it
+# to a SPECIAL one does not: only the non-silent path follows the window and
+# calls setSpecialWorkspace, which DISPLAYS that workspace as an overlay on top
+# of everything. So a rule or callback meant to get a window OUT of the way put
+# it in FRONT of you instead — which is what a config sending its test
+# instances to "special:test" reported, and why this option exists.
+#
+# Asserted through the MONITOR's own view, not a return value: the move answers
+# #t whether or not it showed anything, so a return-value test cannot see this.
+# Both directions are pinned — the default SHOWS (unchanged behaviour), and
+# #:follow #f does not — because a test of the silent half alone would still
+# pass if the flag were dropped and every move had silently become silent.
+val '(begin (hl-monitor-workspace-special-set! (hl-active-monitor) #f)
+            (hl-window-workspace-set! w "special:api-shown")
+            (hl-workspace-name (hl-monitor-active-special-workspace (hl-active-monitor))))' '"special:api-shown"'
+ok  '(begin (hl-monitor-workspace-special-set! (hl-active-monitor) #f)
+            (hl-window-workspace-set! w "special:api-hidden" #:follow #f)
+            (not (hl-monitor-active-special-workspace (hl-active-monitor))))'
+# ...and the window really did move: "did not follow" is not "did nothing"
+val '(hl-workspace-name (hl-window-workspace w))' '"special:api-hidden"'
+# put the window and the monitor back, so later tests start where they expect
+ok  '(begin (hl-monitor-workspace-special-set! (hl-active-monitor) #f)
+            (hl-window-workspace-set! w (hl-active-workspace) #:follow #f)
+            #t)'
+
 # workspace getters
 ok '(string? (hl-workspace-name aw))'
 ok '(string? (hl-workspace-addressable-name aw))'
@@ -1229,6 +1255,45 @@ bad_gest=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl-
 bad_lock=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-clear-crashed-lockscreen!))))')
 [[ "$bad_lock" == *"session is not locked"* ]] || { echo "FAIL: clear-crashed-lockscreen did not refuse when unlocked => [$bad_lock]"; FAILED=1; }
 ok '(boolean? (hl-exec-scheduled-prop-refresh-immediately!))'
+
+# ---- hl-refresh: ask the compositor to re-do config-derived work -------------
+# The schedule half is the one that was missing; the flush above already
+# existed, and #:immediately folds it in.
+ok '(boolean? (hl-refresh #:rules #t))'
+# each option is accepted on its own, and the composites carry their parts
+ok '(and (boolean? (hl-refresh #:window-states #t))
+         (boolean? (hl-refresh #:monitor-states #t))
+         (boolean? (hl-refresh #:layouts #t))
+         (boolean? (hl-refresh #:cursor-zooms #t)))'
+# any combination is accepted (logior, not +: two options naming the same bit
+# must not accumulate into the next one — see the click/release bug in t-api)
+ok '(boolean? (hl-refresh #:rules #t #:window-states #t #:blur-fb #t))'
+# NO OPTIONS passes 0 through, which the compositor accepts: a tick that trips no
+# bits. This answers #t (the schedule was accepted), not an error — the C++ has
+# no guard for it and neither do we.
+ok '(hl-refresh)'
+# #:immediately runs the pass now, and answers whether there was one to run.
+# Both answers are legitimate: it is #t when a refresh was pending (we just
+# scheduled one) and #f when nothing was. Asserting the TYPE keeps this honest
+# either way rather than pinning a race.
+ok '(boolean? (hl-refresh #:window-states #t #:immediately #t))'
+# ...BUT A TYPE ASSERTION CANNOT SEE A NEUTERED FLUSH, so this is the assertion
+# that does: #:immediately must leave NOTHING PENDING. With the flush in place,
+# hl-refresh schedules and then drains, so the follow-up finds nothing to do and
+# answers #f. With the flush removed, the schedule survives and the follow-up
+# drains it instead — answering #t — and this fails. That is the difference
+# between testing that the call returns and testing that it DID something.
+# (No race: both calls are in one evaluation, and the deferred tick is the
+# compositor's event loop, which cannot run in between.)
+ok '(begin (hl-refresh #:window-states #t #:immediately #t)
+           (not (hl-exec-scheduled-prop-refresh-immediately!)))'
+# a name that is not an option is REFUSED, and named — Guile's own
+# unrecognized-keyword error, since every option is a named key. (The
+# "not a value of this enum" error exists too, but it is unreachable from here:
+# enum-value is only ever handed a symbol written in hl-refresh's own body, so
+# the enum can only be wrong if the CODE is. t-enums pins the values instead.)
+bad_refresh=$($SCHEME '(call-with-string-output-port (lambda (p) (guard (e (#t (hl--print-exception e p))) (hl-refresh #:sideways #t))))')
+[[ "$bad_refresh" == *"sideways"* ]] || { echo "FAIL: hl-refresh did not name a bad option => [$bad_refresh]"; FAILED=1; }
 ok '(hl-event? (hl-screenshare-state-notification-add! (lambda (a t n) #f)))'
 ok '(hl-event? (hl-keyboard-key-notification-add! (lambda (k t s) #f)))'
 
