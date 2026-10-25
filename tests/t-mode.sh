@@ -162,6 +162,93 @@ ok  '(begin (define-mode t-defined #:color #xffffa500)
 ok  '(begin (define-mode t-defined2)
             (not (mode-active? t-defined2)))'
 
+# ---- restore across a reload -------------------------------------------------
+# A reload throws the generation away and the config's define-mode forms run
+# again, so every mode is born off while its state file still says it was on.
+# hl-modes-restore! re-arms what was lit, reading the facility's own files — the
+# config never touches a path.
+#
+# This is the behaviour that replaced a config doing it by hand:
+#   (when (file-exists? (mode-file ekeys)) (mode-active-set! ekeys #t))
+# with a (guard …) and a delete-file for the one mode it did not want back.
+# THE RELOAD IS SIMULATED WITH THE PUBLIC SURFACE ONLY, and writing the file by
+# hand IS the simulation — it is exactly the state a reload leaves: a file on
+# disk and a mode born off. The alternative (calling the internal flag-setter)
+# is not reachable from a config and would have made this test pass while
+# proving nothing about what a config can do.
+#
+# The directory is created by the arm/disarm cycle below: hl--mode-file-write!
+# makes the dir to write the file and does NOT remove it when the mode goes off,
+# which is why the hand-write lands.
+ok  '(begin
+       (define m-restore-on (make-mode "m-restore-on" #:color #xffffa500))
+       (mode-active-set! m-restore-on #t)     ; creates the dir, writes the file
+       (mode-active-set! m-restore-on #f)     ; flag off; dir stays
+       (call-with-output-file (mode-file m-restore-on)
+         (lambda (p) (display "#xffffa500" p)))
+       (and (not (mode-active? m-restore-on))
+            (begin (hl-modes-restore!)
+                   (mode-active? m-restore-on))))'
+
+# A mode that was OFF has no file, and restore leaves it alone rather than
+# arming everything it knows about — "restore" is not "turn them all on".
+ok  '(begin
+       (define m-restore-off (make-mode "m-restore-off" #:color #xffff0000))
+       (when (file-exists? (mode-file m-restore-off))
+         (delete-file (mode-file m-restore-off)))
+       (hl-modes-restore!)
+       (not (mode-active? m-restore-off)))'
+
+# It answers HOW MANY it turned on, so a config can log it. >= rather than an
+# exact count: earlier tests in this file leave their own modes lit, and restore
+# correctly re-arms those too. The exact-count half is covered by the OFF test
+# above, which pins that a mode with no file is not counted and not armed.
+ok  '(begin
+       (define m-restore-count (make-mode "m-restore-count" #:color #xffffa500))
+       (mode-active-set! m-restore-count #t)
+       (mode-active-set! m-restore-count #f)
+       (call-with-output-file (mode-file m-restore-count)
+         (lambda (p) (display "#xffffa500" p)))
+       (let ((n (hl-modes-restore!)))
+         (and (mode-active? m-restore-count) (exact? n) (>= n 1))))'
+
+# A MODE COMES BACK FULLY ARMED, not just flagged. The rule is the observable
+# half: a reload rebuilds every mode with a rule BORN DISABLED, so restoring the
+# flag alone would leave the colour off with the mode insisting it was on.
+ok  '(begin
+       (define m-restore-rule (make-mode "m-restore-rule" #:color #xffffa500))
+       (mode-active-set! m-restore-rule #t)
+       (mode-active-set! m-restore-rule #f)
+       (call-with-output-file (mode-file m-restore-rule)
+         (lambda (p) (display "#xffffa500" p)))
+       (hl-rule-enabled-set! (hl--mode-rule m-restore-rule) #:on? #f)
+       (hl-modes-restore!)
+       (hl-rule-enabled? (hl--mode-rule m-restore-rule)))'
+
+# A mode with no colour has no rule, and restore must not choke on one — the
+# common case for a config using modes purely as keymap switches.
+ok  '(begin
+       (define m-restore-nocolor (make-mode "m-restore-nocolor"))
+       (mode-active-set! m-restore-nocolor #t)
+       (mode-active-set! m-restore-nocolor #f)
+       (call-with-output-file (mode-file m-restore-nocolor)
+         (lambda (p) (display "" p)))
+       (hl-modes-restore!)
+       (mode-active? m-restore-nocolor))'
+
+# Restore runs the #:activate HOOK, not just the flag. A mode that arms a submap
+# from its activate would otherwise come back lit with its keys doing nothing.
+ok  '(begin
+       (define r-hook-ran #f)
+       (define-mode t-restore-hook #:activate (lambda (m) (set! r-hook-ran #t)))
+       (mode-active-set! t-restore-hook #t)
+       (mode-active-set! t-restore-hook #f)
+       (call-with-output-file (mode-file t-restore-hook)
+         (lambda (p) (display "" p)))
+       (set! r-hook-ran #f)
+       (hl-modes-restore!)
+       (and r-hook-ran (mode-active? t-restore-hook)))'
+
 # ---- put the world back ------------------------------------------------------
 # A mode left ON leaves its colour rule ARMED for the rest of the suite, and the
 # rules a test created are never removed — the compositor keeps every one of them
@@ -175,7 +262,21 @@ ok  '(begin (define-mode t-defined2)
 # failed intermittently under the extra load, naming the topology rather than
 # anything here.
 ok  '(begin (for-each (lambda (m) (when (mode-active? m) (mode-active-set! m #f)))
-                      (list t-defined t-defined2))
+                      (list t-defined t-defined2 t-restore-hook))
+            #t)'
+# …and the modes the restore section created, reached through the registry rather
+# than by name — that is what the registry is for, and one of them (m-restore-on)
+# has no bindings of its own to name it by. hl--mode-active-set! is used rather
+# than mode-active-set! for the ones left with no file: mode-active-set! would
+# correctly write a file back for a mode it is told is off, and the point is to
+# leave no state behind.
+ok  '(begin (for-each (lambda (e)
+                        (let ((m (cdr e)))
+                          (when (string-prefix? "m-restore" (mode-name m))
+                            (hl--mode-active-set! m #f)
+                            (when (file-exists? (mode-file m))
+                              (delete-file (mode-file m))))))
+                      hl--modes)
             #t)'
 
 exit $FAILED

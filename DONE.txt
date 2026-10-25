@@ -2057,6 +2057,64 @@ pass if every move had silently become silent.
 Docs: dispatchers.md's two move rows gained the option, and the special-workspace
 table now says to use `#:follow #f` there and why.
 
+== Hyprscheme-qs: the bar widget that reads the mode directory ==
+
+Lives in its OWN repo (/home/chris/GIT/Hyprscheme-qs, not in this tree) — an
+Omarchy quickshell plugin, so it has nothing to build here and is not part of
+this tree's lints. Renamed from `ekeys` (id, moduleName, filename) and rebuilt
+properly: manifest with author/license/schema, README, LICENSE, .gitignore, and
+a Qt-free Model.js so the logic is testable with plain Node.
+
+IT IS GENERIC NOW, which was the point. The old widget hard-coded `nkeys mark
+ekeys scratch emacs` in THREE places (the stateDir path, the tokens array with
+literal colours, and the probe's `for f in …` loop), so a sixth mode was
+invisible and a lit file with no list entry showed nothing. It now LISTS THE
+DIRECTORY: the tag is the filename upper-cased and the colour is the file's
+contents. No count, no list, no cap.
+
+The directory moved with the modes: $XDG_STATE_HOME/hyprscheme/ (Model.js's
+stateDirFor mirrors hl--state-dir, including the XDG rule that an unset, empty
+or RELATIVE XDG_STATE_HOME is invalid and ignored).
+
+THE COLOUR IS A PREFIX SWAP, NOT A REORDER, and that is the whole trap: the
+machinery writes Scheme's spelling of the integer, `#xffffa500`, and Qt's
+eight-digit form is `#AARRGGBB` — SAME order, just no `x`. The other common
+eight-digit spelling (CSS's #RRGGBBAA) is the reverse, so "tidying" this into a
+channel reorder would silently paint every tag the wrong colour. Measured rather
+than assumed: a small Qt6 program linked against QColor confirmed `#ffffa500`
+parses as ARGB rgb(255,165,0), while `#xffffa500` is REJECTED outright (hence
+the transform), and short values are padded on the LEFT because alpha is the
+high byte.
+
+TESTS: test/model.test.js, 22 cases, `node --test test/`. They run the REAL
+probe script against a REAL temp directory — bash, argument passing and all —
+because a test that reimplemented the listing in JavaScript would pass while the
+shell command was broken. Verified to FAIL by neutering eight things, each
+independently: labelFor not upper-casing (6 fails), colorFor padding on the
+right — the CSS ordering (1), dropping the sort (3), accepting a relative
+XDG_STATE_HOME (1), probeScript taking the directory as a parameter and splicing
+it in (5), going back to a hard-coded five-mode list (6 — the regression this
+whole change is about), dropping `head -n 1` (1), dropping the regular-file test
+(2), dropping mkdir -p (1), and dropping the basename guard (1). The path with
+spaces in it is the case that fails the moment the directory is interpolated
+into the shell string instead of passed as $0.
+
+CROSS-CHECKED against the real writer rather than assumed compatible: a Guile
+script reproducing hl--color-hex produced the six colour spellings, and all six
+parsed back through Model.js's parser with the alpha channel intact.
+
+A qmllint RED HERRING, recorded so nobody re-litigates it: run standalone, our
+BarWidget.qml reports "Failed to import qs.Commons". That is the ENVIRONMENT,
+not the plugin — qs.* resolves against the PROJECT ROOT, and the shell runs
+`quickshell -n -p /usr/share/omarchy/shell`, so every plugin (Omarchy's own
+included) resolves it there; copied to an arbitrary directory, their widgets
+report the same. qmllint exits 0 either way. Cost real time to establish, so it
+is in the README too. `omarchy plugin validate .` passes.
+
+Docs: emacs-keymaps.md's "The state file" section now says a status bar can list
+that directory — file names for labels, contents for colours — with no mention
+of the shell it happens to be implemented in.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

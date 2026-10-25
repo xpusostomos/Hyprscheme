@@ -24,6 +24,7 @@
             hl-mode? make-mode define-mode
             mode-active? mode-active-set! mode-active-toggle!
             mode-name mode-color mode-file
+            hl-modes-restore!
             hl--mode-rule))
 
 (use-modules (hyprscheme kernel))
@@ -1043,3 +1044,60 @@ different things depending on history."
   "Flip mode M: on if it is off, off if it is on. Returns what mode-active-set!
   would — #t."
   (mode-active-set! m (not (mode-active? m))))
+
+;; ---- restore across a reload -------------------------------------------------
+;;
+;; A RELOAD DISARMS EVERY MODE, and the state files are what remember. The host
+;; throws the generation away, so the config's define-mode forms run again and
+;; every mode is born off — the mode is still "on" in every sense the user cares
+;; about (a keymap condition reading it, a colour on screen, a tag in the bar)
+;; but the flag says otherwise. Restoring re-arms what was lit.
+;;
+;; RESTORE IS AUTOMATIC — every mode whose state file exists comes back on. There
+;; is deliberately NO #:restore flag: a mode that is on should still be on after
+;; a reload, and a per-mode opt-in is one more thing to get right in a config
+;; that already has to get the call site right. A mode that genuinely must not
+;; survive (one whose meaning is tied to something the reload destroys) clears
+;; itself from its own #:activate, which is where a config's policy lives.
+;;
+;; THE FOCUS CASE IS NOT A SPECIAL CASE, and getting this wrong is easy — a
+;; mode whose meaning depends on the focused window looks like it needs an
+;; exception, and it does not. A reload does not change which window has focus,
+;; so a mode that was correctly on is still correctly on, and whatever the config
+;; already does about the window losing focus keeps doing it. mark is the worked
+;; example: its cancel-on-blur handler is a WINDOW event, entirely independent of
+;; whether the config was reloaded, and it fires the next time focus actually
+;; moves. Nothing here needs to know about it.
+;;
+;; ORDER IS REGISTRATION ORDER, so mutual exclusion resolves the way a live
+;; toggle would: if two files somehow both exist, the mode defined LAST wins the
+;; eviction, because its #:activate is what stands the earlier one down. (For
+;; ekeys/nkeys that is the same outcome a user pressing the keys would get.)
+;;
+;; ONE CALL, at the END of a config: define-mode cannot arm a mode at definition
+;; time (a mode is born off, deliberately — arming one as a side effect of the
+;; config being READ is the trap hl-make-keymap also avoids), and init.scm's
+;; reset sweep runs BEFORE the config is read, so nothing in the machinery can
+;; see a mode yet. The config is the only thing that knows when it has finished
+;; defining them.
+(define (hl-modes-restore!)
+  "Re-arm every registered mode whose state file exists — the reload case.
+
+  Call it once, at the end of a config. A reload disarms every mode (the config
+  re-runs and each define-mode is born off), so without this a mode that was on
+  stays on in the bar and on screen while its flag says otherwise.
+
+  Restore is AUTOMATIC for every mode; there is no opt-in. Returns the number of
+  modes it turned on, which is worth logging if a config wants to know."
+  (let ((on 0))
+    (for-each
+      (lambda (entry)
+        (let ((m (cdr entry)))
+          ;; The FILE is the record, and it is read here rather than by the
+          ;; config — mode-file stays public for a bar to read a colour, but a
+          ;; config never has to touch a path to get its modes back.
+          (when (file-exists? (hl--mode-file m))
+            (mode-active-set! m #t)
+            (set! on (+ on 1)))))
+      hl--modes)
+    on))
