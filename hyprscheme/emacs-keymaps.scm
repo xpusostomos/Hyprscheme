@@ -18,6 +18,7 @@
   #:export (hl-key-regularise hl-key-logical-to-physical
             hl-key-physical-to-logical hl-key-description
             hl-kbd hl-key define-key! global-set-key! global-map
+            define-keymap
             hl-keymap-attach-to-tag! hl-keymap-attach-to-window-condition!
             hl-keymaps-recheck!))
 
@@ -394,7 +395,7 @@ mode."
                                          (lambda () (hl-submap-activate! target))
                                          #:description "unmatched key: abandon the sequence"))))))
 
-(define* (define-key! keymap sequence thunk #:key (top-level #t)) "Bind a key
+(define* (define-key! keymap sequence thunk #:key (top-level #t) #:allow-other-keys #:rest bind-options) "Bind a key
 SEQUENCE to THUNK inside KEYMAP — emacs' define-key, scoped to a map.
 
   (define-key! resize-map (hl-kbd \"h\") (lambda () (hl-window-size-set! ...)))
@@ -432,6 +433,18 @@ unrecognised key must not eject you from it. Its own s-G still leaves.
 Returns the final bind's handle, the one carrying THUNK, so a binding can be
 removed again with hl-unbind!."
   (hl--keymap! "define-key!" keymap)
+  ;; #:allow-other-keys MAKES #:rest CATCH #:top-level TOO, which is why it is
+  ;; filtered out here: define-key!'s own option is consumed above, and hl-make-bind
+  ;; would otherwise be handed a keyword it does not take. The two cannot both be
+  ;; declared without this: Guile's optargs needs `#:key K #:allow-other-keys
+  ;; #:rest R` for R to receive the unrecognised pairs at all, and once it does,
+  ;; the recognised ones come through as well.
+  (let ((bind-options
+         (let loop ((l bind-options) (acc '()))
+           (cond ((null? l) (reverse acc))
+                 ((null? (cdr l)) (reverse (cons (car l) acc)))
+                 ((eq? (car l) #:top-level) (loop (cddr l) acc))
+                 (else (loop (cddr l) (cons (cadr l) (cons (car l) acc))))))))
   (let* ((base (hl-keymap-submap keymap))
          (exit (if top-level "" base)))
     ;; KEYMAP always gets its s-G, so a mode can be left for good. It gets the
@@ -465,11 +478,12 @@ removed again with hl-unbind!."
               ;; #:submap-reset stays a public option for configs that want the
               ;; declarative form (see hl-bind-add!, and submaps.md).
               (hl-keymap-add! current
-                              (hl-make-bind chord
-                                            (lambda ()
-                                              (dynamic-wind (lambda () #t)
-                                                            thunk
-                                                            (lambda () (hl-submap-activate! exit))))))
+                              (apply hl-make-bind chord
+                                     (lambda ()
+                                       (dynamic-wind (lambda () #t)
+                                                     thunk
+                                                     (lambda () (hl-submap-activate! exit))))
+                                     bind-options))
               (let* ((next-name (hl--expand (hl-keymap-submap current) chord))
                      (next (hl-keymap-child current next-name)))
                 (unless next
@@ -482,8 +496,7 @@ removed again with hl-unbind!."
                   (hl-keymap-add! current
                                   (hl-make-bind chord (lambda () (hl-submap-activate! next-name))))
                   (hl--ensure-exit! next exit #t))
-                (loop (cdr remaining) next))))))))   ; the record propagates up
-
+                (loop (cdr remaining) next)))))))))   ; the record propagates up
 (define (global-set-key! sequence thunk) "Bind a key SEQUENCE to THUNK, the way
 emacs' global-set-key does. SEQUENCE is what hl-kbd returns — a one-key spec
 gives a chord, a multi-key one gives a list of chords:
@@ -503,6 +516,72 @@ keymap like any other, so it can be read and driven with hl-keymap-binds,
 hl-keymap-child and the rest — and it is REBUILT EMPTY when the config reloads,
 so a global-set-key! from a previous generation cannot linger."
   (define-key! global-map sequence thunk))
+
+;; ---- define-keymap: a TOP-LEVEL keymap in one form ---------------------------
+;;
+;;   (define-keymap ekeys-map
+;;     (((hl-kbd "C-x C-s") (lambda () (send-shortcut (hl-kbd "C-s"))))
+;;      ((hl-kbd "C-x k")   (lambda () (hl-window-close! (hl-active-window))))))
+;;
+;; NAME is bound to the keymap; every CLAUSE is (KEYS THUNK OPTIONS...) and the
+;; clauses are given as ONE LIST, in an extra pair of parens. The list is what
+;; lets a config keep its clauses in a variable, splice them, or build them in a
+;; loop and hand the result over — none of which a varargs form can do, since
+;; varargs are positional forms and nothing but literal forms may appear there.
+;;
+;; #:submap places the binds and defaults to "", the default map. It is a
+;; KEYWORD so that the common case — a top-level map — says nothing:
+;;
+;;   (define-keymap browser-map (((hl-kbd "C-l") (lambda () (reload)))))
+;;
+;; Each KEYS is what hl-kbd returns: a CHORD for a one-key spec, or a LIST OF
+;; CHORDS for a sequence like "C-x C-s". BOTH work, which is the point of this
+;; form: a sequence is walked by define-key!, which builds the "C-x" prefix
+;; submap and binds the key that enters it, so a config never writes that
+;; bookkeeping out by hand. OPTIONS are the ordinary bind flags (see bind-flags)
+;; — #:description, #:repeat, #:locked and the rest.
+;;
+;; THE KEYMAP IT MAKES IS DISABLED, unlike hl-make-keymap's, and the disarm
+;; happens LAST so it covers every bind including the prefix submaps
+;; define-key! built along the way. This is the one form that knows it is
+;; building a top-level keymap — the kind a config arms when some condition
+;; holds — and arming it at read time would make the mode active from the moment
+;; the config loaded. A helper that merely builds a keymap cannot know that, so
+;; it arms.
+;;
+;; Arm and disarm with hl-keymap-enable! / hl-keymap-disable!.
+;;
+;; Documented as a COMMENT because it is a macro: a macro is not a procedure, so
+;; the tree's docstring convention (a leading string in a `define`, read back by
+;; procedure-documentation) does not apply — `define-syntax` takes no docstring,
+;; and procedure-documentation on the result raises rather than answering. There
+;; is no equivalent surface, so this block is it.
+;;
+;; IT LIVES IN THIS MODULE, NOT IN (hyprscheme bind), and the reason is the
+;; module rule: it expands to define-key!, which is THIS module's, and to
+;; hl--expand → hl-key-description, the emacs key layer, which names the prefix
+;; submaps. A family imports only the kernel and core (tools/module-audit.py
+;; enforces it), so bind.scm — where it used to live, and could bind one chord
+;; and no more — could not reach either.
+(define-syntax define-keymap
+  (syntax-rules ()
+    ((_ name #:submap submap ((keys thunk opts ...) ...))
+     (define name
+       (let ((km (hl-make-keymap #:submap submap)))
+         ;; ONE define-key! PER CLAUSE, INLINE. Not (apply define-key! clause):
+         ;; a clause holds FORMS — (hl-kbd "C-x C-s"), a lambda, option pairs —
+         ;; and apply takes VALUES, so that spelling would need an eval per
+         ;; clause and would report a bad clause at load time instead of the
+         ;; reader naming the line.
+         (define-key! km keys thunk opts ...) ...
+         (hl-keymap-disable! km)
+         km)))
+    ((_ name ((keys thunk opts ...) ...))
+     (define name
+       (let ((km (hl-make-keymap #:submap "")))
+         (define-key! km keys thunk opts ...) ...
+         (hl-keymap-disable! km)
+         km)))))
 
 ;; ---- attaching keymaps to a window condition ---------------------------------
 ;;

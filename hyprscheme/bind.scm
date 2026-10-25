@@ -25,7 +25,7 @@
            hl-make-keymap hl-keymap? hl-keymap-submap hl-keymap-submap-reset
            hl-keymap-binds hl-keymap-add! hl-keymap-enable! hl-keymap-disable!
            hl-keymap-enabled? hl-keymap-child hl-keymap-marked?
-           hl-keymap-mark! define-keymap
+           hl-keymap-mark!
            hl--keymap-submap hl--keymap-submap-reset hl--keymap-binds
            hl--keymap-binds-set! hl--keymap-children hl--keymap-children-set!
            hl--keymap-child-set! hl--keymap-marks hl--keymap-marks-set!
@@ -351,40 +351,19 @@ again without rebuilding them."
   (hl--keymap-enabled-set! km #f)
   #t)
 
-;; define-keymap — a TOP-LEVEL keymap in one form
+;; define-keymap LIVES IN (hyprscheme emacs-keymaps) NOW, not here.
 ;;
-;;   (define-keymap browser-keymap ""
-;;     ((hl-kbd "C-x") (lambda () (hl-exec! "firefox")) #:locked #t)
-;;     ((hl-kbd "C-c") (lambda () (hl-exec! "foot"))))
+;; It was written here and could only bind ONE CHORD per clause, because that is
+;; all hl-make-bind takes — which made it useless for the case it exists for. A
+;; top-level keymap is most often a set of SEQUENCES (emacs' C-x C-s, C-x C-f),
+;; and a sequence has to be walked by define-key!, which builds the prefix
+;; submaps. define-key! is (hyprscheme emacs-keymaps)'s, and the submap names it
+;; builds come from hl--expand → hl-key-description, the emacs key layer — so the
+;; macro has to live where those are, on the far side of the import this family
+;; may not cross. A family imports only the kernel and core (tools/module-audit.py
+;; enforces it), so bind.scm could not have reached define-key! at all.
 ;;
-;; NAME is bound to the keymap, SUBMAP is where its binds are placed, and each
-;; CLAUSE is (KEYS THUNK OPTIONS...) — exactly the arguments hl-make-bind takes,
-;; so the options are the ordinary bind flags (see bind-flags).
-;;
-;; THE KEYMAP IT MAKES IS DISABLED, unlike hl-make-keymap's. This is the one
-;; form that knows it is building a top-level keymap — the kind a config arms
-;; when some condition holds — and arming it at read time would make the mode
-;; active from the moment the config loaded. A helper that merely builds a
-;; keymap cannot know that, so it arms.
-;;
-;; Arm and disarm with hl-keymap-enable! / hl-keymap-disable!.
-;;
-;; Documented as a COMMENT because it is a macro: a macro is not a procedure,
-;; so the tree's docstring convention (a leading string in a `define`, read
-;; back by procedure-documentation) does not apply to it — `define-syntax`
-;; takes no docstring, and procedure-documentation on the result raises rather
-;; than answering. There is no equivalent surface, so this block is it.
-(define-syntax define-keymap
-  (syntax-rules ()
-    ((_ name submap (keys thunk opts ...) ...)
-     (define name
-       (let ((km (hl-make-keymap #:submap submap)))
-         ;; ONE BIND PER CLAUSE, INLINE. Not (apply hl-make-bind clause): the
-         ;; clause is a list of FORMS — (hl-kbd "C-x"), a lambda, option pairs
-         ;; — and apply takes VALUES, so that spelling would need an eval per
-         ;; clause and would report a bad clause at load time instead of the
-         ;; reader naming the line.
-         (hl-keymap-add! km (hl-make-bind keys thunk opts ...)) ...
-         (hl-keymap-disable! km)
-         km)))))
+;; Nothing is lost by the move: a keymap is a bundle of binds, which this module
+;; owns, and define-keymap only BUILDS one — it is sugar over hl-make-keymap,
+;; hl-keymap-add! and hl-keymap-disable!, all of which are still here.
 

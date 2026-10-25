@@ -16,6 +16,7 @@
            hl--hyprland-name hl--rule-name hl--rule-spec-value
            hl--special-name hl--str
            hl--window-listen hl--window-rule-mk hl--workspace-listen
+           hl--load-into-generation
            hl--ws-arg hl-after hl-box hl-box-h hl-box-rtd hl-box-w
            hl-box-x hl-box-y hl-current-submap hl-group?
            hl-layer? hl-layout-add! hl-load hl-make-bind hl-monitor? hl-notification?
@@ -621,6 +622,35 @@ DEFAULT (#f when omitted) when the key is missing."
 ;; the only correct answer when this is called from a callback rather than from
 ;; the config body — the current module is the generation then too, but relying
 ;; on that would be relying on a detail of how the host leaves the interpreter.
+(define (hl--load-into-generation path keep-stack!)
+  "Load PATH into the current generation, handing a backtrace to KEEP-STACK!
+before the unwind discards it — see hl-load, which is the API this serves, for
+why that is needed.
+
+Split out as its own procedure for the reason given at its call site: the
+four-argument `catch` nested directly in a guard's body warns \"possibly wrong
+number of arguments\" in this module, and a named procedure does not.
+
+The file goes into whatever module is current when this runs. A config's own
+file is loaded while the GENERATION is current, so that is where its defines
+land; with no generation — a plain `guile`, a lint harness — there is nothing
+to aim at and the ambient module is used. primitive-load rather than `load`:
+this module is DECLARATIVE, and `load` in one is a compile warning, because
+adding bindings at runtime is exactly what it does."
+  (catch #t
+    (lambda ()
+      (save-module-excursion
+        (lambda ()
+          (let ((gen (hl--c-generation)))
+            (when gen (set-current-module gen))
+            (primitive-load path)))))
+    ;; re-raised so the caller's guard still handles the same condition: the
+    ;; stack is a side-channel and changes no error-handling behaviour
+    (lambda (key . args) (apply throw key args))
+    (lambda (key . args)
+      (keep-stack! (guard (e2 (#t #f)) (make-stack #t)))
+      #f)))
+
 (define (hl-load path)
   "Load the Scheme file PATH into the current config generation; #t when it
    loaded, #f when it raised.
@@ -638,21 +668,15 @@ DEFAULT (#f when omitted) when the key is missing."
 
    PATH is used exactly as given: no search, and no \".scm\" appended.
    hl-load-config is the one that resolves a NAME under the config directory."
-  (let ((ok (guard (e (#t (hl--report-config e) #f))
-              (save-module-excursion
-                (lambda ()
-                  (let ((gen (hl--c-generation)))
-                    ;; No generation means the plugin is not up — a plain `guile`
-                    ;; running the machinery, a lint harness — and then there is
-                    ;; no module to aim at, so the file goes into whatever is
-                    ;; current. primitive-load, not `load`: this module is
-                    ;; DECLARATIVE, and using `load` in one is a compile warning
-                    ;; ("bindings may be added at runtime", which is exactly what
-                    ;; load does). The cost of that choice is only that a
-                    ;; RELATIVE path is not searched for on %load-path — these
-                    ;; callers pass a path they built.
-                    (when gen (set-current-module gen))
-                    (primitive-load path))))
-              #t)))
+  (let* ((stack #f)                              ; the backtrace, once we have one
+         (ok (guard (e (#t (hl--report-config e stack) #f))
+               ;; A BACKTRACE IS CAPTURED BEFORE THE UNWIND, the same way
+               ;; hl--load-config does it and for the same reason: after the
+               ;; unwind the stack is gone, so a `guard` alone can report the
+               ;; message and nothing about WHERE. This path matters as much as
+               ;; that one — a file pulled in by hl-load-config arrives HERE —
+               ;; and without it the banner for a nested file named nothing,
+               ;; which is the exact gap the arity work was meant to close.
+               (hl--load-into-generation
+                 path (lambda (s) (unless stack (set! stack s)))))))
     (and ok #t)))
-

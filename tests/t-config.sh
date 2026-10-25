@@ -199,3 +199,69 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 [[ "$out" == "0" ]] || { echo "the config did not come back clean after the nested test (hl--config-errors=$out)"; exit 1; }
+
+# ---- an ARITY error names the COUNT and the FILE ----------------------------
+# Chris's report, verbatim: a 900-line bindings.scm raising
+#
+#   wrong number of arguments to procedure at ice-9/eval.scm 330.13
+#
+# — an address, and a file and line in GUILE'S OWN EVALUATOR, and nothing about
+# the config. That message is what the banner showed, and it sent him hunting
+# through the file by hand. Two things were missing from it, and both are
+# knowable at the point it is raised:
+#
+#   1. THE COUNT. wrong-number-of-args carries the PROCEDURE in its irritants,
+#      and procedure-arguments answers its lambda list as data — so "takes
+#      exactly 0 arguments" can be printed, which is the fact that identifies
+#      the bug. In the real case it was a `(lambda ()` where a window argument
+#      was wanted; the count IS the diagnosis.
+#   2. WHERE. A backtrace is not available after the unwind, but it IS available
+#      in a pre-unwind handler, so hl--load-config stashes one and the banner
+#      names the innermost config file.
+#
+# Verified to fail on the old code: the banner said only "Wrong number of
+# arguments to #<procedure 0x... at ice-9/eval.scm:330:13 ()>" and named no file.
+# The shape is CHRIS'S OWN, reversed from what it looks like at a glance: it is
+# a ZERO-argument lambda being called WITH an argument, because that is what the
+# real bug was. hl-keymap-attach-to-window-condition! checks (procedure? ...) and
+# then calls the condition with the focused window — so a `(lambda ()` written
+# where a `(lambda (w) ...)` was wanted is accepted as a procedure and then
+# called with one argument too many. Hence the helper here takes NONE and is
+# called with one.
+ARITY=$XDG_CONFIG_HOME/hypr/cfg-arity-broken.scm
+cat > "$ARITY" <<'SCMEOF'
+(define (cfg-arity-zero) 'takes-none)
+(define (cfg-arity-caller w) (cfg-arity-zero w))
+(cfg-arity-caller 1)
+SCMEOF
+printf '\n(hl-load-config "cfg-arity-broken")\n' >> "$REAL"
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(length hl--config-errors)')
+  [[ "$out" != "0" ]] && break
+  sleep 0.5
+done
+[[ "$out" != "0" ]] || { echo "an arity error did not raise the banner (hl--config-errors=$out)"; exit 1; }
+
+# the message NAMES THE ARGUMENT COUNT the caller got wrong
+out=$($SCHEME '(let ((e hl--config-errors)) (if (pair? e) (car e) ""))')
+[[ "$out" == *"argument"* ]] || { echo "the arity banner does not state the count (got [$out])"; exit 1; }
+[[ "$out" == *"0 argument"* ]] || { echo "the arity banner does not say the procedure is zero-ary (got [$out])"; exit 1; }
+
+# and the BANNER names the file, which is what makes it actionable — the
+# message arrives from a file pulled in by the config, not from the config
+overlay=$($SCHEME '(begin (hl--c-error-overlay "") #t)' 2>&1)
+out=$($SCHEME '(let ((e hl--config-errors)) (if (pair? e) (car e) ""))')
+[[ "$out" == *"cfg-arity-broken.scm"* ]] || { echo "the arity banner does not name the file (got [$out])"; exit 1; }
+
+# put it back
+sed -i '$ d' "$REAL"
+sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' "$REAL"
+rm -f "$ARITY"
+out=""
+for _ in $(seq 1 20); do
+  out=$($SCHEME '(length hl--config-errors)')
+  [[ "$out" == "0" ]] && break
+  sleep 0.5
+done
+[[ "$out" == "0" ]] || { echo "the config did not come back clean after the arity test (hl--config-errors=$out)"; exit 1; }

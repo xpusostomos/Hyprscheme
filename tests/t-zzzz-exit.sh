@@ -49,6 +49,14 @@ log_clean() {
   # reason — a duplicate C++ watcher — so the count here is worth reading rather
   # than assuming.)
   intended="$intended|^\[scheme\] error: .*\.scm:.*unexpected end of input while searching for: \)$"
+  # t-config's deliberate ARITY error — a file loaded via hl-load-config calling a
+  # one-argument helper with no arguments, which is how Chris's real bindings.scm
+  # failed. Its message is the thing under test there (that the banner now states
+  # the argument COUNT and names the FILE), so the line is asked for. It appears
+  # twice: once from the load that fails, and once from the reload the file
+  # watcher triggers when the test appends the hl-load-config line. The message
+  # is the arity one Guile builds, which begins exactly like this.
+  intended="$intended|^\[scheme\] error: Wrong number of arguments"
   local unexpected
   unexpected=$(grep '^\[scheme\] error:' "$log" | grep -vE "$intended")
   if [[ -n $unexpected ]]; then

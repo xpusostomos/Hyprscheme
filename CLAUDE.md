@@ -808,6 +808,48 @@ old printer** — they printed `["Unrecognized keyword"]`, which is the bug.
 identifies the problem is somewhere else in the condition — go and find it
 rather than assuming the message is self-contained.**
 
+**TWO MORE CONDITIONS THAT DROP THEIR SUBJECT, and the same rule applied to
+each.** Both were found by Chris reporting the *message* rather than the bug: a
+900-line config raising something unreadable.
+
+- **`wrong-number-of-args`** — the message ends in a `~A` for a procedure that is
+  printed as an ADDRESS, `#<procedure 7f2fa7966280 at ice-9/eval.scm:330:13 ()>`,
+  naming a file and line in **Guile's own evaluator** and nothing of the config.
+  The PROCEDURE is in the irritants, and `procedure-arguments` answers its lambda
+  list as data — so the count can be stated: *"Wrong number of arguments (the
+  procedure takes 0 arguments)"*. For the real bug (a `(lambda ()` where a
+  `(lambda (w) ...)` was wanted) **the count IS the diagnosis.** Two traps in
+  getting there: `procedure-arguments` lives in `(ice-9 session)` and is unbound
+  without it — and the first version answered `#f` on any raise, which is right
+  for a reporter and also **how it hid its own missing import**; it logs a
+  failure in itself now. And the arity branch must come **before** the general
+  format branch, because its message DOES contain a `~A`.
+- **A `syntax-error` from a macro that did not match** — "source expression
+  failed to match any pattern", with the LOCATION in the irritants as an alist
+  (`(filename . …) (line . …) (column . …)`). `hl--syntax-error-where` renders
+  it. A `define-keymap` clause list written without its own parens fails
+  *balanced*, which is why no reader check catches it.
+
+**A BACKTRACE EXISTS ONLY BEFORE THE UNWIND, and the frames that matter have no
+source.** Measured on 3.0.11: a post-unwind handler — which is what `guard` is —
+sees only its own frames, so `hl--load-config` and `hl-load` each catch with an
+explicit `catch` purely to stash `(make-stack #t)` and then **re-raise**, leaving
+error handling untouched. Two things about `make-stack`: its second argument is a
+DEPTH LIMIT that answers `#f` when exceeded (`(make-stack #t 4)` is `#f`, not
+"four frames"), and a file loaded form-by-form reports **no source at all** —
+`frame-source` is `#f` — so a renderer reading only frame-source prints an empty
+backtrace. What identifies a config's file is a `primitive-load` frame whose
+**argument** is the path; for a nested load the order is inner, then outer, so
+the FIRST is the file to open. `eval.scm`/`boot-9.scm`/`psyntax.scm` frames are
+dropped: a wall of evaluator frames is what makes a raw backtrace unreadable.
+
+**AND THE ERROR SAYS WHICH FILE.** Each entry in `hl--config-errors` carries its
+file (`"...  [cfg-broken.scm (loaded)]"`). A config is MANY files — this tree's
+own `bindings.scm` pulls in others — so "your config has errors" with nothing to
+open is the complaint, and the overlay alone is not enough. `t-config` asserts
+both halves and **each was verified to fail alone**: neutering the count fails
+the count assertion, neutering the file fails the file assertion.
+
 **AN ERROR IS NOT JUST A LOG LINE — and the split is the compositor's own.**
 Errors went only to stderr, and the compositor log does not carry `[scheme]`
 lines in every session (measured: zero in a live one), so a raising bind thunk
@@ -1112,6 +1154,24 @@ that `fullscreen-handler` was one of them. Neither was true:
     submap itself (`SUBMAP_BEFORE == currentSubmap()`), and it still fires when
     the action RAISED, because `hl::call1` contains the error before
     `invokeBind` reaches its reset check.
+- **`define-keymap` LIVES IN `emacs-keymaps`, NOT IN `bind`, and takes SEQUENCES.**
+  It used to be in `bind.scm` and bind each clause with `hl-make-bind`, which
+  takes ONE CHORD — so the form meant for TOP-LEVEL keymaps could not express the
+  ordinary case, a set of `C-x` chords. It now goes through `define-key!`, which
+  walks a sequence and builds the prefix submaps (with their own `s-G` and
+  catchall). That is what forces the module move: `define-key!` and
+  `hl--expand`→`hl-key-description` are the emacs layer's, and a family imports
+  only the kernel and core. Two shape points that are Chris's call, not taste:
+  **`#:submap` is a keyword defaulting to `""`** (so a top-level map omits it)
+  and **the clauses are ONE LIST**, in an extra pair of parens — varargs cannot
+  be held in a variable, spliced, or built in a loop. The disarm runs LAST, so it
+  covers the prefix binds too.
+- **`define-key!` forwards bind options**, and the spelling that works is
+  `#:key (top-level #t) #:allow-other-keys #:rest opts` — NOT `#:key K #:rest R`,
+  which RAISES on any unrecognised keyword (measured on 3.0.11; the general rule
+  in "API conventions" is about the common case and does not cover this one).
+  With `#:allow-other-keys` the rest arg captures the extra pairs AND re-captures
+  the recognised ones, so `#:top-level` has to be filtered out before forwarding.
 - Binds validate exclusivity (long-press/release vs repeat conflicts)
   at the Scheme level; hyprland does not.
 - Documentation: every public function is a plain `define` whose body

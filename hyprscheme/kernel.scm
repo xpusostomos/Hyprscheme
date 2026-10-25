@@ -177,6 +177,9 @@
            hl--layout-window-close hl--layout-window-open
            hl--keyword-error-name hl--now-ms hl--plist-cdr hl--plist-get
            hl--plist-has? hl--print-exception
+           hl--arity-error-proc hl--arity-description hl--arity-sentence
+           hl--syntax-error-where
+           hl--stack-lines hl--stack-text hl--stack-config-frame
            hl--already-reported? hl--config-errors hl--loaded-files
            hl--notify-error hl--reported hl--ready hl--report
            hl--load-config hl--report-config hl--report-config-ok hl--report-watchdog
@@ -189,6 +192,7 @@
            hl-event-rtd hl-rule-rtd hl-timer-rtd))
 
 (use-modules (ice-9 exceptions)   ; guard, make-exception, exception-* accessors
+             (ice-9 session)      ; procedure-arguments — the arity in an error message
              (rnrs io ports)      ; call-with-string-output-port
              (rnrs lists)         ; exists, for-all — configs and tests use them
              (srfi srfi-1)        ; any, every, cons*, filter
@@ -280,19 +284,186 @@
          (let ((data (last args)))
            (and (pair? data) (keyword? (car data)) (car data))))))
 
+;; THE OTHER CONDITION THAT DROPS ITS SUBJECT, and the one that cost a real
+;; debugging session. `wrong-number-of-args` says only "Wrong number of
+;; arguments" — for THIS condition the irritants hold the procedure that was
+;; called with the wrong count, and nothing else:
+;;
+;;   (#f "Wrong number of arguments to ~A" (#<procedure 7f2f... at ice-9/eval.scm:330:13 ()>) #f)
+;;
+;; So the rendered message is "Wrong number of arguments to #<procedure
+;; 7f2fa7966280 at ice-9/eval.scm:330:13 ()>" — an ADDRESS, and a file and line
+;; in GUILE'S OWN EVALUATOR, and nothing at all about the config. Chris reported
+;; exactly this shape from a 900-line bindings.scm and it took a whole custom
+;; diagnostic to find the line, because the one surface built to tell him
+;; (the banner) named nothing.
+;;
+;; THE PROCEDURE KNOWS MORE THAN ITS ADDRESS. `procedure-arguments` answers the
+;; lambda list as data, so the count the caller got wrong can be stated — "takes
+;; exactly 0 arguments" — and that is the fact that identifies the bug: a
+;; `(lambda ()` used where a window argument was wanted is zero-ary, and the
+;; message saying ZERO is the difference between reading the file and guessing.
+;;
+;; Answers #f for anything else, so the caller uses it as a cond test the same
+;; way hl--keyword-error-name is used.
+(define (hl--arity-error-proc e)
+  (let ((irr (guard (e2 (#t '())) (exception-irritants e))))
+    (and (pair? irr) (procedure? (car irr)) (car irr))))
+
+(define (hl--arity-description p)
+  "How many arguments P takes, as a phrase — the part the message leaves out.
+Reads procedure-arguments, whose shape is an alist.
+
+A FAILURE HERE IS LOGGED, not swallowed. The first version of this answered #f
+on any raise, which read as safe for a reporter and was not: procedure-arguments
+lives in (ice-9 session) and was not imported, so the branch silently degraded to
+the old unhelpful message and said nothing about why. A reporter that hides its
+own failure is the one thing an error reporter must not be, and the test for the
+count is what caught it."
+  (let ((args (guard (e2 (#t
+                          (display "[scheme] error: hl--arity-description: " (current-error-port))
+                          (hl--print-exception e2 (current-error-port))
+                          (newline (current-error-port))
+                          #f))
+                (procedure-arguments p))))
+    (and (pair? args)
+         (let ((req (assq-ref args 'required))
+               (opt (assq-ref args 'optional))
+               (rest (assq-ref args 'rest)))
+           (cond ((and (not rest) (null? opt))
+                  (format #f "~a argument~a" (length req) (if (= 1 (length req)) "" "s")))
+                 (rest "a variable number of arguments")
+                 (else (format #f "~a to ~a arguments"
+                               (length req) (+ (length req) (length opt)))))))))
+
+;; A BACKTRACE, from a stack captured BEFORE the unwind. This is the other half
+;; of the same complaint: the banner showed the message and nothing about WHERE.
+;;
+;; CAPTURED BEFORE, because the stack is gone by the time a guard runs: measured
+;; on Guile 3.0.11, a post-unwind handler sees only its own frames, while a
+;; pre-unwind handler sees the config's — so hl--report-config installs one to
+;; stash the stack and this renders it. (make-stack's second argument is a DEPTH
+;; LIMIT that answers #f when exceeded, not "how many frames": (make-stack #t 4)
+;; is #f, which is why an early version of this looked impossible.)
+;;
+;; ONLY THE FRAMES THAT NAME A FILE, and of those only the ones that are NOT
+;; Guile's own machinery. The rest is the reader and the evaluator — eval.scm,
+;; boot-9.scm, psyntax.scm — and a wall of those is what makes a raw backtrace
+;; unreadable. What is left is the config's own call path, innermost first.
+;;
+;; A CONFIG FILE'S PATH COMES FROM THE FRAME'S ARGUMENTS, NOT ITS SOURCE, and
+;; that is the non-obvious part. The frames of the file being loaded report NO
+;; source at all — `frame-source` is #f for them, because the file is loaded form
+;; by form and never compiled — so a renderer that only read frame-source (as the
+;; first version of this did) found the config's own frames invisible and printed
+;; an empty backtrace. What identifies them is a `primitive-load` frame whose
+;; argument IS the path. Measured: for a nested load the order is inner, then
+;; outer, so the FIRST such frame is the innermost file — which is the one to
+;; open.
+(define (hl--stack-lines st)
+  (if (not st)
+      '()
+      (let loop ((i 0) (acc '()))
+        (if (>= i (stack-length st))
+            (reverse acc)
+            (let* ((f (stack-ref st i))
+                   (src (guard (e (#t #f)) (frame-source f)))
+                   (proc (guard (e (#t #f)) (frame-procedure-name f)))
+                   (args (guard (e (#t #f)) (frame-arguments f))))
+              (loop (+ i 1)
+                    (cond
+                      ;; a load frame: the path it was asked to load
+                      ((and (eq? proc 'primitive-load) (pair? args) (string? (car args)))
+                       (let ((base (basename (car args))))
+                         ;; our own tooling and the machinery's own entry points
+                         ;; are not part of the config's call path
+                         (if (member base '("init.scm"))
+                             acc
+                             (cons (format #f "  ~a (loaded)" base) acc))))
+                      ;; a compiled frame: file:line, when it has one
+                      ((and (pair? src) (string? (caddr src)))
+                       (let* ((path (caddr src))
+                              (base (basename path)))
+                         (if (member base '("eval.scm" "boot-9.scm" "psyntax.scm"
+                                            "exceptions.scm" "session.scm"))
+                             acc
+                             (cons (if proc
+                                       (format #f "  ~a:~a (~a)" base (cadddr src) proc)
+                                       (format #f "  ~a:~a" base (cadddr src)))
+                                   acc))))
+                      (else acc))))))))
+
+;; Render the captured stack into at most MAX lines, innermost first, so a
+;; runaway config cannot build a banner taller than the screen. Answers '()
+;; when there is nothing to show, which is the ordinary case for an error raised
+;; outside a config load (a callback, the watchdog) — those have no captured
+;; stack and their report is the message alone, as before.
+(define (hl--stack-text st max)
+  (let ((lines (hl--stack-lines st)))
+    (if (null? lines)
+        '()
+        (let loop ((l lines) (n max) (acc '()))
+          (cond ((null? l) (reverse acc))
+                ((= n 0) (reverse (cons "  ... more" acc)))
+                (else (loop (cdr l) (- n 1) (cons (car l) acc))))))))
+
 (define (hl--print-exception e port)
   (if (string? e)
       (display e port)
       (let ((msg (guard (e2 (#t #f)) (exception-message e)))
             (irr (guard (e2 (#t #f)) (exception-irritants e))))
         (cond ((not (string? msg)) (format port "~s" e))
+              ;; THE ARITY BRANCH COMES FIRST, before the general format one,
+              ;; because its message DOES contain a ~A: "Wrong number of
+              ;; arguments to ~A" would otherwise be formatted into the
+              ;; procedure's ADDRESS, which is the unhelpful rendering this
+              ;; branch exists to replace.
+              ((hl--arity-error-proc e)
+               => (lambda (p)
+                    (let ((n (hl--arity-description p)))
+                      (format port "~a~a" (hl--arity-sentence msg)
+                              (if n (format #f " (the procedure takes ~a)" n) "")))))
               ((and (pair? irr) (string-index msg #\~))
                (guard (e3 (#t (display msg port)))
                  (apply simple-format port msg irr)))
               ;; the keyword the message cannot carry — see above
               ((hl--keyword-error-name e)
                => (lambda (kw) (format port "~a: ~a" msg kw)))
-              (else (display msg port))))))
+              (else
+               ;; THE SAME LESSON AS THE KEYWORD, one condition further on. A
+               ;; macro that fails to match raises `syntax-error' with the
+               ;; message "source expression failed to match any pattern" and
+               ;; the LOCATION in its irritants — (filename . ...) (line . ...)
+               ;; (column . ...). Rendering the message alone says the call did
+               ;; not match and nothing about where, which is the difference
+               ;; between opening the file at line 166 and reading 900 lines to
+               ;; find it. A stale define-keymap call written the old way fails
+               ;; here, and the LINE is the whole answer.
+               (let ((where (guard (e4 (#t #f)) (hl--syntax-error-where irr))))
+                 (if where
+                     (format port "~a (~a)" msg where)
+                     (display msg port))))))))
+
+(define (hl--syntax-error-where irr)
+  "The \"file:line:col\" in a syntax-error's irritants as a string, or #f.
+The irritants are an alist of (filename . P) (line . N) (column . N), which is
+how Guile reports a read or macro-expansion failure — the location is the part
+a reader needs and the message never carries it."
+  (and (pair? irr) (list? irr)
+       (let ((file (assq-ref irr 'filename))
+             (line (assq-ref irr 'line))
+             (col (assq-ref irr 'column)))
+         (and (string? file) line
+              (format #f "~a:~a~a" (basename file) line
+                      (if col (format #f ":~a" col) ""))))))
+
+(define (hl--arity-sentence msg)
+  "Guile's arity message ends in a ~A for the procedure it names, and we have
+not printed the procedure — so drop the dangling placeholder. A message that
+does not end that way is left alone."
+  (if (string-suffix? "to ~A" msg)
+      (string-drop-right msg 5)
+      msg))
 
 ;; ---- reporting an error to the user -------------------------------------------
 ;; An error used to go ONLY to stderr, and that is nearly invisible: the
@@ -382,35 +553,63 @@
 ;; file is worse than no banner.
 (define hl--config-errors '())
 
-(define (hl--report-config e)
-  (display "[scheme] error: " (current-error-port))
-  (hl--print-exception e (current-error-port))
-  (newline (current-error-port))
-  (guard (e2 (#t #f))
-    (let ((text (call-with-string-output-port (lambda (p) (hl--print-exception e p)))))
-      (set! hl--config-errors
-        (if (member text hl--config-errors) hl--config-errors
-            (cons text hl--config-errors)))
-      ;; CAPPED LIKE THE COMPOSITOR'S OWN (which stops at ~15 lines), so a config
-      ;; that fails on every form cannot build a banner taller than the screen.
-      ;; hl--config-errors is NEWEST FIRST, so the newest 12 are its first 12 —
-      ;; taking from the reversed list would show the OLDEST and read backwards.
-      ;; "... more" goes LAST, where the truncated tail is.
-      ;;
-      ;; Counted with a loop rather than `take`, which ERRORS when asked for more
-      ;; elements than the list has — so a config with three errors would have
-      ;; crashed the banner that was trying to report it.
-      (let* ((newest (let loop ((l hl--config-errors) (n 12) (acc '()))
-                       (if (or (null? l) (= n 0)) (reverse acc)
-                           (loop (cdr l) (- n 1) (cons (car l) acc)))))
-             (truncated? (> (length hl--config-errors) 12))
-             (lines (reverse newest))
-             (body (string-append "Your scheme config has errors:\n"
-                                  (string-join
-                                    (if truncated? (append lines (list "... more")) lines)
-                                    "\n"))))
-        (hl--c-error-overlay body))))
-  #f)
+(define (hl--stack-config-frame st)
+  "The innermost frame in ST that names a file the config itself is in — a
+\"file:line\" string, or #f. Guile's own machinery is skipped for the same reason
+hl--stack-lines skips it: eval.scm and boot-9.scm are never what you open. The
+CONFIG's files are whatever is left, and the innermost is the one the error is
+in — which for a file pulled in by hl-load-config is that file and not the top
+one, exactly what a reader needs."
+  (let ((lines (hl--stack-lines st)))
+    (and (pair? lines) (car lines))))
+
+(define (hl--report-config e . stack-opt)
+  (let ((stack (if (pair? stack-opt) (car stack-opt) #f)))
+    (display "[scheme] error: " (current-error-port))
+    (hl--print-exception e (current-error-port))
+    (newline (current-error-port))
+    ;; THE BACKTRACE GOES TO THE LOG, not to the banner, and that split is
+    ;; deliberate: the banner is CAPTIONED — it is read at a glance to tell you
+    ;; the config is broken — while the log line is where you go to find out
+    ;; where. So the stack is written here in full (up to a sane cap) and the
+    ;; banner keeps its one line per error.
+    (for-each (lambda (l) (display l (current-error-port)) (newline (current-error-port)))
+              (hl--stack-text stack 20))
+    (guard (e2 (#t #f))
+      (let* ((where (hl--stack-config-frame stack))
+             ;; THE FILE GOES ON THE ERROR ITSELF, not only on the banner's
+             ;; caption. hl--config-errors is the record of what went wrong and
+             ;; it is read per line — by the test for it, and by anything else
+             ;; that wants to say where — so a message with no file in it is a
+             ;; message that cannot be acted on. A config is MANY files (this
+             ;; tree's own bindings.scm pulls in others), and "your config has
+             ;; errors" with nothing to open is the complaint that started this.
+             (text (string-append
+                     (call-with-string-output-port (lambda (p) (hl--print-exception e p)))
+                     (if where (format #f "  [~a]" where) ""))))
+        (set! hl--config-errors
+          (if (member text hl--config-errors) hl--config-errors
+              (cons text hl--config-errors)))
+        ;; CAPPED LIKE THE COMPOSITOR'S OWN (which stops at ~15 lines), so a config
+        ;; that fails on every form cannot build a banner taller than the screen.
+        ;; hl--config-errors is NEWEST FIRST, so the newest 12 are its first 12 —
+        ;; taking from the reversed list would show the OLDEST and read backwards.
+        ;; "... more" goes LAST, where the truncated tail is.
+        ;;
+        ;; Counted with a loop rather than `take`, which ERRORS when asked for more
+        ;; elements than the list has — so a config with three errors would have
+        ;; crashed the banner that was trying to report it.
+        (let* ((newest (let loop ((l hl--config-errors) (n 12) (acc '()))
+                         (if (or (null? l) (= n 0)) (reverse acc)
+                             (loop (cdr l) (- n 1) (cons (car l) acc)))))
+               (truncated? (> (length hl--config-errors) 12))
+               (lines (reverse newest))
+               (body (string-append "Your scheme config has errors:\n"
+                                    (string-join
+                                      (if truncated? (append lines (list "... more")) lines)
+                                      "\n"))))
+          (hl--c-error-overlay body))))
+    #f))
 
 ;; a config load finished with NOTHING recorded: take the banner down.
 ;; The host calls this only when hl--load-config answered #t, and that now means
@@ -473,11 +672,30 @@
 ;; (Guile's primitive-load returns #<unspecified> on success, which is TRUTHY but
 ;; not #t. Returning a real boolean is what the host's scm_is_true asks for and
 ;; what a reader expects.)
+;;
+;; THE BACKTRACE IS CAPTURED IN A PRE-UNWIND HANDLER, and that is the only place
+;; it exists. Measured on Guile 3.0.11: a post-unwind handler — which is what
+;; `guard` is — sees only its own frames, because the stack has already been torn
+;; down, while a pre-unwind handler sees the config's. So the throw is caught with
+;; an explicit `catch` purely to stash the stack, and RE-RAISED so the guard below
+;; still does its job on the same condition. Nothing about the error handling
+;; changes; the stack is a side-channel.
+;;
+;; (make-stack's second argument is a DEPTH LIMIT that answers #f when exceeded,
+;; NOT "how many frames to keep" — (make-stack #t 4) is #f. The tree's own
+;; tools/form-trace.scm was written around that trap.)
 (define (hl--load-config path)
   (set! hl--config-errors '())
-  (guard (e (#t (hl--report-config e)))
-    (primitive-load path))
-  (null? hl--config-errors))
+  (let ((stack #f))
+    (guard (e (#t (hl--report-config e stack)))
+      (catch #t
+        (lambda () (primitive-load path))
+        (lambda (key . args) (apply throw key args))
+        (lambda (key . args)
+          (unless stack
+            (set! stack (guard (e2 (#t #f)) (make-stack #t))))
+          #f)))
+    (null? hl--config-errors)))
 
 ;; ---- wall clock --------------------------------------------------------------
 ;; Milliseconds since the epoch, used for the watchdog's budget (a wall-clock

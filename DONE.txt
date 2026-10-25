@@ -1679,6 +1679,132 @@ PASS 3 of 3.
   design document and is not scanned by doc-audit, so it was left as written
   rather than rewritten; the wiki is the current statement.
 
+== define-keymap TOOK SEQUENCES; the banner NAMES THE FAILURE ==
+
+Two things Chris asked for, and both had the same shape: the machinery could do
+something the code did not expose, and the error you got instead named nothing.
+
+--- 1. define-keymap could not bind a SEQUENCE, which is what it is for ---
+
+Chris's bindings.scm is built out of `C-x` chords — emacs' own shape — and it
+could not be written with the form meant for that shape:
+
+  (define-keymap ekeys-map ""
+    ((hl-kbd "C-x C-s") (lambda () ...)))     ; refused
+
+define-keymap bound each clause with hl-make-bind, which takes ONE CHORD, so any
+two-key clause died with "tokens must be a list of key-name strings ... it is a
+SEQUENCE". The message was accurate and useless: it named a workaround
+(global-set-key!) rather than the fact that the form you are already using is the
+one that should work.
+
+IT NOW GOES THROUGH define-key!, which WALKS the sequence: builds the "C-x"
+prefix submap, binds the key that enters it, and gives that submap its own s-G
+and catchall. So a chord and a sequence are written identically and the config
+never does prefix bookkeeping. The disarm runs LAST, after the last clause, so
+it covers the prefix binds too.
+
+THAT FORCED A MOVE. define-key! is (hyprscheme emacs-keymaps)'s, and the submap
+names come from hl--expand -> hl-key-description, that module's own key layer —
+so define-keymap cannot live in (hyprscheme bind) any more: a FAMILY imports only
+the kernel and core, and module-audit enforces it. bind.scm keeps a note saying
+where it went and why; nothing else moved, because a keymap is still a bundle of
+binds, which bind.scm owns.
+
+TWO MORE SHAPE CHANGES, both Chris's call:
+
+  - `#:submap` is a KEYWORD defaulting to "", so a top-level map omits it:
+      (define-keymap browser-map (((hl-kbd "C-l") (lambda () (reload)))))
+    It was a positional argument, which meant writing "" every time for the
+    common case.
+  - THE CLAUSES ARE ONE LIST, in an extra pair of parens. That is what lets a
+    config hold them in a variable, splice two sets, or build them in a loop —
+    none of which a varargs form can do, since only literal forms may appear
+    there.
+
+define-key! ALSO FORWARDS BIND OPTIONS now (#:description, #:repeat, ...), to the
+bind the sequence ENDS on. It absorbs #:top-level itself, so the forwarding has
+to strip that one keyword — and the spelling that works is
+`#:key (top-level #t) #:allow-other-keys #:rest opts`, NOT `#:key K #:rest R`:
+measured on 3.0.11 the latter RAISES on any unrecognised keyword, while with
+#:allow-other-keys present it captures, and then re-captures the recognised ones
+too, which is why the filter exists. (CLAUDE.md's "#:key #:rest, full stop" rule
+is about the common case; this is the case it does not cover.)
+
+- TESTED: t-keymap.sh gained seven assertions — a sequence's action landing in
+  the "C-x" submap, exactly ONE bind reaching the top map, a chord and a sequence
+  coexisting, the disarm reaching the prefix bind, #:submap naming the map, and
+  an option arriving on the bind. run.sh 21/21.
+- Docs: keymaps.md and emacs-keymaps.md rewritten for the new shape; every
+  define-keymap example in the wiki updated (doc-exercise evaluates them all, so
+  a stale one fails the suite). API.snapshot unchanged in kind — the name moved
+  module, which api-check reports as an addition, and additions pass by design.
+
+--- 2. An error now names the FILE and states the ARITY ---
+
+Chris, verbatim: "when my bindings.scm has an error ... 'wrong number of
+arguments to procedure at ice-9/eval.scm 330.13' ... that error isn't very
+helpful, and is it possible to get a full stack trace or something". It sent him
+through a 900-line file by hand, and the banner — the one surface built to tell
+him — named nothing.
+
+TWO THINGS WERE MISSING, and both are knowable at the point of the raise:
+
+  - THE COUNT. `wrong-number-of-args` carries the PROCEDURE in its irritants,
+    and procedure-arguments answers its lambda list as data — so the message can
+    say what the callee takes: "Wrong number of arguments (the procedure takes 0
+    arguments)". For the real bug — a `(lambda ()` written where a `(lambda (w)
+    ...)` was wanted — the count IS the diagnosis.
+    (procedure-arguments needs (ice-9 session), which the kernel did not import.
+    The first version answered #f on any raise, which is how a reporter must
+    behave and also how it hid its own bug; it now LOGS a failure in itself
+    rather than degrading silently. The test for the count is what caught it.)
+  - WHERE. A backtrace exists only BEFORE the unwind — measured: a post-unwind
+    guard sees its own frames and nothing else. So hl--load-config and hl-load
+    each stash one from a pre-unwind handler and RE-RAISE, leaving the error
+    handling itself untouched. Each recorded error now carries its file
+    ("...  [cfg-arity-broken.scm (loaded)]"), and the log gets the same plus a
+    filtered frame list.
+
+THE FRAMES THAT MATTER ARE NOT THE ONES WITH A FILE, which is the non-obvious
+part and cost two wrong versions: a file loaded form-by-form reports NO source
+at all (frame-source is #f), so a renderer reading only frame-source printed an
+empty backtrace. What identifies a config's frame is a `primitive-load` frame
+whose ARGUMENT is the path — measured for a nested load the order is inner then
+outer, so the FIRST is the file to open. eval.scm/boot-9.scm/psyntax.scm are
+dropped, because a wall of evaluator frames is what makes a raw backtrace
+unreadable.
+
+- TESTED and verified to fail BOTH WAYS, independently: t-config.sh loads a file
+  whose helper takes no arguments and is called with one, then asserts the banner
+  states "0 argument" and names the file. Neutering only the count fails the
+  first; neutering only the file fails the second; each was run and each failed
+  the right assertion alone. t-zzzz-exit's allowance list gained the arity line
+  (it appears twice — the failing load, and the reload the watcher triggers).
+- Docs: core.md's errors section now says what an error names.
+- tools/form-trace.scm (untracked scratch, kept for now) was the bisector this
+  was diagnosed with; making it trustworthy was most of the work, and its two
+  traps are recorded in it: a stub must answer a NUMBER where the machinery
+  compares numerically (0 for a status code, 1 for a magnitude — answering #f
+  FAKED two failures that were not the config's), and a comparison can be
+  THROUGH A PARAMETER, so a gsubr passed as a value to a helper that tests its
+  own argument is invisible to a scan of call sites (core.scm's
+  hl--window-rule-mk).
+
+--- 3. And the config that started it, diagnosed ---
+
+Chris's bindings.scm fails for three separate reasons, and the tool above is
+what separated them:
+
+  - TWO TYPOS, the arity error he actually saw: (lambda () ...) where the body
+    uses `w`, at lines 264 and 554 — hl-keymap-attach-to-window-condition!
+    checks (procedure? ...) and then calls the condition with the focused
+    window, so a zero-argument lambda is accepted and then mis-called.
+  - FORM 15 and every ekeys clause: the define-keymap sequence bug, now fixed in
+    the machinery, so no config change is needed for those.
+A corrected copy is left for him at /tmp/hs-bindings-fix/ — ~/.config/ is
+NEVER edited from here, per the standing rule.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.

@@ -95,34 +95,84 @@ ok  '(let* ((k1 (hl-make-keymap #:submap "km-one"))
 # ---- define-keymap: a top-level keymap, born DISABLED ----------------------
 # It is the one form that KNOWS it is building a top-level keymap, so it is the
 # one form that disarms what it made.
-ok  '(begin (define-keymap t-top-map "")
-              (hl-keymap? t-top-map))'
-val '(begin (define-keymap t-top-map2 "")
+#
+# The clauses are given as ONE LIST, in an extra pair of parens, and #:submap is
+# a keyword defaulting to "". Both are load-bearing: the list is what lets a
+# config hold its clauses in a variable and hand them over, and the default is
+# what lets the common case — a top-level map in the default map — say nothing.
+ok  '(begin (define-keymap t-top-map (((hl-kbd "s-<F21>") (lambda () #f))))
+            (hl-keymap? t-top-map))'
+val '(begin (define-keymap t-top-map2 (((hl-kbd "s-<F22>") (lambda () #f))))
             (hl-keymap-submap t-top-map2))' '""'
-val '(begin (define-keymap t-top-map3 ""
-              ((hl-kbd "s-<F21>") (lambda () #f))
-              ((hl-kbd "s-<F22>") (lambda () #f)))
+val '(begin (define-keymap t-top-map3
+              (((hl-kbd "s-<F23>") (lambda () #f))
+               ((hl-kbd "s-<F24>") (lambda () #f))))
             (length (hl-keymap-binds t-top-map3)))' '2'
+# #:submap places the binds, named
+val '(begin (define-keymap t-top-map4 #:submap "t-sub"
+              (((hl-kbd "s-<F25>") (lambda () #f))))
+            (hl-keymap-submap t-top-map4))' '"t-sub"'
 # born disabled, so a mode does not arm itself the moment the config is read
-ok  '(begin (define-keymap t-mode-map "t-mode"
-              ((hl-kbd "s-<F23>") (lambda () #f)))
+ok  '(begin (define-keymap t-mode-map #:submap "t-mode"
+              (((hl-kbd "s-<F26>") (lambda () #f))))
             (not (hl-bind-enabled? (car (hl-keymap-binds t-mode-map)))))'
 # and its binds carry the named submap it was given
-ok  '(begin (define-keymap t-mode-map2 "t-mode2"
-              ((hl-kbd "s-<F24>") (lambda () #f)))
+ok  '(begin (define-keymap t-mode-map2 #:submap "t-mode2"
+              (((hl-kbd "s-<F27>") (lambda () #f))))
             (hl-submap-activate! "t-mode2")
             (let ((r (string=? (hl-current-submap) "t-mode2")))
               (hl-submap-exit!)
               (for-each hl-unbind! (hl-keymap-binds t-mode-map2))
               r))'
 # arming it makes its binds live
-ok  '(begin (define-keymap t-mode-map3 "t-mode3"
-              ((hl-kbd "s-<F25>") (lambda () #f)))
+ok  '(begin (define-keymap t-mode-map3 #:submap "t-mode3"
+              (((hl-kbd "s-<F28>") (lambda () #f))))
             (hl-keymap-enable! t-mode-map3)
             (let ((on (hl-bind-enabled? (car (hl-keymap-binds t-mode-map3)))))
               (hl-keymap-disable! t-mode-map3)
               (for-each hl-unbind! (hl-keymap-binds t-mode-map3))
               on))'
+
+# ---- define-keymap takes SEQUENCES, which is what it is for ------------------
+# A clause's KEYS is whatever hl-kbd returns: a chord, or a LIST OF CHORDS for a
+# sequence. This is the whole reason the macro goes through define-key! rather
+# than hl-make-bind — a sequence has to be walked, the "C-x" prefix submap built
+# and the key that enters it bound. Until this worked, a top-level keymap made of
+# C-x chords — the ordinary emacs shape, and what bindings.scm is — could not be
+# written with the form meant for it at all.
+# the action lands in the PREFIX submap, not the top one
+val '(begin (define-keymap t-seq-map (((hl-kbd "C-x C-s") (lambda () #f))))
+            (hl-keymap-submap (hl-keymap-child t-seq-map "C-x")))' '"C-x"'
+# ONE bind in the top map: the key that enters "C-x"
+val '(begin (define-keymap t-seq-map2 (((hl-kbd "C-x C-s") (lambda () #f))))
+            (length (hl-keymap-binds t-seq-map2)))' '1'
+# a chord and a sequence in the same map both work, and the sequence still
+# contributes exactly its one ENTRY bind to the top map
+val '(begin (define-keymap t-seq-map3
+              (((hl-kbd "s-<F29>") (lambda () #f))
+               ((hl-kbd "C-x C-f") (lambda () #f))))
+            (length (hl-keymap-binds t-seq-map3)))' '2'
+# born disabled THROUGH the chain: the prefix bind define-key! added is disarmed
+# too, because the disarm runs last and covers everything the map holds
+ok  '(begin (define-keymap t-seq-map4 (((hl-kbd "C-x C-k") (lambda () #f))))
+            (not (hl-bind-enabled?
+                   (car (hl-keymap-binds t-seq-map4)))))'
+# and a bind option still reaches the bind it was written on. #:description is
+# the one to test with because hl-make-bind takes it and would REJECT it if
+# define-key! failed to forward the option list — which is the real risk here:
+# define-key! consumes #:top-level itself, so the forwarding has to strip that
+# one keyword and pass the rest through. A clause that loads at all proves the
+# options were not mangled into something hl-make-bind refuses.
+ok  '(begin (define-keymap t-opt-map
+              (((hl-kbd "s-<F30>") (lambda () #f) #:description "described")))
+            (hl-keymap? t-opt-map))'
+# the option really did reach the bind: ask the bind's own description through
+# the internal accessor, since no public one exists (a bind's fields are for the
+# machinery, not for a config to read)
+ok  '(begin (define-keymap t-opt-map2
+              (((hl-kbd "s-<F32>") (lambda () #f) #:description "described")))
+            (string=? "described"
+                      (hl--bind-description (car (hl-keymap-binds t-opt-map2)))))'
 
 # ---- the enabled flag: what the keymap was last TOLD -------------------------
 # A keymap records whether it was last armed or disarmed, so a caller can ask
@@ -140,8 +190,8 @@ ok  '(let ((km (hl-make-keymap)))
             (hl-keymap-enabled? km)))'
 # it cannot disagree with the binds, because enable!/disable! are its only
 # writers — and define-keymap's map is born DISARMED, so the flag says so
-ok  '(begin (define-keymap t-flag-map "t-flag"
-              ((hl-kbd "s-<F26>") (lambda () #f)))
+ok  '(begin (define-keymap t-flag-map #:submap "t-flag"
+              (((hl-kbd "s-<F31>") (lambda () #f))))
             (let ((r (and (not (hl-keymap-enabled? t-flag-map))
                           (not (hl-bind-enabled? (car (hl-keymap-binds t-flag-map)))))))
               (for-each hl-unbind! (hl-keymap-binds t-flag-map))
