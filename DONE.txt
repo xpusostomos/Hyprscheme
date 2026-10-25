@@ -2165,34 +2165,44 @@ hl-rule-enabled-set! on an already-armed rule is also self-defeating. The test n
 asserts what restore actually promises — the mode is on, through the same path a
 live arm takes, hook included. The precedence half is already pinned separately.
 
-== define-mode DROPS A TRAILING "-mode" FROM THE NAME ==
+== define-mode TAKES THE MODE'S NAME as its first argument ==
 
 Chris's convention: "every mode in my bindings.scm should have the variable named
 something-mode". That needs the facility to distinguish the VARIABLE (a Scheme
 binding) from the NAME (the mode's identity — its state file, its chip label, the
-word a notification shows). Without the strip, (define-mode ekeys-mode …) would
-name the mode "ekeys-mode", giving a state file hyprscheme/ekeys-mode and a chip
-reading EKEYS-MODE.
+word a notification shows):
 
-The strip is a suffix match, applied once and only to the name:
-ekeys-mode -> ekeys, scratch -> scratch, a-mode-mode -> a-mode, and mode-thing is
-UNTOUCHED because it does not END in it. The binding keeps the whole symbol, which
-is the half that must not be renamed.
+  (define-mode ekeys-mode "ekeys" #:color #xffffa500)
 
-The suffix test lives in hl--mode-name-from-symbol rather than in the macro,
-because syntax-rules cannot call string-suffix? — so the one piece of judgement is
-in a function that is testable on its own, and the macro keeps its shape.
+So define-mode takes TWO arguments — the variable to bind, then the name, exactly
+as make-mode takes the name — and the two are never derived from each other.
 
-SIX new assertions pin the transformation and its edges. VERIFIED TO FAIL: with
-the strip removed, four of them trip (including the one asserting the name reaches
-the state file, which is the externally visible half).
+MY FIRST VERSION GOT THIS WRONG and Chris caught it twice ("didn't I say that the
+first argument to make-mode should be a string name?" then "what the fuck are you
+doing, define-mode still doesn't take a name"). I had kept the old one-argument
+macro and inferred the name by STRIPPING A TRAILING "-mode" off the variable,
+which is a guess where a statement belongs: it silently renamed anything that
+happened to end in those five characters, and no mode whose variable and name
+differed in any OTHER way could be written at all. The whole helper
+(hl--mode-name-from-symbol), its suffix tests and the wiki's "a trailing -mode is
+dropped" section are DELETED. The macro is now the one line it should have been:
 
-bindings3.scm: all five mode variables renamed (ekeys-mode, nkeys-mode, mark-mode,
-scratch-mode, emacs-mode) — 16 call sites plus the definitions. One was missed on
-the first pass and found by the harness rather than by reading: sync-layer-modes'
-(cons scratch …) / (cons emacs …) list, which my "exclude comment lines" grep had
-filtered out. The nested compositor reported "Unbound variable: scratch"; after
-the fix the run is clean.
+  (define-syntax define-mode
+    (syntax-rules ()
+      ((_ var name opts ...)
+       (define var (make-mode name opts ...)))))
+
+SIX assertions pin the two-argument form, and they are stronger than the suffix
+tests were because they can express things the old shape made impossible: the
+name used EXACTLY as given (no stripping from it), a name with no relation to the
+variable at all ("something-else-entirely"), the name reaching the state file
+(which is what a bar chip's label comes from), and a symbol name accepted as well
+as a string. VERIFIED TO FAIL: with the macro ignoring its name argument and using
+the variable, four of them trip.
+
+bindings3.scm: all five modes now pass their name explicitly — ekeys-mode "ekeys",
+nkeys-mode "nkeys", mark-mode "mark", scratch-mode "scratch", emacs-mode "emacs".
+The variable rename to *-mode stands; only the name-inference was wrong.
 
 == SCRATCH AND EMACS BECOME MODES; the layer tokens are gone ==
 

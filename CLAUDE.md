@@ -1240,15 +1240,15 @@ that `fullscreen-handler` was one of them. Neither was true:
   because a keymap condition is evaluated **when the focused window changes and at
   no other time**. It does the whole of "a mode changed": flag, hook, state file,
   notification, colour rules, recheck.
-- **`define-mode` DROPS A TRAILING `-mode` FROM THE NAME**, and the distinction is
-  the point: the VARIABLE is a Scheme binding, the NAME is the mode's identity
-  (its state file, its chip label, the word a notification shows). Chris's
-  convention is that every mode variable is `something-mode`, so
-  `(define-mode ekeys-mode …)` gives a mode called `ekeys` — state file
-  `hyprscheme/ekeys`, chip `EKEYS`. The strip is a suffix match applied once
-  (`a-mode-mode` → `a-mode`; `mode-thing` untouched, it does not END in it), and
-  it lives in `hl--mode-name-from-symbol` rather than in the macro because
-  `syntax-rules` cannot call `string-suffix?`.
+- **`define-mode` TAKES TWO ARGUMENTS — the variable, then the NAME.** The two are
+  different things and must not be derived from each other: the variable is a
+  Scheme binding a config names for what it is (`ekeys-mode`), the name is the
+  mode's identity (its state file, its chip label, the word a notification shows).
+  `(define-mode ekeys-mode "ekeys" #:color #xffffa500)`. `make-mode` takes the
+  name alone and binds nothing. **Do not infer the name from the variable** — an
+  earlier version stripped a trailing `-mode` off the variable, which is a guess
+  where a statement belongs and makes a name unrelated to the variable
+  unexpressible. Chris rejected it twice.
 - **A MODE WITH NO `#:color` CREATES NO RULE** — `make-mode` guards on
   `(and color (hl-window-rule-add! …))`. So "no colour" is exactly "no border
   change", and a mode whose only job is to switch keys or open a layer needs no

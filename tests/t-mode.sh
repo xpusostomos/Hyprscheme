@@ -19,8 +19,9 @@ err() { out=$($SCHEME "$1" 2>&1); [[ "$out" == *"$2"* ]] || { echo "FAIL (want e
 ok  '(hl-mode? (make-mode "m-basic"))'
 ok  '(not (hl-mode? 5))'
 val '(mode-name (make-mode "m-basic"))' '"m-basic"'
-# a symbol name is accepted and normalised to a string — (define-mode x …) passes
-# a symbol, and the name is also the state file's basename, so it has to be one
+# a symbol name is accepted and normalised to a string — (define-mode x 'y …)
+# passes a symbol, and the name is also the state file's basename, so it has to
+# be usable as one
 val '(mode-name (make-mode (quote m-sym)))' '"m-sym"'
 # a mode is born OFF: arming one as a side effect of the config being READ is the
 # trap hl-make-keymap and define-keymap both avoid
@@ -152,39 +153,38 @@ ok  '(let ((m (make-mode "m-recheck2")))
        ;; and turning it OFF disarms the map again, in the same call
        (not (hl-keymap-enabled? km2)))'
 
-# ---- define-mode binds AND registers ----------------------------------------
-# The syntax-rule form: the name it binds is the mode, so a config writes its
-# modes as definitions rather than as a make-mode call plus a set!.
-ok  '(begin (define-mode t-defined #:color #xffffa500)
-            (and (hl-mode? t-defined)
-                 (string=? (mode-name t-defined) "t-defined")
-                 (= (mode-color t-defined) #xffffa500)))'
-ok  '(begin (define-mode t-defined2)
+# ---- define-mode TAKES THE NAME, and binds the variable ---------------------
+# TWO ARGUMENTS, and that is the point: the VARIABLE is a Scheme binding a config
+# names for what it is (`ekeys-mode`), while the NAME is the mode's identity —
+# its state file, its chip label, the word a notification shows. `make-mode`
+# takes the name; `define-mode` takes the name too, and additionally binds it.
+#
+# An earlier version inferred the name by stripping a "-mode" suffix from the
+# variable. That was a guess where a statement belongs: it silently renamed
+# anything ending in those characters, and no mode whose variable and name
+# differed in any OTHER way could be written at all.
+ok  '(begin (define-mode t-var-mode "t-name" #:color #xffffa500)
+            (and (hl-mode? t-var-mode)
+                 (string=? (mode-name t-var-mode) "t-name")
+                 (= (mode-color t-var-mode) #xffffa500)))'
+# The name is used EXACTLY as given — no suffix is stripped from it, so the
+# variable and the name are genuinely independent.
+ok  '(begin (define-mode t-x-mode "t-name-mode")
+            (string=? (mode-name t-x-mode) "t-name-mode"))'
+# …and a name that has nothing to do with the variable is fine too, which is the
+# case the suffix rule made impossible.
+ok  '(begin (define-mode t-anything "something-else-entirely")
+            (string=? (mode-name t-anything) "something-else-entirely"))'
+# The name is what reaches the STATE FILE, which is the externally visible half —
+# a bar chip's label comes from that filename.
+ok  '(begin (define-mode t-filed "chip-label" #:color #xffffa500)
+            (string-suffix? "/chip-label" (mode-file t-filed)))'
+# A symbol name is accepted, so the name can be written the same way a make-mode
+# name is: a config may use either spelling.
+ok  '(begin (define-mode t-sym-name (quote t-sym))
+            (string=? (mode-name t-sym-name) "t-sym"))'
+ok  '(begin (define-mode t-defined2 "t-defined2")
             (not (mode-active? t-defined2)))'
-
-# ---- define-mode STRIPS A TRAILING "-mode" FROM THE NAME ---------------------
-# The VARIABLE is a Scheme binding; the NAME is the mode's identity — its state
-# file, its chip, the word a notification shows. A config writes `ekeys-mode` so
-# its variables say what they are, and gets a mode called `ekeys`, so the chip
-# reads EKEYS and not EKEYS-MODE.
-ok  '(begin (define-mode t-suffix-mode)
-            (string=? (mode-name t-suffix-mode) "t-suffix"))'
-# The binding keeps the full symbol — that is the half that must NOT be renamed.
-ok  '(begin (define-mode t-keeps-mode)
-            (and (hl-mode? t-keeps-mode)
-                 (string=? (mode-name t-keeps-mode) "t-keeps")))'
-# No suffix, no strip: the name is used as written.
-ok  '(begin (define-mode t-plain)
-            (string=? (mode-name t-plain) "t-plain"))'
-# Only the SUFFIX, and only once. A name that merely CONTAINS "mode" keeps it.
-ok  '(begin (define-mode t-mode-thing)
-            (string=? (mode-name t-mode-thing) "t-mode-thing"))'
-ok  '(begin (define-mode t-a-mode-mode)
-            (string=? (mode-name t-a-mode-mode) "t-a-mode"))'
-# The stripped name is what reaches the STATE FILE, which is the externally
-# visible half — the chip label comes from the filename.
-ok  '(begin (define-mode t-file-mode #:color #xffffa500)
-            (string-suffix? "/t-file" (mode-file t-file-mode)))'
 
 # ---- restore across a reload -------------------------------------------------
 # A reload throws the generation away and the config's define-mode forms run
@@ -278,7 +278,8 @@ ok  '(begin
 # from its activate would otherwise come back lit with its keys doing nothing.
 ok  '(begin
        (define r-hook-ran #f)
-       (define-mode t-restore-hook #:activate (lambda (m) (set! r-hook-ran #t)))
+       (define-mode t-restore-hook "t-restore-hook"
+                    #:activate (lambda (m) (set! r-hook-ran #t)))
        (mode-active-set! t-restore-hook #t)
        (mode-active-set! t-restore-hook #f)
        (call-with-output-file (mode-file t-restore-hook)
@@ -318,7 +319,8 @@ ok  '(begin
 # failed intermittently under the extra load, naming the topology rather than
 # anything here.
 ok  '(begin (for-each (lambda (m) (when (mode-active? m) (mode-active-set! m #f)))
-                      (list t-defined t-defined2 t-restore-hook
+                      (list t-var-mode t-x-mode t-anything t-filed t-sym-name
+                            t-defined2 t-restore-hook
                             m-restore-on m-restore-off m-restore-count
                             m-restore-rule m-restore-nocolor))
             #t)'
