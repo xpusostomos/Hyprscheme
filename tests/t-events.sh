@@ -93,3 +93,52 @@ out=$($SCHEME '(hl-state-ref (quote ev-active))')
 $SCHEME '(let ((w (hl-window-from "class:^ev-active-me$"))) (if w (hl-window-close! w)))' >/dev/null
 sleep 1
 [[ -n "$ws0" ]] && $SCHEME "(hl-workspace-focus! \"$ws0\")" >/dev/null
+
+# ---- workspace.specialActive FIRES FOR SPECIAL WORKSPACES --------------------
+# THE EVENT A BAR CHIP AND A LAYER MODE ACTUALLY NEED, and the two that look
+# obvious are both wrong for it:
+#
+#   workspace.active fires for REGULAR workspaces only. It is emitted from
+#   CMonitor::changeWorkspace (Monitor.cpp:1436) and PlacementController.cpp:228,
+#   and a special workspace goes through neither — it emits
+#   workspace.specialActive instead (Monitor.cpp:63 and :178). So a handler
+#   registered with hl-workspace-active-notification-add! NEVER fires for a
+#   special workspace.
+#
+#   window.active fires only as a SIDE EFFECT of focus moving into or out of the
+#   layer, which is exactly the fragility the old token code had: an EMPTY
+#   special layer in front has no focused window to move focus to.
+#
+# This block therefore opens and closes the layer WITH NO WINDOW IN IT, which is
+# the case the window listener cannot serve at all. Asserted on both directions
+# and on the payload: ws is the workspace on open and #f on close (the
+# compositor crosses nil that way — Event.cpp case 2 — and a handler that cannot
+# tell open from close is not a usable event).
+$SCHEME '(hl-state-set! (quote ev-special) (quote ()))' >/dev/null
+$SCHEME '(hl-workspace-special-active-notification-add! (lambda (ws mon) (hl-state-set! (quote ev-special) (cons (if ws (hl-workspace-name ws) (quote closed)) (hl-state-ref (quote ev-special) (quote ()))))))' >/dev/null
+
+# A fresh name, so nothing can already be showing it, and #:on? #t rather than a
+# toggle so this does not depend on what the previous test left open.
+$SCHEME '(hl-workspace-special-set! "ev-special-probe" #:on? #t)' >/dev/null
+sleep 1
+out=$($SCHEME '(hl-state-ref (quote ev-special))')
+[[ "$out" == *"ev-special-probe"* ]] || { echo "workspace.specialActive: opening a special workspace should deliver its name, got [$out]"; exit 1; }
+
+$SCHEME '(hl-workspace-special-set! "ev-special-probe" #:on? #f)' >/dev/null
+sleep 1
+out=$($SCHEME '(hl-state-ref (quote ev-special))')
+# Newest first, so a CLOSE is the head of the list.
+[[ "${out:0:7}" == "(closed" ]] || { echo "workspace.specialActive: closing should deliver #f, got [$out]"; exit 1; }
+
+# AND THE LISTENER THAT LOOKS RIGHT IS PINNED AS NOT FIRING, so nobody re-wires
+# it. This is the whole reason the block above exists: the wrong listener works
+# often enough to look correct, and only a test that asserts the negative can
+# tell the two apart.
+$SCHEME '(hl-state-set! (quote ev-wsactive) 0)' >/dev/null
+$SCHEME '(hl-workspace-active-notification-add! (lambda (ws) (hl-state-set! (quote ev-wsactive) (+ 1 (hl-state-ref (quote ev-wsactive) 0)))))' >/dev/null
+$SCHEME '(hl-workspace-special-toggle! "ev-special-probe2")' >/dev/null
+sleep 1
+$SCHEME '(hl-workspace-special-set! "ev-special-probe2" #:on? #f)' >/dev/null
+sleep 1
+out=$($SCHEME '(hl-state-ref (quote ev-wsactive))')
+[[ "$out" == "0" ]] || { echo "workspace.active should NOT fire for a special workspace, but fired $out time(s)"; exit 1; }

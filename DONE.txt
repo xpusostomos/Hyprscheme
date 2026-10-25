@@ -2213,9 +2213,9 @@ same thing, a key does something and a mode is visible." Right, and my earlier
 HOOK (step 2 of six), so a mode's activate can open the layer and the key toggles
 the mode. That is exactly the ekeys shape.
 
-  (define-mode scratch-mode #:notify #f
-    #:activate   (lambda (m) (hl-workspace-special-set! "scratchpad" #:on? #t))
-    #:deactivate (lambda (m) (hl-workspace-special-set! "scratchpad" #:on? #f)))
+(define-mode scratch-mode "scratch" #:notify #f
+  #:activate   (lambda (m) (hl-workspace-special-set! "scratchpad" #:on? #t))
+  #:deactivate (lambda (m) (hl-workspace-special-set! "scratchpad" #:on? #f)))
 
 NO #:color, which is the whole of the border question and needed NO API change:
 make-mode guards its rule on the colour — (and color (hl-window-rule-add! …)) —
