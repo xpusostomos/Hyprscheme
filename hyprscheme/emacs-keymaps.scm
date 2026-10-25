@@ -928,10 +928,37 @@ already says."
     (set! hl--modes (append hl--modes (list (cons nm m))))
     m))
 
+;; DEFINE-MODE BINDS `NAME`, AND THE MODE IS CALLED `NAME` WITHOUT A TRAILING
+;; "-mode". The two are deliberately different: the VARIABLE is a Scheme binding
+;; and the NAME is the mode's identity — its state file, its chip, and the word a
+;; notification shows. A config writes `(define-mode ekeys-mode …)` so its
+;; variables say what they are, and gets a mode called `ekeys` — a state file
+;; `hyprscheme/ekeys` and a chip reading EKEYS, not EKEYS-MODE.
+;;
+;; A name that does not end in "-mode" is used as written, so `(define-mode
+;; scratch …)` still gives a mode called `scratch`. The strip only applies to the
+;; suffix, and only once: `ekeys-mode` -> `ekeys`, while `mode-thing` is untouched
+;; (it does not END in it) and `a-mode-mode` -> `a-mode`.
+;;
+;; THE SUFFIX IS DROPPED FROM THE NAME, NEVER FROM THE BINDING, which is the
+;; whole point — renaming the binding would be the user-visible half and the
+;; wrong one.
 (define-syntax define-mode
   (syntax-rules ()
     ((_ name opts ...)
-     (define name (make-mode 'name opts ...)))))
+     (define name (make-mode (hl--mode-name-from-symbol 'name) opts ...)))))
+
+;; The rule above, as a function. String work at EXPANSION time would need the
+;; suffix test inside the macro, and `syntax-rules` cannot run string-suffix? —
+;; so the transform is here, called with the symbol the macro was given. It keeps
+;; the macro's shape (one name, options after it) and puts the one piece of
+;; judgement in a place that is testable on its own.
+(define (hl--mode-name-from-symbol sym)
+  "The mode name for the symbol SYM: SYM as a string, minus a trailing \"-mode\"."
+  (let ((s (symbol->string sym)))
+    (if (string-suffix? "-mode" s)
+        (substring s 0 (- (string-length s) 5))
+        s)))
 
 ;; Which mode's colour should be showing, given the whole list. FIRST
 ;; REGISTERED WINS, which is the precedence rule the design settled on: the walk

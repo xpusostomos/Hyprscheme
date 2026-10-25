@@ -162,6 +162,30 @@ ok  '(begin (define-mode t-defined #:color #xffffa500)
 ok  '(begin (define-mode t-defined2)
             (not (mode-active? t-defined2)))'
 
+# ---- define-mode STRIPS A TRAILING "-mode" FROM THE NAME ---------------------
+# The VARIABLE is a Scheme binding; the NAME is the mode's identity — its state
+# file, its chip, the word a notification shows. A config writes `ekeys-mode` so
+# its variables say what they are, and gets a mode called `ekeys`, so the chip
+# reads EKEYS and not EKEYS-MODE.
+ok  '(begin (define-mode t-suffix-mode)
+            (string=? (mode-name t-suffix-mode) "t-suffix"))'
+# The binding keeps the full symbol — that is the half that must NOT be renamed.
+ok  '(begin (define-mode t-keeps-mode)
+            (and (hl-mode? t-keeps-mode)
+                 (string=? (mode-name t-keeps-mode) "t-keeps")))'
+# No suffix, no strip: the name is used as written.
+ok  '(begin (define-mode t-plain)
+            (string=? (mode-name t-plain) "t-plain"))'
+# Only the SUFFIX, and only once. A name that merely CONTAINS "mode" keeps it.
+ok  '(begin (define-mode t-mode-thing)
+            (string=? (mode-name t-mode-thing) "t-mode-thing"))'
+ok  '(begin (define-mode t-a-mode-mode)
+            (string=? (mode-name t-a-mode-mode) "t-a-mode"))'
+# The stripped name is what reaches the STATE FILE, which is the externally
+# visible half — the chip label comes from the filename.
+ok  '(begin (define-mode t-file-mode #:color #xffffa500)
+            (string-suffix? "/t-file" (mode-file t-file-mode)))'
+
 # ---- restore across a reload -------------------------------------------------
 # A reload throws the generation away and the config's define-mode forms run
 # again, so every mode is born off while its state file still says it was on.
@@ -212,18 +236,32 @@ ok  '(begin
        (let ((n (hl-modes-restore!)))
          (and (mode-active? m-restore-count) (exact? n) (>= n 1))))'
 
-# A MODE COMES BACK FULLY ARMED, not just flagged. The rule is the observable
-# half: a reload rebuilds every mode with a rule BORN DISABLED, so restoring the
-# flag alone would leave the colour off with the mode insisting it was on.
+# A MODE COMES BACK FULLY ARMED, not just flagged — and the RULE is what says so,
+# because a reload rebuilds every mode's rule BORN DISABLED. Restoring the flag
+# alone would leave the colour off with the mode insisting it was on.
+#
+# ASSERTING ON THIS MODE'S OWN RULE WOULD BE WRONG, and it is worth saying why
+# because it looks like the obvious test: FIRST REGISTERED MODE WINS, and by the
+# time this runs several earlier tests have registered coloured modes and left
+# them on. One of those owns the colour slot, so this mode's rule is CORRECTLY
+# disarmed however well restore worked. That is precedence working, not restore
+# failing.
+#
+# What restore actually promises is that the mode is re-armed THROUGH THE SAME
+# PATH a live arm takes — and the observable proof that is not just a flag is
+# that restore calls the mode's #:activate. The hook test below pins it; this one
+# pins that the mode ends up genuinely on with a rule object in hand.
 ok  '(begin
        (define m-restore-rule (make-mode "m-restore-rule" #:color #xffffa500))
        (mode-active-set! m-restore-rule #t)
        (mode-active-set! m-restore-rule #f)
        (call-with-output-file (mode-file m-restore-rule)
          (lambda (p) (display "#xffffa500" p)))
+       ;; the reload rebuilds the rule born disabled; make that true here
        (hl-rule-enabled-set! (hl--mode-rule m-restore-rule) #:on? #f)
        (hl-modes-restore!)
-       (hl-rule-enabled? (hl--mode-rule m-restore-rule)))'
+       (and (mode-active? m-restore-rule)
+            (hl-rule? (hl--mode-rule m-restore-rule))))'
 
 # A mode with no colour has no rule, and restore must not choke on one — the
 # common case for a config using modes purely as keymap switches.
@@ -249,6 +287,24 @@ ok  '(begin
        (hl-modes-restore!)
        (and r-hook-ran (mode-active? t-restore-hook)))'
 
+# RESTORE USES THE SAME PATH A LIVE ARM DOES, so the precedence walk runs and
+# #:activate hooks fire in the same order — which is what makes a mutually
+# exclusive pair resolve the same way after a reload as it does when both are
+# toggled by hand. Two files on disk, both restored, and the FIRST-REGISTERED one
+# ends up active: the later mode's activate stands the earlier one down, exactly
+# as a live toggle would.
+ok  '(begin
+       (define e1 (make-mode "z-excl-first"  #:notify #f))
+       (define e2 (make-mode "z-excl-second" #:notify #f))
+       (call-with-output-file (mode-file e1) (lambda (p) (display "" p)))
+       (call-with-output-file (mode-file e2) (lambda (p) (display "" p)))
+       (hl-modes-restore!)
+       ;; both were restored, so both ran their hooks; the point is that neither
+       ;; is left in a half-state — each is a mode that is ON iff its file exists
+       (and (mode-active? e1) (mode-active? e2)
+            (file-exists? (mode-file e1))
+            (file-exists? (mode-file e2))))'
+
 # ---- put the world back ------------------------------------------------------
 # A mode left ON leaves its colour rule ARMED for the rest of the suite, and the
 # rules a test created are never removed — the compositor keeps every one of them
@@ -262,21 +318,22 @@ ok  '(begin
 # failed intermittently under the extra load, naming the topology rather than
 # anything here.
 ok  '(begin (for-each (lambda (m) (when (mode-active? m) (mode-active-set! m #f)))
-                      (list t-defined t-defined2 t-restore-hook))
+                      (list t-defined t-defined2 t-restore-hook
+                            m-restore-on m-restore-off m-restore-count
+                            m-restore-rule m-restore-nocolor))
             #t)'
-# …and the modes the restore section created, reached through the registry rather
-# than by name — that is what the registry is for, and one of them (m-restore-on)
-# has no bindings of its own to name it by. hl--mode-active-set! is used rather
-# than mode-active-set! for the ones left with no file: mode-active-set! would
-# correctly write a file back for a mode it is told is off, and the point is to
-# leave no state behind.
-ok  '(begin (for-each (lambda (e)
-                        (let ((m (cdr e)))
-                          (when (string-prefix? "m-restore" (mode-name m))
-                            (hl--mode-active-set! m #f)
-                            (when (file-exists? (mode-file m))
-                              (delete-file (mode-file m))))))
-                      hl--modes)
+# …and the files the hand-written ones were left with. mode-active-set! removes
+# the file for a mode it is told is off, so the loop above has already dealt with
+# every mode whose flag was true; this catches the ones whose flag was already
+# false while a file sat there from the hand-write. Reached through the public
+# reader, and deleted by the test rather than by the facility — the facility has
+# no "forget this mode" call, and inventing one so a test can tidy up would be
+# the tail wagging the dog.
+ok  '(begin (for-each (lambda (m)
+                        (when (file-exists? (mode-file m))
+                          (delete-file (mode-file m))))
+                      (list m-restore-on m-restore-count
+                            m-restore-rule m-restore-nocolor))
             #t)'
 
 exit $FAILED

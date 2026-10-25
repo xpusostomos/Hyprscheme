@@ -1233,13 +1233,49 @@ that `fullscreen-handler` was one of them. Neither was true:
   the recognised ones, so `#:top-level` has to be filtered out before forwarding.
 - **MODES live in `emacs-keymaps` too** (`make-mode` / `define-mode`,
   `mode-active?` / `mode-active-set!` / `mode-active-toggle!`, `mode-name`,
-  `mode-color`, `mode-file`). A mode is a named flag with a callback pair, a
-  colour and a state file — and it is HERE because a mode change is nearly always
-  also a **keymap** change: `mode-active-set!` calls `hl-keymaps-recheck!` for
-  you, and that is the line every config forgets, because a keymap condition is
-  evaluated **when the focused window changes and at no other time**. It does the
-  whole of "a mode changed": flag, hook, state file, notification, colour rules,
-  recheck.
+  `mode-color`, `mode-file`, `hl-modes-restore!`). A mode is a named flag with a
+  callback pair, a colour and a state file — and it is HERE because a mode change
+  is nearly always also a **keymap** change: `mode-active-set!` calls
+  `hl-keymaps-recheck!` for you, and that is the line every config forgets,
+  because a keymap condition is evaluated **when the focused window changes and at
+  no other time**. It does the whole of "a mode changed": flag, hook, state file,
+  notification, colour rules, recheck.
+- **`define-mode` DROPS A TRAILING `-mode` FROM THE NAME**, and the distinction is
+  the point: the VARIABLE is a Scheme binding, the NAME is the mode's identity
+  (its state file, its chip label, the word a notification shows). Chris's
+  convention is that every mode variable is `something-mode`, so
+  `(define-mode ekeys-mode …)` gives a mode called `ekeys` — state file
+  `hyprscheme/ekeys`, chip `EKEYS`. The strip is a suffix match applied once
+  (`a-mode-mode` → `a-mode`; `mode-thing` untouched, it does not END in it), and
+  it lives in `hl--mode-name-from-symbol` rather than in the macro because
+  `syntax-rules` cannot call `string-suffix?`.
+- **A MODE WITH NO `#:color` CREATES NO RULE** — `make-mode` guards on
+  `(and color (hl-window-rule-add! …))`. So "no colour" is exactly "no border
+  change", and a mode whose only job is to switch keys or open a layer needs no
+  API change to avoid painting windows.
+- **A MODE'S `#:activate` RUNS THE HOOK, so a mode can DO the thing it is named
+  for** — `scratch` and `emacs` open their special workspace from `#:activate`
+  and the key just toggles the mode. This is why "a mode is set, a layer token is
+  observed" is the wrong way to split them; they are the same shape.
+- **`hl-modes-restore!` RE-ARMS WHAT WAS LIT, AUTOMATICALLY, at the END of a
+  config.** A reload re-runs the config, so every mode is born off while its state
+  file still says otherwise. Restore is unconditional (no `#:restore` flag — a
+  mode that is on should still be on), reads the modes' own files so a config
+  never names a path, and comes back through the same road a live arm takes
+  (hook, colours, recheck). It MUST be last: modes are born off at `define-mode`,
+  and the reset sweep runs before the config is read. **A config must never
+  `file-exists?`/`delete-file` a mode's state file itself** — that makes the
+  config a second writer of facility state and breaks the "off means no file"
+  invariant. (Chris caught exactly that in `bindings3.scm`.)
+- **A MODE'S MEANING IS NOT TIED TO THE RELOAD.** `mark` needs no restore
+  exception: a reload does not change which window has focus, so a mark that was
+  correctly on is still correctly on, and its cancel-on-blur handler is a WINDOW
+  event that fires on the next real focus change regardless.
+- **A FACILITY THAT OBSERVES THE COMPOSITOR MUST GUARD ON CHANGE.**
+  `mode-active-set!` deliberately re-runs hooks even when the state is unchanged,
+  so a sampler that corrects a mode from compositor state needs
+  `(unless (eq? (mode-active? m) observed) …)` — without it, every focus change
+  re-runs the hook. That is the shape of `bindings.scm`'s `sync-layer-modes`.
 - **A MODE'S COLOUR IS A WINDOW RULE, AND THERE IS NO FOCUS LISTENER.** The rule
   is `#:match '((focus . #t))` + `#:border-color`, born disabled. `focus` is a
   real rule property (`RULE_PROP_FOCUS`, a BOOL match engine), and
@@ -1261,7 +1297,11 @@ that `fullscreen-handler` was one of them. Neither was true:
   happened to repaint.
 - **The mode state file is `$XDG_STATE_HOME/hyprscheme/<name>`** — derived from
   the name, not passed — and holds the colour in Scheme hex (`#xffffa500`).
-  NOT under `omarchy/`, which belongs to another program.
+  NOT under `omarchy/`, which belongs to another program. **A bar chip reads
+  this directory rather than a list of modes**: the file names are the labels and
+  the contents are the colours, so nothing has to know how many modes exist. (The
+  Omarchy widget that does this is `../Hyprscheme-qs`, its own repo — it watched
+  `omarchy/indicators/` and five hard-coded names before that.)
 - **`tools/doc-exercise.scm`'s stub scanner must find gsubrs passed AS VALUES.**
   A gsubr handed to a helper that compares its own parameter — core.scm's
   `hl--window-rule-mk` takes `hl--c-window-rule-begin`/`-effect`/`-commit` — is

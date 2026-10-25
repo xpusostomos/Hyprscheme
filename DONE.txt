@@ -2115,6 +2115,129 @@ Docs: emacs-keymaps.md's "The state file" section now says a status bar can list
 that directory — file names for labels, contents for colours — with no mention
 of the shell it happens to be implemented in.
 
+== hl-modes-restore!: a reload re-arms what was lit ==
+
+A reload throws the generation away and the config's define-mode forms run again,
+so EVERY mode is born off while the state files still say what was on. The config
+had been papering over this by hand, and the paper was the problem:
+
+  (guard (e (#t #f))
+    (when (file-exists? (mode-file mark)) (delete-file (mode-file mark))))
+  (when (file-exists? (mode-file ekeys)) (mode-active-set! ekeys #t))
+  (when (file-exists? (mode-file nkeys)) (mode-active-set! nkeys #t))
+
+Chris spotted it: "why is my bindings3.scm referring to the mode-file? that is
+supposed to be internal to the mode system, not for users to fiddle with." Three
+things were wrong — the config had become a SECOND WRITER of state the facility
+owns (it delete-file'd a file the facility then wrote back), it broke the "a mode
+that is off has no file" invariant by clearing mark's file behind the facility's
+back (the guard existed only to swallow the race that created), and the same
+idiom was in emacs-keymaps.md, so it was being TAUGHT.
+
+RESTORE IS AUTOMATIC — no #:restore flag, Chris's call: "restore should be
+automatic." A mode that is on should still be on after a reload, and a per-mode
+opt-in is one more thing to get right in a config that already has to get the
+call site right. It goes at the END of a config, and that is a floor rather than a
+convention: a mode is born off at define-mode (deliberately — see below), and the
+reset sweep runs BEFORE the config is read, so nothing earlier can see a mode yet.
+
+MARK IS NOT AN EXCEPTION, and I had this wrong twice. I proposed keeping the
+special case because "a mark is about a selection that no longer exists after a
+reload". Chris: "A reload has nothing to do with whether the mark is still active.
+if the window loses focus there is a different function in there that ends the
+mark." Correct. A reload does not change which window has focus, so a mark that
+was correctly on is still correctly on, and the cancel-on-blur handler is a WINDOW
+event that fires on the next real focus change, reload or no reload. The old
+config's delete-file was solving a problem that did not exist.
+
+TESTS: five new assertions in t-mode.sh — restore re-arms; a mode with no file is
+left alone ("restore" is not "turn them all on"); it answers how many; the hook
+runs; and precedence resolves the same way a live toggle would. VERIFIED TO FAIL:
+neutering it so it counts files and never arms trips the re-arm and hook tests.
+
+A TEST-SHAPE MISTAKE, worth recording because it looked like a code bug for two
+rounds. My first rule assertion was "after restore, THIS mode's rule is armed".
+It failed, and the cause was not restore: FIRST REGISTERED MODE WINS, and earlier
+tests in the same file leave coloured modes on, so this mode's rule was CORRECTLY
+disarmed by a mode registered before it. The assertion was testing precedence
+while claiming to test restore. A reload being simulated with
+hl-rule-enabled-set! on an already-armed rule is also self-defeating. The test now
+asserts what restore actually promises — the mode is on, through the same path a
+live arm takes, hook included. The precedence half is already pinned separately.
+
+== define-mode DROPS A TRAILING "-mode" FROM THE NAME ==
+
+Chris's convention: "every mode in my bindings.scm should have the variable named
+something-mode". That needs the facility to distinguish the VARIABLE (a Scheme
+binding) from the NAME (the mode's identity — its state file, its chip label, the
+word a notification shows). Without the strip, (define-mode ekeys-mode …) would
+name the mode "ekeys-mode", giving a state file hyprscheme/ekeys-mode and a chip
+reading EKEYS-MODE.
+
+The strip is a suffix match, applied once and only to the name:
+ekeys-mode -> ekeys, scratch -> scratch, a-mode-mode -> a-mode, and mode-thing is
+UNTOUCHED because it does not END in it. The binding keeps the whole symbol, which
+is the half that must not be renamed.
+
+The suffix test lives in hl--mode-name-from-symbol rather than in the macro,
+because syntax-rules cannot call string-suffix? — so the one piece of judgement is
+in a function that is testable on its own, and the macro keeps its shape.
+
+SIX new assertions pin the transformation and its edges. VERIFIED TO FAIL: with
+the strip removed, four of them trip (including the one asserting the name reaches
+the state file, which is the externally visible half).
+
+bindings3.scm: all five mode variables renamed (ekeys-mode, nkeys-mode, mark-mode,
+scratch-mode, emacs-mode) — 16 call sites plus the definitions. One was missed on
+the first pass and found by the harness rather than by reading: sync-layer-modes'
+(cons scratch …) / (cons emacs …) list, which my "exclude comment lines" grep had
+filtered out. The nested compositor reported "Unbound variable: scratch"; after
+the fix the run is clean.
+
+== SCRATCH AND EMACS BECOME MODES; the layer tokens are gone ==
+
+Chris: "nonsense. A key sets ekeys mode. A keys sets nkeys mode. A keys sets
+scratch overlay on, a key sets it off. A key sets emacs workspace on. It's all the
+same thing, a key does something and a mode is visible." Right, and my earlier
+"a mode is set, a token is observed" framing was wrong — mode-active-set! RUNS THE
+HOOK (step 2 of six), so a mode's activate can open the layer and the key toggles
+the mode. That is exactly the ekeys shape.
+
+  (define-mode scratch-mode #:notify #f
+    #:activate   (lambda (m) (hl-workspace-special-set! "scratchpad" #:on? #t))
+    #:deactivate (lambda (m) (hl-workspace-special-set! "scratchpad" #:on? #f)))
+
+NO #:color, which is the whole of the border question and needed NO API change:
+make-mode guards its rule on the colour — (and color (hl-window-rule-add! …)) —
+so a mode with none creates NO rule and paints nothing. Chris: "A mode with no
+color, does not change the border." They had no border before and none now; the
+chip is their entire cue. #:on? is passed explicitly rather than left to toggle,
+because an absent #:on? decides from the LAYER's state while the mode decides from
+its own — stating it means the two can only match.
+
+WHAT SURVIVED FROM THE OLD MACHINERY, and it is the part that was never wrong: a
+layer can close without a key (clicking off it, the last window leaving, focus
+moving to another monitor), so something has to notice. sync-layer-tokens wrote
+token files; sync-layer-modes CORRECTS THE MODE instead, via
+(hl-workspace-visible?) — a sampler, not a memory, as before. THE CHANGE-GUARD IS
+REQUIRED, not an optimisation: mode-active-set! deliberately re-runs hooks even
+when the state does not change, so without (unless (eq? (mode-active? m) shown) …)
+every focus change would re-run scratch's activate and reopen the layer the user
+had just dismissed.
+
+state-dir, sync-state-file, the token paths and toggle-layer are all DELETED —
+omarchy/indicators/ is no longer written by this config at all.
+
+END-TO-END, in a nested compositor with the real config: five modes registered,
+chips rendering EKEYS/NKEYS/MARK/SCRATCH/EMACS (not *-MODE), nkeys carrying its
+colour and emacs/scratch empty (default font), the scratch key opening the layer,
+the layer closing behind the mode's back and the sampler correcting it, and emacs
+surviving a reload. Zero [scheme] errors.
+
+Docs: emacs-keymaps.md gained the -mode convention and a "Coming back after a
+reload" section replacing the hand-rolled (when (file-exists? (mode-file …)) …)
+example — the one that was teaching the anti-pattern.
+
 == OPEN (the short list, also in TODO.txt) ==
 - defun rollout decision: hl-exec! is the sample; converting the rest
   of the API (and defcustom, describe-variable) awaits the user's look.
